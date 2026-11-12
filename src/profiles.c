@@ -1,6 +1,8 @@
 #include "profiles.h"
 
+#ifndef GBADS_ARMGBA
 #include <mgba/core/core.h>
+#endif
 
 #include <pthread.h>
 #include <stdlib.h>
@@ -5181,6 +5183,20 @@ static const char* er_compose(Emu* s, const void* state, uint32_t* out, int w, i
 }
 
 static const MapProfile profiles[] = {
+#ifdef GBADS_TEST_PROFILE
+	/* Not a game's profile: Pokemon Emerald's title screen, where START
+	 * brings up the main menu - for testing captures on a hidden copy
+	 * where no supported game is at hand (3ds/sim, 3ds/test). */
+	{
+		.codes = { "BPEE" },
+		.title = "Capture test",
+		.open = { { K_START, 4 } },
+		.settleMax = 240, .stableFrames = 3, .maxDiff = 300,
+		.crop_x = 0, .crop_y = 0, .crop_w = 240, .crop_h = 160,
+		.probes = { { 2, 2, 0x8C94FF }, { 237, 157, 0x8C94FF }, { 150, 14, 0xFFFFFF } },
+		.tolerance = 8,
+	},
+#endif
 	{
 		.codes = { "A2CE" },
 		.title = "Castlevania: Aria of Sorrow",
@@ -7983,7 +7999,7 @@ bool profile_patch_rom(const MapProfile* p, Emu* e) {
 		for (const RomPatch* r = p->romPatch; r < p->romPatch + 3 && r->addr; ++r) {
 			for (int i = 0; i < r->len; ++i) {
 				if (pass == 0 && emu_read8(e, r->addr + i) != (r->orig ? r->orig[i] : 0xFF)) return false;
-				if (pass == 1) e->core->rawWrite8(e->core, r->addr + i, -1, r->bytes[i]);
+				if (pass == 1) emu_write8(e, r->addr + i, r->bytes[i]);
 			}
 		}
 	}

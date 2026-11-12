@@ -92,6 +92,8 @@ static void code_cache_load(const Config* cfg) {
 	fclose(f);
 }
 
+static bool codeCacheAll;      /* every entry written, not only the ones this scan met (a save part-way) */
+static const Config* scanCfg;  /* (set by scan) */
 static void code_cache_save(const Config* cfg) {
 	bool unused = false;
 	for (int i = 0; i < nCodeCache; ++i) unused |= !codeCache[i].used;
@@ -101,7 +103,7 @@ static void code_cache_save(const Config* cfg) {
 	FILE* f = fopen(path, "w");
 	if (!f) return;
 	for (int i = 0; i < nCodeCache; ++i) {
-		if (codeCache[i].used) fprintf(f, "%lld %lld %s %s\n", codeCache[i].size, codeCache[i].mtime, codeCache[i].code, codeCache[i].path);
+		if (codeCache[i].used || codeCacheAll) fprintf(f, "%lld %lld %s %s\n", codeCache[i].size, codeCache[i].mtime, codeCache[i].code, codeCache[i].path);
 	}
 	fclose(f);
 }
@@ -109,6 +111,9 @@ static void code_cache_save(const Config* cfg) {
 /* The 4-letter game code from the ROM header (offset 0xAC). */
 static bool game_code(const char* path, const struct stat* st, char code[5]) {
 	bool archive = emu_is_archive_name(path);
+#ifdef __3DS__
+	archive = true; /* (every file's code is kept: opening each one on the SD card takes the 3DS a long while) */
+#endif
 	if (archive) {
 		for (int i = 0; i < nCodeCache; ++i) {
 			CodeCache* c = &codeCache[i];
@@ -136,6 +141,18 @@ static bool game_code(const char* path, const struct stat* st, char code[5]) {
 		codeCache = realloc(codeCache, sizeof(*codeCache) * (nCodeCache + 1));
 		codeCache[nCodeCache++] = c;
 		codeCacheDirty = true;
+#ifdef __3DS__
+		/* (kept as it goes: a first reading of a large folder that's cut
+		 * short isn't started over) */
+		static int unsaved;
+		if (++unsaved >= 100 && scanCfg) {
+			unsaved = 0;
+			codeCacheAll = true;
+			code_cache_save(scanCfg);
+			codeCacheAll = false;
+			codeCacheDirty = true;
+		}
+#endif
 	}
 	return true;
 }
@@ -183,11 +200,85 @@ static void strip_tags(char* name) {
 	if (out[0]) strcpy(name, out);
 }
 
+#ifdef __3DS__
+#include "host.h"
+/* Reading a large folder takes the 3DS a while (the first time above all):
+ * how far it is, on both screens, and the system's own events answered. */
+static int scanSeen;
+static Uint32 scanStart;
+static void scan_progress(bool now) {
+	static Uint32 last;
+	Uint32 t = SDL_GetTicks();
+	if (!now && t - last < 250) return;
+	last = t;
+	ui_events();
+	ui_clear();
+	char line[64];
+	snprintf(line, sizeof(line), "Reading games: %d", scanSeen);
+	for (int s = 0; s < nScreens; ++s) {
+		float px = ui_px(s);
+		ui_label(s, screens[s].rect.w / 2, screens[s].rect.h / 2, (int) (px * 6), s == 0 ? "GBA DS" : line, C_GOLD);
+	}
+	ui_present();
+}
+#endif
+
+#ifdef __3DS__
+/* The state folder's list, read once a scan: which games have a patch choice
+ * kept there is answered from it, not by asking the SD card for each game. */
+static HostEntry* stateList;
+static int stateCount;
+
+static bool listed(const HostEntry* list, int count, const char* name) {
+	for (int i = 0; i < count; ++i) {
+		if (!strcasecmp(list[i].name, name)) return true;
+	}
+	return false;
+}
+
+/* Is there a patch file beside this game (its name with a patch's ending)? */
+static bool patch_listed(const HostEntry* list, int count, const char* file) {
+	static const char* const exts[] = { ".ips", ".ups", ".bps" };
+	char name[300];
+	const char* dot = strrchr(file, '.');
+	int stem = dot ? (int) (dot - file) : (int) strlen(file);
+	for (int i = 0; i < 3; ++i) {
+		snprintf(name, sizeof(name), "%.*s%s", stem, file, exts[i]);
+		if (listed(list, count, name)) return true;
+	}
+	return false;
+}
+#endif
+
 static void scan_dir(Config* cfg, const char* d, int depth) {
 	if (dir_seen(d)) {
 		fprintf(stderr, "library: %s already listed\n", d);
 		return;
 	}
+#ifdef __3DS__
+	/* The folder's list in one go, with each file's size (host_read_dir):
+	 * asking the SD card about them one at a time takes the 3DS minutes
+	 * for a large folder. */
+	HostEntry* list = NULL;
+	Uint32 listT = SDL_GetTicks();
+	int count = host_read_dir(d, &list);
+	fprintf(stderr, "library: %s: %d entries listed in %u ms\n", d, count, SDL_GetTicks() - listT);
+	if (count < 0) {
+		if (depth == 0) fprintf(stderr, "library: cannot open %s\n", d);
+		return;
+	}
+	struct dirent entry;
+	struct dirent* de = &entry;
+	for (int li = 0; li < count; ++li) {
+		snprintf(de->d_name, sizeof(de->d_name), "%s", list[li].name);
+		if (de->d_name[0] == '.') continue;
+		char full[1024];
+		snprintf(full, sizeof(full), "%s/%s", d, de->d_name);
+		struct stat st;
+		memset(&st, 0, sizeof(st));
+		st.st_mode = list[li].dir ? S_IFDIR : S_IFREG;
+		st.st_size = (off_t) list[li].size;
+#else
 	DIR* dir = opendir(d);
 	if (!dir) {
 		if (depth == 0) fprintf(stderr, "library: cannot open %s\n", d);
@@ -200,6 +291,7 @@ static void scan_dir(Config* cfg, const char* d, int depth) {
 		snprintf(full, sizeof(full), "%s/%s", d, de->d_name);
 		struct stat st;
 		if (stat(full, &st) != 0) continue;
+#endif
 		if (S_ISDIR(st.st_mode)) {
 			if (depth < 3 && strcasecmp(de->d_name, "images") && strcasecmp(de->d_name, "videos") &&
 			    strcasecmp(de->d_name, "manuals")) {
@@ -212,8 +304,18 @@ static void scan_dir(Config* cfg, const char* d, int depth) {
 		GameEntry g;
 		memset(&g, 0, sizeof(g));
 		snprintf(g.path, sizeof(g.path), "%s", full);
+#ifdef __3DS__
+		++scanSeen;
+		scan_progress(false);
 		if (!game_code(g.path, &st, g.code)) continue;
 		g.supported = profile_find(g.code) != NULL;
+#else
+		if (!game_code(g.path, &st, g.code)) continue;
+		g.supported = profile_find(g.code) != NULL;
+#endif
+#ifdef __3DS__
+		if (!g.supported && !cfg->showAll) continue; /* (before its patches are looked for: more of the SD card) */
+#endif
 		g.size = (long long) st.st_size;
 		g.mtime = (long long) st.st_mtime;
 		{
@@ -221,7 +323,11 @@ static void scan_dir(Config* cfg, const char* d, int depth) {
 			 * folder; their sizes and times (and the choice's) in the key */
 			char pp[1100];
 			struct stat ps;
+#ifdef __3DS__
+			if (patch_listed(list, count, de->d_name) && patch_find(g.path, pp, sizeof(pp)) && stat(pp, &ps) == 0) {
+#else
 			if (patch_find(g.path, pp, sizeof(pp)) && stat(pp, &ps) == 0) {
+#endif
 				snprintf(g.patch, sizeof(g.patch), "%s", patch_name(pp));
 				g.size += (long long) ps.st_size;
 				if ((long long) ps.st_mtime > g.mtime) g.mtime = (long long) ps.st_mtime;
@@ -232,7 +338,15 @@ static void scan_dir(Config* cfg, const char* d, int depth) {
 			char* dot = strrchr(base, '.');
 			if (dot) *dot = 0;
 			snprintf(gpx.patches, sizeof(gpx.patches), "%s/%s.patches", cfg->stateDir, base);
+#ifdef __3DS__
+			{
+				char choice[300];
+				snprintf(choice, sizeof(choice), "%s.patches", base);
+				if (listed(stateList, stateCount, choice)) patch_choice_load(gpx.patches, &g.patchOn);
+			}
+#else
 			patch_choice_load(gpx.patches, &g.patchOn);
+#endif
 			if (g.patchOn.nOn) {
 				char dir[1024], file[1400];
 				patch_folder(cfg, g.path, g.code, dir, sizeof(dir), false);
@@ -267,7 +381,11 @@ static void scan_dir(Config* cfg, const char* d, int depth) {
 		games = realloc(games, sizeof(*games) * (nGames + 1));
 		games[nGames++] = g;
 	}
+#ifdef __3DS__
+	free(list);
+#else
 	closedir(dir);
+#endif
 }
 
 /* The region letter that ends a game code: E USA, J Japan, F France,
@@ -399,6 +517,12 @@ static void rom_crc_save(const Config* cfg) {
  * games: the others have no list of dumps to check it against). */
 static bool game_crc(const GameEntry* g, uint32_t* crc, int* patch) {
 	if (!g->supported) return false;
+#ifdef __3DS__
+	/* Not on the console: it means reading each game whole off the SD card,
+	 * with a second copy of it in memory the game then has no room beside. */
+	(void) crc, (void) patch;
+	return false;
+#endif
 	pthread_mutex_lock(&crcLock);
 	RomCrc* c = rom_crc_find(g->path, g->size, g->mtime);
 	bool have = c != NULL;
@@ -452,7 +576,20 @@ static void scan(Config* cfg) {
 	code_cache_load(cfg);
 	rom_crc_load(cfg);
 	crcCfg = cfg;
+#ifdef __3DS__
+	scanSeen = 0;
+	scanCfg = cfg;
+	scanStart = SDL_GetTicks();
+	scan_progress(true);
+	free(stateList);
+	stateList = NULL;
+	stateCount = host_read_dir(cfg->stateDir, &stateList);
+	if (stateCount < 0) stateCount = 0;
+#endif
 	for (char* d = strtok_r(dirs, ":", &save); d; d = strtok_r(NULL, ":", &save)) scan_dir(cfg, d, 0);
+#ifdef __3DS__
+	fprintf(stderr, "library: %d file(s) read in %u ms\n", scanSeen, SDL_GetTicks() - scanStart);
+#endif
 	code_cache_save(cfg);
 	qsort(games, nGames, sizeof(*games), cmp_games);
 	/* Region flags, only where the library holds the same game from more
@@ -585,7 +722,26 @@ static void draw_preview(Config* cfg, int scr, int sel) {
 		return;
 	}
 	GameEntry* g = &games[sel];
+#ifdef __3DS__
+	{
+		/* The logo and the resume picture are read off the SD card: once the
+		 * selection has rested, so that going down the list doesn't wait for
+		 * each game passed. */
+		static int restSel = -2;
+		static Uint32 restSince;
+		if (sel != restSel) restSel = sel, restSince = SDL_GetTicks();
+		if (sel != thumbFor && SDL_GetTicks() - restSince >= 250) {
+			Uint32 t0 = SDL_GetTicks();
+			load_thumbs(cfg, sel);
+			if (SDL_GetTicks() - t0 > 100) fprintf(stderr, "list: %u ms to read %s's pictures\n", (unsigned) (SDL_GetTicks() - t0), g->code);
+		} else if (sel != thumbFor) {
+			thumbFor = -2;
+			free_thumbs();
+		}
+	}
+#else
 	load_thumbs(cfg, sel);
+#endif
 	if (logoTex[0] || logoTex[1]) {
 		int gameH = headH * 2;
 		int maxW = r.w - ourW - m * 3;
@@ -1616,6 +1772,9 @@ bool library_run(Config* cfg, char* outPath, size_t outSize) {
 	storage_check(cfg);
 	scan(cfg);
 	thumbFor = -2;
+#ifdef __3DS__
+	host_log_checkpoint(); /* (a diagnosis build: the log so far to the network) */
+#endif
 
 	/* reselect the last game played */
 	char lastFile[1100], last[1024] = "";
@@ -1879,6 +2038,9 @@ bool library_run(Config* cfg, char* outPath, size_t outSize) {
 			/* (its own jobs first, and nothing else started meanwhile) */
 			logo_pause(true);
 			logo_front(games[chosen].code, true);
+#ifdef __3DS__
+			logo_drop_other(games[chosen].code);
+#endif
 			if (logo_busy(games[chosen].code) || logo_busy(NULL)) waiting = chosen, chosen = -1;
 		}
 

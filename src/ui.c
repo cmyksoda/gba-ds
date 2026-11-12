@@ -2039,7 +2039,12 @@ void ui_dim(int screen, Uint8 alpha) {
 }
 
 float ui_px(int screen) {
+#ifdef __3DS__
+	/* (240 lines a screen: the unit as it is, 1.25, or nothing fits) */
+	return screens[screen].rect.h / 192.0f;
+#else
 	return SDL_max(2.0f, screens[screen].rect.h / 192.0f);
+#endif
 }
 
 int ui_text_width(const char* s, int px) {
@@ -2155,7 +2160,12 @@ bool ui_load_logo(const Config* c, const char* rom, const char* code, SDL_Textur
 	}
 	/* otherwise the one extracted from the game's own title screen */
 	snprintf(path, sizeof(path), "%s/logos", c->stateDir);
-	mkdirs(path);
+	{
+		/* (once a run: on the 3DS each folder asked after is a wait on the SD card) */
+		static bool made;
+		if (!made) mkdirs(path);
+		made = true;
+	}
 	const MapProfile* prof = profile_find(code);
 	if (prof && prof->logo.rev) {
 		snprintf(path, sizeof(path), "%s/logos/%.4s-r%d.png", c->stateDir, code, prof->logo.rev);
