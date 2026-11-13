@@ -3,6 +3,8 @@
 # mGBA's own 3DS port's toolchain. Run inside the devkitpro/devkitarm image (../Makefile's `libmgba`).
 #
 #   build-libmgba.sh [DEPS]    DEPS/mgba-3ds/build/libmgba.a (DEPS: the repo's deps/ by default)
+# rom-copy-size.patch: a copy of a ROM that a copy of the game writes to (patches, a cartridge clock or
+# rumble) is the ROM's size, not 32 MiB.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 ROOT="$PWD"
@@ -19,6 +21,7 @@ git -C "$SRC" checkout -q -f "$MGBA_COMMIT"
 sed -i -e 's/ COLOR_16_BIT COLOR_5_6_5 FIXED_ROM_BUFFER / /' \
 	-e '/ctru-heap.c/d' "$SRC/src/platform/3ds/CMakeLists.txt"
 grep -q 'COLOR_16_BIT' "$SRC/src/platform/3ds/CMakeLists.txt" && { echo "mGBA's 3DS defines not removed"; exit 1; }
+git -C "$SRC" apply "$ROOT/3ds/mgba/rom-copy-size.patch"
 
 cmake -S "$SRC" -B "$SRC/build" -DCMAKE_TOOLCHAIN_FILE="$SRC/src/platform/3ds/CMakeToolchain.txt" \
 	"${MGBA_OPTS[@]}" -DUSE_LZMA=OFF -DUSE_DEBUGGERS=OFF > "$SRC/build.log"
