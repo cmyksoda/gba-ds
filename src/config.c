@@ -46,8 +46,9 @@ void config_defaults(Config* c) {
 	c->sway = true;
 	c->audioLatency = 64;
 	c->ffSpeed = 3;
-	#ifdef __3DS__
+#ifdef __3DS__
 	c->ffMute = 1;
+	c->tallLive = false; /* (Pinball's live view runs two more copies of the game, two frames each, every frame) */
 #endif
 	c->fastForward = true;
 	c->pinCores = false; /* tried on the RG DS Plus: no better (docs/ANDROID.md) */
