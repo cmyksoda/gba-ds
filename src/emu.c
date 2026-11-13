@@ -345,10 +345,12 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 		if (!vf || !e->core->loadROM(e->core, vf)) {
 			if (vf) vf->close(vf);
 			fprintf(stderr, "could not load the patched ROM %s\n", romPath);
+			emu_close(e); /* (the core too: a logo's job given up part-way goes this way) */
 			return false;
 		}
 	} else if (!load_rom_file(e->core, romPath)) {
 		fprintf(stderr, "could not load ROM %s\n", romPath);
+		emu_close(e);
 		return false;
 	}
 	if (savePath) {
