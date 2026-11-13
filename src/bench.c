@@ -34,7 +34,7 @@ static char jobId[64];
 static Uint64 lastT;
 static struct {
 	int n;
-	double sum, worst, emu, draw;
+	double sum, worst, emu, draw, screen;
 	int busy;
 	uint64_t first;
 } w;
@@ -52,7 +52,7 @@ static void put(const char* line) {
 	if (jobResults) fprintf(jobResults, "%s\n", line);
 }
 
-void bench_frame(uint64_t frame, double emuMs, double drawMs, bool captureBusy) {
+void bench_frame(uint64_t frame, double emuMs, double drawMs, double screenMs, bool captureBusy) {
 	if (!active) return;
 	Uint64 now = SDL_GetPerformanceCounter();
 	if (!lastT) {
@@ -67,11 +67,13 @@ void bench_frame(uint64_t frame, double emuMs, double drawMs, bool captureBusy) 
 	if (ms > w.worst) w.worst = ms;
 	w.emu += emuMs;
 	w.draw += drawMs;
+	w.screen += screenMs;
 	w.busy += captureBusy;
 	if (w.n == WINDOW) {
 		char line[256];
-		snprintf(line, sizeof(line), "bench %s frames %llu-%llu: %.2f ms, worst %.2f, emulating %.2f, drawing %.2f, capture busy %d%%", jobId,
-		         (unsigned long long) w.first, (unsigned long long) frame, w.sum / w.n, w.worst, w.emu / w.n, w.draw / w.n, w.busy * 100 / w.n);
+		snprintf(line, sizeof(line), "bench %s frames %llu-%llu: %.2f ms, worst %.2f, emulating %.2f, drawing %.2f, capture busy %d%%, second screen %.2f",
+		         jobId, (unsigned long long) w.first, (unsigned long long) frame, w.sum / w.n, w.worst, w.emu / w.n, w.draw / w.n,
+		         w.busy * 100 / w.n, w.screen / w.n);
 		put(line);
 		memset(&w, 0, sizeof(w));
 	}
@@ -106,11 +108,15 @@ bool bench_run(Config* cfg) {
 	char* slash = strrchr(dir, '/');
 	if (slash) *slash = 0;
 	else snprintf(dir, sizeof(dir), ".");
-	char saves[600], states[600], path[700], romDir[1024];
+	char saves[sizeof(cfg->saveDir)], states[sizeof(cfg->stateDir)], path[700], romDir[1024];
 	snprintf(romDir, sizeof(romDir), "%s", cfg->romDir);
 	if (strchr(romDir, ':')) *strchr(romDir, ':') = 0; /* (the first of the library's folders) */
-	snprintf(saves, sizeof(saves), "%s/saves", dir);
-	snprintf(states, sizeof(states), "%s/states", dir);
+	if (snprintf(saves, sizeof(saves), "%s/saves", dir) >= (int) sizeof(saves) ||
+	    snprintf(states, sizeof(states), "%s/states", dir) >= (int) sizeof(states)) {
+		fprintf(stderr, "bench: the jobs file's folder name is too long: not started\n");
+		fclose(jobs);
+		return false;
+	}
 	mkdirs(saves);
 	mkdirs(states);
 	if (same_dir(saves, romDir) || same_dir(states, romDir)) {
@@ -126,7 +132,7 @@ bool bench_run(Config* cfg) {
 	rename(resultsPath, path);
 	results = fopen(resultsPath, "w");
 	{
-		char line[256];
+		char line[640];
 		snprintf(line, sizeof(line), "bench start: GBA DS %s, jobs %s", GBADS_VERSION, cfg->bench);
 		put(line);
 	}
@@ -161,7 +167,10 @@ bool bench_run(Config* cfg) {
 			continue;
 		}
 		snprintf(jobId, sizeof(jobId), "%s", f[0]);
-		snprintf(cfg->rom, sizeof(cfg->rom), "%s/%s", romDir, f[1]);
+		if (snprintf(cfg->rom, sizeof(cfg->rom), "%s/%s", romDir, f[1]) >= (int) sizeof(cfg->rom)) {
+			fprintf(stderr, "bench: %s: the ROM's path is too long, skipped\n", f[0]);
+			continue;
+		}
 		/* this job's battery save only, in the bench's own folder: every job starts from a cartridge never played */
 		{
 			char base[512], sav[1200];

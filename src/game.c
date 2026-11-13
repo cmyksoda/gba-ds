@@ -8377,7 +8377,8 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 		}
 		Uint64 drawT1 = SDL_GetPerformanceCounter();
 		drawTicks += drawT1 - drawT0;
-		bench_frame(frameCount, benchEmuMs, (drawT1 - drawT0) * 1000.0 / SDL_GetPerformanceFrequency(), mc && mapcap_busy(mc));
+		bench_frame(frameCount, benchEmuMs, (drawT1 - drawT0) * 1000.0 / SDL_GetPerformanceFrequency(),
+		            (drawT0 - emuT1) * 1000.0 / SDL_GetPerformanceFrequency(), mc && mapcap_busy(mc));
 		{
 			double msPer = 1000.0 / (double) SDL_GetPerformanceFrequency();
 			double total = (double) (drawT1 - workT0) * msPer;
