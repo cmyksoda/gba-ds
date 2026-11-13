@@ -471,6 +471,12 @@ static int count_diff(const uint32_t* a, const uint32_t* b, size_t n, int limit)
 	return d;
 }
 
+/* A frame of the shadow core, drawn only if its picture is looked at after. */
+static void frame_if(Emu* s, uint32_t keys, bool drawn) {
+	if (drawn) emu_frame(s, keys);
+	else emu_frame_blind(s, keys);
+}
+
 static bool map_up(const MapProfile* p, Emu* s) {
 	return memprobes_match(p->mem, 4, s) && screen_matches(p, s->fb);
 }
@@ -495,10 +501,11 @@ static const char* do_capture(MapCapture* mc, const void* state) {
 	if (dbg < 0) dbg = getenv("GBADS_DEBUG") != NULL;
 	struct timespec t0, t1;
 	clock_gettime(CLOCK_MONOTONIC, &t0);
-	unsigned long f0 = mc->shadow.frames;
+	unsigned long f0 = mc->shadow.frames, b0 = mc->shadow.blindFrames;
 	const char* err = do_capture_(mc, state);
 	clock_gettime(CLOCK_MONOTONIC, &t1);
-	if (dbg) fprintf(stderr, "capture: %.0f ms, %lu frames%s%s\n", (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6, mc->shadow.frames - f0,
+	if (dbg) fprintf(stderr, "capture: %.0f ms, %lu frames (%lu drawn)%s%s\n", (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6,
+	                 mc->shadow.frames - f0, (mc->shadow.frames - f0) - (mc->shadow.blindFrames - b0),
 	                 mc->cancel ? ", called off" : err ? ": " : "", mc->cancel ? "" : err ? err : "");
 	return err;
 }
@@ -534,20 +541,21 @@ static const char* do_capture_(MapCapture* mc, const void* state) {
 	}
 	/* (openAlt: the game's other way to the map, from where it's asked for) */
 	const MacroStep* open = p->openAlt[0].frames && memprobes_match(p->openAltIf, 2, s) ? p->openAlt : p->open;
+	/* (the button presses and the waits on memory aren't looked at: they run without drawing) */
 	for (int i = 0; i < 8 && open[i].frames; ++i) {
 		for (int f = 0; f < open[i].frames; ++f) {
-			emu_frame(s, open[i].keys);
+			emu_frame_blind(s, open[i].keys);
 		}
 	}
 	if (p->open2[0].frames) {
 		int limit = p->openWithin ? p->openWithin : p->settleMax;
 		int g = 0;
-		while (g < limit && !memprobes_match(p->mem, 4, s)) emu_frame(s, 0), ++g;
+		while (g < limit && !memprobes_match(p->mem, 4, s)) emu_frame_blind(s, 0), ++g;
 		if (g >= limit) return "map button did nothing";
 		if (memprobes_match(p->open2If, 2, s)) {
-			for (int f = 0; f < p->open2Delay; ++f) emu_frame(s, 0);
+			for (int f = 0; f < p->open2Delay; ++f) emu_frame_blind(s, 0);
 			for (int i = 0; i < 4 && p->open2[i].frames; ++i) {
-				for (int f = 0; f < p->open2[i].frames; ++f) emu_frame(s, p->open2[i].keys);
+				for (int f = 0; f < p->open2[i].frames; ++f) emu_frame_blind(s, p->open2[i].keys);
 			}
 		}
 	}
@@ -562,7 +570,7 @@ static const char* do_capture_(MapCapture* mc, const void* state) {
 			if (presses < p->openTries) {
 				/* ignored for now: press it again */
 				for (int i = 0; i < 8 && open[i].frames; ++i) {
-					for (int g = 0; g < open[i].frames; ++g) emu_frame(s, open[i].keys);
+					for (int g = 0; g < open[i].frames; ++g) emu_frame_blind(s, open[i].keys);
 				}
 				++presses, base = f;
 				continue;
@@ -605,9 +613,7 @@ static const char* do_capture_(MapCapture* mc, const void* state) {
 	mc->workStep = step;
 	bool animated = false;
 	for (int i = 1; i < want; ++i) {
-		for (int k = 0; k < step; ++k) {
-			emu_frame(s, 0);
-		}
+		for (int k = 0; k < step; ++k) frame_if(s, 0, k == step - 1);
 		if (!map_up(p, s)) {
 			break;
 		}
@@ -660,11 +666,14 @@ static bool grab_rate(MapCapture* mc, const void* state) {
 	Emu* s = &mc->shadow;
 	int w = p->rate.w, h = p->rate.h;
 	if ((w + 2) * (h + 2) > 256 * 16 || !emu_state_load(s, state)) return false;
-	emu_frame(s, 0);
+	/* (only the last frame is looked at: the others run without drawing) */
+	int left = 1 + p->rate.wait;
+	for (int i = 0; i < 4 && p->rate.open[i].frames; ++i) left += p->rate.open[i].frames;
+	frame_if(s, 0, --left == 0);
 	for (int i = 0; i < 4 && p->rate.open[i].frames; ++i) {
-		for (int f = 0; f < p->rate.open[i].frames; ++f) emu_frame(s, p->rate.open[i].keys);
+		for (int f = 0; f < p->rate.open[i].frames; ++f) frame_if(s, p->rate.open[i].keys, --left == 0);
 	}
-	for (int f = 0; f < p->rate.wait; ++f) emu_frame(s, 0);
+	for (int f = 0; f < p->rate.wait; ++f) frame_if(s, 0, --left == 0);
 	uint32_t text = to_fb(p->rate.text);
 	/* the digits, plus a 1-pixel outline in the map's background colour */
 	int count = 0;

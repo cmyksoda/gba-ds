@@ -53,6 +53,7 @@ typedef struct Emu {
 	uint32_t fileCrc; /* the ROM file's own CRC32, before the patch */
 	bool audio;
 	unsigned long frames; /* frames run (emu_frame), for timing the captures */
+	unsigned long blindFrames; /* of them, run without drawing (emu_frame_blind) */
 	/* a hidden copy's capture called off (mapcap_cancel): while it's set,
 	 * frames don't run, so whatever the capture waits for gives up at
 	 * once; emu_cancelled says so, so it keeps nothing of that run */

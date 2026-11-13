@@ -420,6 +420,7 @@ void emu_frame(Emu* e, uint32_t keys) {
 void emu_frame_blind(Emu* e, uint32_t keys) {
 	struct GBA* gba = e->core->board;
 	gba->video.frameskipCounter = 1;
+	++e->blindFrames;
 	emu_frame(e, keys);
 	gba->video.frameskipCounter = 0;
 }
