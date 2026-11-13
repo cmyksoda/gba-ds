@@ -651,6 +651,12 @@ static int pow2(int v) {
 
 /* Texel (x, y) of a w-wide texture in the GPU's layout: 8x8 tiles, row by
  * row, Morton order inside a tile; the first row is the picture's top. */
+/* Memory the GPU or the DSP reads, written back from the CPU's cache: by the kernel itself (the GPU and
+ * DSP services only make this same call, a round trip to another process away). */
+static void cache_flush(const void* p, size_t n) {
+	svcFlushProcessDataCache(CUR_PROCESS_HANDLE, (u32) p, n);
+}
+
 static inline u32 tiled(u32 x, u32 y, u32 w) {
 	return ((((y >> 3) * (w >> 3)) + (x >> 3)) << 6) |
 	       ((x & 1) | ((y & 1) << 1) | ((x & 2) << 1) | ((y & 2) << 2) | ((x & 4) << 2) | ((y & 4) << 3));
@@ -685,7 +691,7 @@ SDL_Texture* SDL_CreateTexture(SDL_Renderer* r, Uint32 format, int access, int w
 		ok = C3D_TexInit(&t->tex, (u16) pow2(t->tw), (u16) pow2(t->th), GPU_RGBA8);
 		if (ok) {
 			memset(t->tex.data, 0, t->tex.size);
-			GSPGPU_FlushDataCache(t->tex.data, t->tex.size);
+			cache_flush(t->tex.data, t->tex.size);
 		}
 	}
 	if (!ok) {
@@ -786,7 +792,7 @@ static void tiling_selftest(void) {
 		for (int x = 0; x < 240; ++x) px[y * 240 + x] = (u32) x | (u32) y << 8 | 0x5A0000u | (u32) ((x * 7 + y) & 0xFF) << 24;
 	}
 	update_by_gpu(t, px, 240 * 4);
-	GSPGPU_InvalidateDataCache(t->tex.data, t->tex.size);
+	svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32) t->tex.data, t->tex.size);
 	const u32* got = t->tex.data;
 	int bad = 0, first = -1;
 	for (int y = 0; y < 160; ++y) {
@@ -839,7 +845,7 @@ static bool update_by_gpu(SDL_Texture* t, const void* pixels, int pitch) {
 			for (int x = 0; x < w; ++x) dst[x] = __builtin_bswap32(src[x] | alpha);
 		}
 	}
-	GSPGPU_FlushDataCache(stage, need * 4);
+	cache_flush(stage, need * 4);
 	C3D_SyncDisplayTransfer(stage, GX_BUFFER_DIM(texW, h), (u32*) t->tex.data, GX_BUFFER_DIM(texW, h),
 	                        GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
 	                            GX_TRANSFER_OUT_TILED(1));
@@ -891,7 +897,7 @@ static int update_by_cpu(SDL_Texture* t, const SDL_Rect* rect, const void* pixel
 			out[tiled(tx, ty, texW)] = p;
 		}
 	}
-	GSPGPU_FlushDataCache(t->tex.data, t->tex.size);
+	cache_flush(t->tex.data, t->tex.size);
 	return 0;
 }
 
@@ -959,7 +965,7 @@ static void audio_feed(void) {
 		fifoHead = (fifoHead + n) % FIFO_FRAMES;
 		fifoCount -= n;
 		b->nsamples = n;
-		DSP_FlushDataCache(dst, n * 4);
+		cache_flush(dst, n * 4);
 		ndspChnWaveBufAdd(0, b);
 	}
 }

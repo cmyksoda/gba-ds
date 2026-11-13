@@ -127,6 +127,7 @@ struct start {
 static void start_main(void* p) {
 	struct start s = *(struct start*) p;
 	free(p);
+	logLine("thread %p: running on core %d", (void*) s.fn, (int) svcGetProcessorID());
 	s.fn(s.arg);
 }
 
@@ -140,7 +141,7 @@ int host_pthread_create(pthread_t* thread, const pthread_attr_t* attr, void* (*f
 	svcGetThreadPriority(&priority, CUR_THREAD_HANDLE);
 	Thread t = threadCreate(start_main, s, 256 * 1024, priority + 1, host_side_core(), false);
 	if (!t && host_side_core() != -2) t = threadCreate(start_main, s, 256 * 1024, priority + 1, -2, false);
-	logLine("thread %p: %s", (void*) fn, t ? "made" : "not made");
+	logLine("thread %p: %s (asked for core %d)", (void*) fn, t ? "made" : "not made", host_side_core());
 	host_mem_note("a thread");
 	if (!t) {
 		free(s);
