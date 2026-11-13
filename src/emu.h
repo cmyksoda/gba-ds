@@ -73,6 +73,10 @@ void emu_frame(Emu* e, uint32_t keys);
 /* The same without drawing it (e->fb keeps the last picture): for waits on
  * a hidden copy. */
 void emu_frame_blind(Emu* e, uint32_t keys);
+/* The next game core opened with sound has its picture drawn on a thread of mGBA's (threaded_video). */
+void emu_threaded_video(bool on);
+/* this core's picture is drawn on mGBA's thread */
+bool emu_threaded(const Emu* e);
 /* true while this core's capture has been called off (Emu.cancel) */
 bool emu_cancelled(const Emu* e);
 void emu_reset(Emu* e);

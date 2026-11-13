@@ -3,6 +3,7 @@
 #include <mgba/flags.h>
 #include <mgba/internal/gba/gba.h>
 #include <mgba/internal/gba/renderers/video-software.h>
+#include <mgba/internal/gba/renderers/proxy.h>
 #include <mgba/internal/gba/cheats.h>
 #undef GBA_H
 #include "emu.h"
@@ -313,6 +314,15 @@ void emu_ctr_unload(const struct mCore* core);
 #define load_rom_file mCoreLoadFile
 #endif
 
+static bool threadedVideo;
+void emu_threaded_video(bool on) {
+	threadedVideo = on;
+}
+
+bool emu_threaded(const Emu* e) {
+	return e->core && e->core->videoLogger;
+}
+
 bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 	memset(e, 0, sizeof(*e));
 	mLogSetDefaultLogger(&quietLogger);
@@ -328,6 +338,11 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 	mCoreInitConfig(e->core, NULL);
 	struct mCoreOptions opts = { .useBios = false, .volume = 0x100, .audioBuffers = 1024 };
 	mCoreConfigLoadDefaults(&e->core->config, &opts);
+	if (audio && threadedVideo) {
+		/* (as mGBA's own 3DS port on a New 3DS: the picture drawn a few lines behind the CPU) */
+		mCoreConfigSetIntValue(&e->core->config, "threadedVideo", 1);
+		mCoreConfigSetIntValue(&e->core->config, "threadedVideo.flushScanline", 0);
+	}
 	mCoreLoadConfig(e->core);
 
 	e->fb = calloc(GBA_W * GBA_H, sizeof(uint32_t));
@@ -366,6 +381,7 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 		}
 	}
 	e->core->reset(e->core);
+	if (e->core->videoLogger) fprintf(stderr, "video: the picture drawn on mGBA's own thread\n");
 
 	struct mGameInfo info;
 	memset(&info, 0, sizeof(info));
@@ -407,6 +423,12 @@ void emu_frame(Emu* e, uint32_t keys) {
 	++e->frames;
 	e->core->setKeys(e->core, keys);
 	e->core->runFrame(e->core);
+	if (e->core->videoLogger) {
+		/* (the picture is drawn on mGBA's thread: wait for its last lines) */
+		const void* px;
+		size_t stride;
+		e->core->getPixels(e->core, &px, &stride);
+	}
 	if (!e->audio) {
 		struct mAudioBuffer* ab = e->core->getAudioBuffer(e->core);
 		if (ab) {
@@ -660,6 +682,14 @@ typedef struct {
 static HideSlot hideSlots[8];
 static pthread_mutex_t hideLock = PTHREAD_MUTEX_INITIALIZER;
 
+/* The software renderer: behind mGBA's proxy when the picture is drawn on its thread. */
+static struct GBAVideoRenderer* soft_renderer(Emu* e) {
+	struct GBA* gba = e->core->board;
+	struct GBAVideoRenderer* r = gba->video.renderer;
+	if (r && e->core->videoLogger) r = ((struct GBAVideoProxyRenderer*) r)->backend;
+	return r;
+}
+
 static HideSlot* slot_for(struct GBAVideoRenderer* r) {
 	for (int i = 0; i < 8; ++i) {
 		if (hideSlots[i].renderer == r) return &hideSlots[i];
@@ -694,9 +724,11 @@ static bool hidden(const HideSlot* s, const struct GBAObj* obj) {
  * hidden sprites, and mark it clean so the renderer uses ours. */
 static void filtered_draw_scanline(struct GBAVideoRenderer* renderer, int y) {
 	struct GBAVideoSoftwareRenderer* sw = (struct GBAVideoSoftwareRenderer*) renderer;
+	/* (locked: with mGBA's drawing thread, the rules change on another thread than this one) */
+	pthread_mutex_lock(&hideLock);
 	HideSlot* s = slot_for(renderer);
-	if (!s) return;
-	if ((s->n || s->keepOnly || s->nExact) && sw->oamDirty) {
+	void (*orig)(struct GBAVideoRenderer*, int) = s ? s->orig : NULL;
+	if (s && (s->n || s->keepOnly || s->nExact) && sw->oamDirty) {
 		int n = GBAVideoRendererCleanOAM(sw->d.oam->obj, sw->sprites, sw->objOffsetY);
 		int kept = 0;
 		for (int i = 0; i < n; ++i) {
@@ -705,12 +737,12 @@ static void filtered_draw_scanline(struct GBAVideoRenderer* renderer, int y) {
 		sw->oamMax = kept;
 		sw->oamDirty = false;
 	}
-	s->orig(renderer, y);
+	pthread_mutex_unlock(&hideLock);
+	if (orig) orig(renderer, y);
 }
 
 void emu_hide_exact(Emu* e, const uint16_t (*attrs)[3], int n) {
-	struct GBA* gba = e->core->board;
-	struct GBAVideoRenderer* r = gba->video.renderer;
+	struct GBAVideoRenderer* r = soft_renderer(e);
 	if (!r) return;
 	pthread_mutex_lock(&hideLock);
 	HideSlot* s = slot_for(r);
@@ -725,13 +757,12 @@ void emu_hide_exact(Emu* e, const uint16_t (*attrs)[3], int n) {
 		s->exactKeep = false;
 		if (s->nExact) memcpy(s->exact, attrs, sizeof(*attrs) * s->nExact);
 	}
-	pthread_mutex_unlock(&hideLock);
 	((struct GBAVideoSoftwareRenderer*) r)->oamDirty = true;
+	pthread_mutex_unlock(&hideLock);
 }
 
 void emu_hide_sprites(Emu* e, const SpriteRule* rules, int n) {
-	struct GBA* gba = e->core->board;
-	struct GBAVideoRenderer* r = gba->video.renderer;
+	struct GBAVideoRenderer* r = soft_renderer(e);
 	if (!r) return;
 	pthread_mutex_lock(&hideLock);
 	HideSlot* s = slot_for(r);
@@ -745,8 +776,8 @@ void emu_hide_sprites(Emu* e, const SpriteRule* rules, int n) {
 			r->drawScanline = filtered_draw_scanline;
 		}
 	}
-	pthread_mutex_unlock(&hideLock);
 	((struct GBAVideoSoftwareRenderer*) r)->oamDirty = true;
+	pthread_mutex_unlock(&hideLock);
 }
 
 void emu_layers(Emu* e, unsigned mask) {
@@ -754,9 +785,8 @@ void emu_layers(Emu* e, unsigned mask) {
 }
 
 static void hide_release(Emu* e) {
-	struct GBA* gba = e->core->board;
 	pthread_mutex_lock(&hideLock);
-	HideSlot* s = slot_for(gba->video.renderer);
+	HideSlot* s = slot_for(soft_renderer(e));
 	if (s) memset(s, 0, sizeof(*s));
 	pthread_mutex_unlock(&hideLock);
 }

@@ -827,7 +827,8 @@ static bool ahead_start(uint32_t keys) {
 	if (!ahead.started) {
 		ahead.quit = false;
 #ifdef __3DS__
-		host_next_thread_core(2); /* (the New 3DS's third core: the map capture is on the fourth) */
+		/* (the New 3DS's third core, unless mGBA's drawing thread is there) */
+		host_next_thread_core(emu_threaded(&emu) ? 3 : 2);
 #endif
 		ahead.started = pthread_create(&ahead.thread, NULL, ahead_worker, NULL) == 0;
 	}
@@ -7177,6 +7178,11 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 	game_paths(cfg, rom, &gp);
 	patches_setup(rom); /* GEN-9: the patches folder, what's on, and the plan every core opens the ROM with */
 	profile_set_rom(NULL, 0);
+#ifdef __3DS__
+	emu_threaded_video(cfg->threadedVideo && isNew3ds()); /* (mGBA's drawing thread on the New 3DS's third core) */
+#else
+	emu_threaded_video(cfg->threadedVideo);
+#endif
 	if (!emu_open(&emu, rom, gp.sav, true)) {
 		ui_osd("Couldn't load the game");
 		return fromLibrary ? GAME_TO_LIBRARY : GAME_QUIT_APP;

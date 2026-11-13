@@ -87,7 +87,10 @@ int main(int argc, char** argv) {
 		perror("script");
 		return 1;
 	}
-	if (!emu_open(&emu, argv[1], NULL, false)) {
+	/* GBADS_THREADED_VIDEO=1: the picture drawn on mGBA's thread, as on the 3DS (opened as the game, with sound) */
+	bool threaded = getenv("GBADS_THREADED_VIDEO") != NULL;
+	emu_threaded_video(threaded);
+	if (!emu_open(&emu, argv[1], NULL, threaded)) {
 		return 1;
 	}
 	fprintf(stderr, "game code %s\n", emu.gameCode);

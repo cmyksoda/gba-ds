@@ -49,6 +49,7 @@ void config_defaults(Config* c) {
 #ifdef __3DS__
 	c->ffMute = 1;
 	c->tallLive = false; /* (Pinball's live view runs two more copies of the game, two frames each, every frame) */
+	c->threadedVideo = true;
 #endif
 	c->fastForward = true;
 	c->pinCores = false; /* tried on the RG DS Plus: no better (docs/ANDROID.md) */
@@ -155,6 +156,7 @@ static bool set_option(Config* c, const char* key, const char* val) {
 		return true;
 	}
 	BOOL("match_display", matchDisplay)
+	BOOL("threaded_video", threadedVideo)
 	BOOL("rewind", rewind)
 	INT("rewind_seconds", rewindSeconds)
 	INT("map_interval", mapInterval)
