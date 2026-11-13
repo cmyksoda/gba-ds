@@ -92,6 +92,8 @@ typedef struct SDL_Surface {
 SDL_Surface* SDL_CreateRGBSurfaceWithFormat(Uint32 flags, int w, int h, int depth, Uint32 format);
 SDL_Surface* SDL_CreateRGBSurfaceWithFormatFrom(void* pixels, int w, int h, int depth, int pitch, Uint32 format);
 void SDL_FreeSurface(SDL_Surface* s);
+SDL_Surface* SDL_DuplicateSurface(SDL_Surface* s);
+static inline int SDL_tolower(int c) { return c >= 'A' && c <= 'Z' ? c + 32 : c; }
 static inline int SDL_LockSurface(SDL_Surface* s) { (void) s; return 0; }
 static inline void SDL_UnlockSurface(SDL_Surface* s) { (void) s; }
 Uint32 SDL_MapRGBA(const SDL_PixelFormat* f, Uint8 r, Uint8 g, Uint8 b, Uint8 a);
