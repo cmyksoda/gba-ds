@@ -281,6 +281,8 @@ struct SDL_Texture {
 	SDL_ScaleMode scale;
 	bool linear; /* the filter the GPU texture is set to */
 	Uint8 r, g, b, a;
+	bool streaming; /* updated again and again: tiled by the GPU */
+	u32* stage;     /* its picture in linear memory for the GPU's tiling (its own: transfers queued in a frame run at its end) */
 };
 
 struct SDL_Renderer {
@@ -666,6 +668,7 @@ SDL_Texture* SDL_CreateTexture(SDL_Renderer* r, Uint32 format, int access, int w
 	t->tw = w, t->th = h;
 	while (t->tw > 1024 || t->th > 1024) t->tw = (t->tw + 1) / 2, t->th = (t->th + 1) / 2;
 	t->format = format;
+	t->streaming = access == SDL_TEXTUREACCESS_STREAMING;
 	t->blend = SDL_BLENDMODE_NONE;
 	t->r = t->g = t->b = t->a = 255;
 	bool ok;
@@ -701,6 +704,7 @@ static SDL_Texture* doomed[256];
 static int nDoomed;
 
 static void texture_free(SDL_Texture* t) {
+	if (t->stage) linearFree(t->stage);
 	if (t->target) C3D_RenderTargetDelete(t->target);
 	C3D_TexDelete(&t->tex);
 	free(t);
@@ -753,10 +757,120 @@ int SDL_QueryTexture(SDL_Texture* t, Uint32* format, int* access, int* w, int* h
 	return 0;
 }
 
+static int update_by_cpu(SDL_Texture* t, const SDL_Rect* rect, const void* pixels, int pitch);
+
+/* A whole picture is tiled by the GPU itself (GX_DisplayTransfer): the CPU only copies it into
+ * linear memory in the GPU's byte order, where swizzling it pixel by pixel took several ms a frame.
+ * (TEST: a file "cpu-tiling" in the app's folder turns it off, to compare.) */
+static int gpuTiling = -1;
+
+static bool gpu_tiling(void) {
+	if (gpuTiling < 0) {
+		FILE* f = fopen("/3ds/gba-ds/cpu-tiling", "r");
+		gpuTiling = !f;
+		if (f) fclose(f);
+		logLine("textures: tiled by the %s", gpuTiling ? "GPU" : "CPU");
+	}
+	return gpuTiling;
+}
+
+static bool update_by_gpu(SDL_Texture* t, const void* pixels, int pitch);
+
+/* (TEST: the GPU's tiling against the CPU's, word for word, once) */
+static void tiling_selftest(void) {
+	if (!gpu_tiling()) return;
+	SDL_Texture* t = SDL_CreateTexture(NULL, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, 240, 160);
+	u32* px = malloc(240 * 160 * 4);
+	if (!t || !px) return;
+	for (int y = 0; y < 160; ++y) {
+		for (int x = 0; x < 240; ++x) px[y * 240 + x] = (u32) x | (u32) y << 8 | 0x5A0000u | (u32) ((x * 7 + y) & 0xFF) << 24;
+	}
+	update_by_gpu(t, px, 240 * 4);
+	GSPGPU_InvalidateDataCache(t->tex.data, t->tex.size);
+	const u32* got = t->tex.data;
+	int bad = 0, first = -1;
+	for (int y = 0; y < 160; ++y) {
+		for (int x = 0; x < 240; ++x) {
+			u32 want = __builtin_bswap32(px[y * 240 + x]);
+			if (got[tiled((u32) x, (u32) y, t->tex.width)] != want) {
+				if (first < 0) first = y * 240 + x;
+				++bad;
+			}
+		}
+	}
+	if (first >= 0) {
+		int fx = first % 240, fy = first / 240;
+		logLine("textures: GPU tiling self-test: %d of 38400 texels differ; first (%d,%d) %08lx, wanted %08lx", bad, fx, fy,
+		        (unsigned long) got[tiled((u32) fx, (u32) fy, t->tex.width)], (unsigned long) __builtin_bswap32(px[first]));
+		/* where the first pixel went */
+		u32 w0 = __builtin_bswap32(px[0]);
+		for (u32 i = 0; i < t->tex.width * t->tex.height; ++i) {
+			if (got[i] == w0) {
+				logLine("textures: pixel (0,0) found at texel word %lu", (unsigned long) i);
+				break;
+			}
+		}
+	} else {
+		logLine("textures: GPU tiling self-test: all 38400 texels match the CPU's layout");
+	}
+	free(px);
+	texture_free(t);
+}
+
+static bool update_by_gpu(SDL_Texture* t, const void* pixels, int pitch) {
+	int w = t->w, h = t->h;
+	u32 texW = t->tex.width;
+	if (!gpu_tiling() || !t->streaming || t->tw != w || t->th != h || (w & 7) || (h & 7) || texW < 64) return false;
+	size_t need = (size_t) texW * (size_t) h;
+	if (!t->stage) {
+		t->stage = linearAlloc(need * 4);
+		if (!t->stage) return false;
+		memset(t->stage, 0, need * 4);
+	}
+	u32* stage = t->stage;
+	bool argb = t->format == SDL_PIXELFORMAT_ARGB8888;
+	u32 alpha = t->format == SDL_PIXELFORMAT_XBGR8888 ? 0xFF000000u : 0;
+	for (int y = 0; y < h; ++y) {
+		const Uint32* src = (const Uint32*) ((const Uint8*) pixels + (size_t) y * pitch);
+		u32* dst = stage + (size_t) y * texW;
+		if (argb) {
+			for (int x = 0; x < w; ++x) dst[x] = src[x] << 8 | src[x] >> 24;
+		} else {
+			for (int x = 0; x < w; ++x) dst[x] = __builtin_bswap32(src[x] | alpha);
+		}
+	}
+	GSPGPU_FlushDataCache(stage, need * 4);
+	C3D_SyncDisplayTransfer(stage, GX_BUFFER_DIM(texW, h), (u32*) t->tex.data, GX_BUFFER_DIM(texW, h),
+	                        GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
+	                            GX_TRANSFER_OUT_TILED(1));
+	return true;
+}
+
+/* (TEST: the average time of a whole picture's upload, logged now and then) */
+static u64 upTicks;
+static unsigned upCount;
+
 int SDL_UpdateTexture(SDL_Texture* t, const SDL_Rect* rect, const void* pixels, int pitch) {
 	if (!t || t->target || !pixels) return -1;
 	SDL_Rect whole = { 0, 0, t->w, t->h };
 	if (!rect) rect = &whole;
+	if (rect == &whole || (!rect->x && !rect->y && rect->w == t->w && rect->h == t->h)) {
+		u64 t0 = svcGetSystemTick();
+		bool done = update_by_gpu(t, pixels, pitch);
+		if (!done) done = update_by_cpu(t, rect, pixels, pitch) == 0;
+		if (t->w == 240 && t->h == 160) {
+			upTicks += svcGetSystemTick() - t0;
+			if (++upCount == 600) {
+				logLine("textures: a 240x160 picture's upload %.3f ms on average", (double) upTicks / upCount / CPU_TICKS_PER_MSEC);
+				upTicks = 0, upCount = 0;
+			}
+		}
+		return done ? 0 : -1;
+	}
+	return update_by_cpu(t, rect, pixels, pitch);
+}
+
+static int update_by_cpu(SDL_Texture* t, const SDL_Rect* rect, const void* pixels, int pitch) {
 	u32* out = t->tex.data;
 	u32 texW = t->tex.width;
 	int step = t->w / t->tw + (t->w % t->tw ? 1 : 0); /* 1 unless the picture was too large */
@@ -1375,6 +1489,7 @@ int SDL_Init(Uint32 flags) {
 		ptmuInit();
 		videoUp = true;
 		logLine("start: the GPU is up");
+		tiling_selftest();
 		if (!padThread) pad_start();
 	}
 	if (flags & SDL_INIT_AUDIO) {
