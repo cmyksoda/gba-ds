@@ -334,12 +334,14 @@ static void bench_fetch(const char* dir) {
 	httpcExit();
 }
 
-void host_bench_report(const char* resultsPath) {
-	log_upload(resultsPath, "bench-" GBADS_BENCH_TAG);
+void host_bench_report(const char* path, const char* what) {
+	char name[160];
+	snprintf(name, sizeof(name), "bench-%s-%s", GBADS_BENCH_TAG, what);
+	log_upload(path, name);
 }
 #else
-void host_bench_report(const char* resultsPath) {
-	(void) resultsPath;
+void host_bench_report(const char* path, const char* what) {
+	(void) path, (void) what;
 }
 #endif
 

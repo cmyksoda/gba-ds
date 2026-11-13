@@ -29,6 +29,7 @@ enum { WINDOW = 60 };
 
 static bool active;
 static FILE* results;
+static FILE* jobResults; /* this job's lines alone (job-ID.txt): what a bench build posts after the job */
 static char jobId[64];
 static Uint64 lastT;
 static struct {
@@ -48,6 +49,7 @@ static void put(const char* line) {
 		fprintf(results, "%s\n", line);
 		fflush(results);
 	}
+	if (jobResults) fprintf(jobResults, "%s\n", line);
 }
 
 void bench_frame(uint64_t frame, double emuMs, double drawMs, bool captureBusy) {
@@ -170,6 +172,9 @@ bool bench_run(Config* cfg) {
 			remove(sav);
 		}
 		ui_logo_prepare(cfg, cfg->rom); /* (made before the timing: on the side core it would weigh on the captures) */
+		snprintf(path, sizeof(path), "%s/job-%s.txt", dir, jobId);
+		jobResults = fopen(path, "w");
+		if (jobResults) fprintf(jobResults, "bench start: GBA DS %s, job %s\n", GBADS_VERSION, jobId);
 		snprintf(path, sizeof(path), "%s/%s", dir, f[2]);
 		ui_script_restart(path);
 		cfg->quitAfter = atoi(f[3]);
@@ -189,13 +194,26 @@ bool bench_run(Config* cfg) {
 		snprintf(msg, sizeof(msg), "bench %s done", jobId);
 		put(msg);
 		++done;
+		if (jobResults) fclose(jobResults);
+		jobResults = NULL;
 #ifdef __3DS__
-		host_bench_report(resultsPath); /* (a bench build: the results so far to the PC) */
+		/* (a bench build: this job's results to the PC, on their own: a whole run's are too long to post) */
+		snprintf(path, sizeof(path), "%s/job-%s.txt", dir, jobId);
+		host_bench_report(path, jobId);
 #endif
 	}
 	fclose(jobs);
 	snprintf(msg, sizeof(msg), "bench end: %d job(s)", done);
 	put(msg);
+	snprintf(path, sizeof(path), "%s/end.txt", dir);
+	FILE* endFile = fopen(path, "w");
+	if (endFile) {
+		fprintf(endFile, "bench start: GBA DS %s\n%s\n", GBADS_VERSION, msg);
+		fclose(endFile);
+	}
+#ifdef __3DS__
+	host_bench_report(path, "end");
+#endif
 	if (results) fclose(results);
 	results = NULL;
 	active = false;
