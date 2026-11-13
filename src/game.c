@@ -38,6 +38,9 @@ extern void web_sleep(unsigned ms) __attribute__((import_module("env"), import_n
 #include <sys/syscall.h>
 #include <unistd.h>
 #endif
+#ifdef __3DS__
+#include "host.h"
+#endif
 
 /* Times the game thread was taken off its core (involuntary context
  * switches): another thread got it, so the frame ran late through no work
@@ -823,6 +826,9 @@ static bool ahead_start(uint32_t keys) {
 	pthread_mutex_lock(&ahead.lock);
 	if (!ahead.started) {
 		ahead.quit = false;
+#ifdef __3DS__
+		host_next_thread_core(2); /* (the New 3DS's third core: the map capture is on the fourth) */
+#endif
 		ahead.started = pthread_create(&ahead.thread, NULL, ahead_worker, NULL) == 0;
 	}
 	bool ok = ahead.started;

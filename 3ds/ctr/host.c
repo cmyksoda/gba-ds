@@ -115,6 +115,11 @@ int host_side_core(void) {
 	return isNew3ds() ? 3 : -2;
 }
 
+static int nextCore = -100;
+void host_next_thread_core(int core) {
+	nextCore = core;
+}
+
 /* pthread_create for the app's threads (the build names it in place of the
  * C library's): on the side core, a step below the game, with room on the
  * stack for an emulator. libctru's pthread_t is its Thread, so pthread_join
@@ -139,9 +144,12 @@ int host_pthread_create(pthread_t* thread, const pthread_attr_t* attr, void* (*f
 	s->arg = arg;
 	s32 priority = 0x30;
 	svcGetThreadPriority(&priority, CUR_THREAD_HANDLE);
-	Thread t = threadCreate(start_main, s, 256 * 1024, priority + 1, host_side_core(), false);
-	if (!t && host_side_core() != -2) t = threadCreate(start_main, s, 256 * 1024, priority + 1, -2, false);
-	logLine("thread %p: %s (asked for core %d)", (void*) fn, t ? "made" : "not made", host_side_core());
+	int core = nextCore != -100 && isNew3ds() ? nextCore : host_side_core();
+	nextCore = -100;
+	Thread t = threadCreate(start_main, s, 256 * 1024, priority + 1, core, false);
+	if (!t && core != host_side_core()) t = threadCreate(start_main, s, 256 * 1024, priority + 1, core = host_side_core(), false);
+	if (!t && core != -2) t = threadCreate(start_main, s, 256 * 1024, priority + 1, core = -2, false);
+	logLine("thread %p: %s (core %d asked)", (void*) fn, t ? "made" : "not made", core);
 	host_mem_note("a thread");
 	if (!t) {
 		free(s);

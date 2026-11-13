@@ -17,6 +17,9 @@ size_t host_heap_free(void);
  * draws the second screen, a logo's extraction, files): the New 3DS's
  * fourth, else whichever the system gives. */
 int host_side_core(void);
+/* The core the next pthread_create puts its thread on (the New 3DS's third, 2, for the game's own
+ * frames), once; the side core after. */
+void host_next_thread_core(int core);
 /* The next machine made is the game itself (the large share of the
  * recompiler's memory), or a copy. */
 void host_log_checkpoint(void);
