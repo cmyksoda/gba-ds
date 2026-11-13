@@ -116,9 +116,13 @@ bool bench_run(Config* cfg) {
 		fclose(jobs);
 		return false;
 	}
+	/* (a fresh file each run, the last one kept beside it: a report never mixes two runs) */
 	static char resultsPath[700];
 	snprintf(resultsPath, sizeof(resultsPath), "%s/results.txt", dir);
-	results = fopen(resultsPath, "a");
+	snprintf(path, sizeof(path), "%s/results-prev.txt", dir);
+	remove(path);
+	rename(resultsPath, path);
+	results = fopen(resultsPath, "w");
 	{
 		char line[256];
 		snprintf(line, sizeof(line), "bench start: GBA DS %s, jobs %s", GBADS_VERSION, cfg->bench);
