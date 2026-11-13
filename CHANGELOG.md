@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.5.1 (2026-11-13)
+
+### New games
+- **Mario vs. Donkey Kong** (USA, Europe and Japan): in a level, the HUD leaves the game screen for the top of the second screen (Mario's lives, the score, the presents or T, O and Y blocks, the Mini-Marios and Donkey Kong's hits in the fights, and the time), so nothing at the top of the level is hidden; in the middle of the second screen, the pause box's LEVEL and HI SCORE lines say which level you're on and the score to beat for its star. The level's opening pan, the title, the menus, films, results and bonus games show the logo; paused or at a help sign, the second screen stays as it was. Not tried yet: the Expert and e-Reader levels, and Europe in a language other than English.
+- **MOTHER 3** (Japan, and its fan translations: English v1.3 and v1.3a, with or without MusicTheorist's HQ audio mix, and Brazilian Portuguese, Italian, German, Simplified Chinese, Polish, French, Catalan and Dutch): walking about, the second screen shows the map of the area you're in where R opens one, with the party's marker, kept up to date as you walk; elsewhere (indoors, the Empire Porky Building...) the Status screen, a page for each party member every 5 seconds. The map's scroll arrows and the Status's L and R badges and help line are left out. Battles, scenes, chapter cards, the title and file screens show the logo; conversations you start keep the last picture. The translations' patches (UPS, BPS and the Dutch xdelta) can be switched on in Extras → Patches. Known limitations: the translation and the HQ audio mix can't both be switched on as patches (each is made for one exact ROM): use a ROM patched with both; battles have only been tried on the English translation.
+
+### New
+- **xdelta patches:** `.xdelta` files work too, beside the ROM or in Extras → Patches, like `.ips`, `.ups` and `.bps`. One made with xdelta3's compression option (`-S`) can't be read: the Patches menu says so, and the ROM can be patched with it beforehand instead.
+- **Buttons**, in the pause menu's Extras page (issue #41): choose which GBA button each face button gives the game you're playing: A (right), B (bottom), X (top) and Y (left) can each be GBA A, B, L, R or nothing, so jump can go on B and attack on Y, for instance. Each game keeps its own choices; Reset Buttons goes back to the usual layout (`ab_swap` included). GBA DS's menus and the hotkeys don't change. In Super Mario Advance 2 and 3 and Tony Hawk's Pro Skater 2 and 3, the SNES or four-button layout under Controls decides the face buttons wherever it's in use.
+- **Custom logos** (issue #38): set `logo_folder` in `gba-ds.cfg` to a folder of logos a scraper downloaded (EmulationStation's marquees, Skraper's wheels), PNG, JPG or WebP (a WebP saved with a `.png` name works too), and each game uses the one named after its ROM instead of the logo GBA DS takes from the game. Names are matched whatever the region or other details in brackets: `Golden Sun.png` and `Golden Sun-marquee.jpg` both go with `Golden Sun (USA, Europe).gba`. Your own `logos/<CODE>.png` still comes first. Custom logos are made as tall as the game's own logo, so they sit in the same place and nothing else on the second screen moves (a wide logo can come out shorter, to fit the screen's width). **Custom Logos** in the pause menu's Display page (there when the game has one) picks **Pixelated** (shrunk to the GBA's pixels, the default), **Full Detail** (the same size, smooth) or **Do Not Use** (back to the game's own logo). A JPG has no transparency, so its background shows as a box behind the logo. If the folder mixes box art with logos, a game with no logo there may get its box art.
+
+### Changes
+- **Your own logos** (`logos/<CODE>.png`) are now made as tall as the game's own logo too, instead of being shown at their own size, and can be JPG or WebP.
+
+### Fixes
+- **BananaOS:** the game list now also shows the games on the RG DS Plus's second SD card (its `roms/gba` folder), as Banana's own list does. Before, only the games on the card BananaOS runs from were listed.
+- **Web player:** the page no longer zooms in when you tap the on-screen controls quickly or touch the screens with two fingers on a phone or tablet, or with Ctrl and the mouse wheel, a trackpad pinch or Ctrl + / - on a computer.
+
 ## v1.5 (2026-11-11)
 
 50+ games supported!

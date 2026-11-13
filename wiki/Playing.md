@@ -53,6 +53,7 @@ Tap the touchscreen, or press **HOME** (Android: **SELECT + START** together, or
 - **Overlays**: a screen of its own. Off, Generated (GBA DS's bezel round the picture, in colours you pick, with or without its logo) or Custom (your own PNGs in `overlays/`), and which screens have them. See [[Overlays]].
 - **Frame Buffer**: off by default. On, the next frame is prepared while the current one is on screen, which smooths out the odd stutter at the cost of one frame (about 17 ms) of input delay. In the pinball games it's always on, needed for full speed, so it's greyed out there.
 - **Match Display Rate**: off by default. On, the game runs at the screen's refresh rate (60 Hz: 0.5% faster than a GBA, too little to notice, with the sound adjusted to match) and each frame is shown for exactly one refresh. Off, a 60 Hz screen shows one frame twice about every 3.7 seconds: a small, regular stutter.
+- **Custom Logos**: only for a game whose logo can be your own or a scraped one ([Logos](#logos)). **Pixelated** (the default) shrinks it to the GBA's pixels; **Full Detail** keeps its detail, at the same size; **Do Not Use** shows the logo GBA DS takes from the game instead.
 - **Screen shapes** (experimental; only on devices whose two screens are different shapes, such as the AYN Thor and the Retroid Pocket Duo, greyed out elsewhere): **Keep device aspect ratios** (each screen's picture as its own shape allows), **Match screen aspect ratios** (the wider screen's picture takes the other screen's shape, with black bars at its sides) or **Match screen sizes and aspect ratios** (the same, at the other screen's real size, against the edge nearest it). With Stretch and either match, both screens show the same shape, so Pokémon Pinball's table carries on across them. Overlays can be made for each: see [[Overlays]].
 
 **Extras** (Swap Screens, Rewind, Fast Forward, Save on Quit and Auto-Load are remembered for next time)
@@ -96,6 +97,7 @@ From these, what you did can be played back exactly, frame by frame. So when som
 | D-pad / left stick | D-pad |
 | Right face button | GBA A (`ab_swap = 1` flips A and B) |
 | Bottom face button | GBA B |
+| Top / left face buttons | Nothing (see [Changing the face buttons](#changing-the-face-buttons-for-a-game)) |
 | L1 / R1 | GBA L / R |
 | Start / Select | Start / Select |
 | HOME, or tap the touchscreen | Pause menu (Android: SELECT + START, or BACK) |
@@ -134,6 +136,14 @@ Press each one when it's asked for. **Tap the touchscreen to skip** a button you
 
 The new mapping works straight away and is kept in `states/controllers.txt` for that controller. The log (`gba-ds.log`) has the same line: send it in an issue and it can be built into GBA DS for everyone with that device and system. Running Map Buttons again replaces it; deleting `controllers.txt` goes back to the built-in mappings.
 
+### Changing the face buttons for a game
+
+Pause menu → Extras → **Buttons** sets which GBA button each face button gives this game: **A (Right)**, **B (Bottom)**, **X (Top)** and **Y (Left)** can each be GBA A, GBA B, GBA L, GBA R or Nothing (LEFT / RIGHT, A or a tap to change one; B to go back). For example, B (Bottom) as GBA A and Y (Left) as GBA B puts jump on the bottom button and attack on the left one, as in many SNES games. Two buttons can give the same GBA button.
+
+Changes work straight away and are kept for that game only (`states/<game>.buttons`). **Reset Buttons** goes back to the default (the table above, `ab_swap` included). GBA DS's own menus keep A to choose and B to go back, L1 / R1 stay GBA L / R, and the hotkeys don't change.
+
+In games with a layout under **Controls** in the quick bar (below), the four-button or SNES layout decides the face buttons wherever it's in use, and your Buttons choices everywhere else.
+
 **Four-button layout (Tony Hawk's Pro Skater 2 and 3).** The GBA version uses L and R for two of the console games' four face buttons. Swipe up from the bottom of the touchscreen for the [quick bar](#the-quick-bar-and-bug-reports) and tap a layout under **Controls**, at its top:
 - **GBA**: the layout above.
 - **Four buttons**: like the console games. Top = GBA A (grind), bottom = GBA B (ollie), left = GBA L (flip), right = GBA R (grab). L1 / R1 still work as L / R.
@@ -166,13 +176,13 @@ GBA DS reads RetroArch's cheat files (`.cht`, the format of the [libretro cheat 
 
 ## Patches
 
-GBA DS applies patches (`.ips`, `.ups` and `.bps` files: romhacks, colour patches, translations) to a game as it starts, so the ROM itself stays as it is.
+GBA DS applies patches (`.ips`, `.ups`, `.bps` and `.xdelta` files: romhacks, colour patches, translations) to a game as it starts, so the ROM itself stays as it is. An `.xdelta` made with compression (xdelta3's `-S` option) can't be read: patch the ROM with it beforehand instead.
 
 - **Where:** each game has its own folder in GBA DS's `patches` folder (`gba-ds/patches`, on ROCKNIX and BananaOS; Android: `GBA DS/patches` on the internal storage; in the folder of your choice if you've moved GBA DS's files, see [[Install on ROCKNIX]] and [[Install on Android]]), named after the game and its region, for example `patches/Mario & Luigi - Superstar Saga (USA)`. GBA DS makes the folder the first time you play the game, so it's there to drop files into, whatever your ROM file is called. Name the patch files as you like: the name is what the list shows. `patch_dir` changes the folder.
 - **Using them:** pause menu → Extras → **Patches** lists the game's patches with an On/Off switch each (D-pad and A, L1 / R1 a page at a time, B to go back, or tap one), and at the bottom what GBA DS makes of the selected one: a tested romhack (see [Supported games](Supported-games#romhacks-and-patched-roms)), untested, or made for another version of the game (that can't be switched on). Switching one on or off asks first ("Sure?"): save your game, then A restarts the game with the change, or Y leaves it for now so you can change more first. When the change can't upset your saves, the game doesn't restart: it carries on from where you were, with the change ("carry on from here", the question says). That's when the patched game is the same size as before and keeps the same battery save and save states: the two "separate" switches off, as for a colour patch. Colours already on the screen change as the game draws them again.
 - **Patches GBA DS knows:** a list of colour restorations, voice removals and translations (see [Supported games](Supported-games#romhacks-and-patched-roms)) is built in, so the list names them whatever their file is called, says whether they're tested, and warns when one was made for another version of the game than your ROM.
 - **Several at once:** you can switch on up to seven. They're applied in order, top to bottom: the ones that are on sit at the top of the list, numbered, and a patch you switch on goes last. To change the order, press X on one (or tap its number), move it with Up / Down (or tap where it should go), then press A. With two or more on, the list says what they make together, and warns you when they won't go together:
-  - **Fails:** a `.ups` or `.bps` patch is made for the unchanged game, so it only works first in the list (and only one of those can be on). Move it up, or it's left out when the game starts.
+  - **Fails:** a `.ups`, `.bps` or `.xdelta` patch is made for the unchanged game, so it only works first in the list (and only one of those can be on). Move it up, or it's left out when the game starts.
   - **A name in gold:** that patch changes some of the same parts of the game as one above it, and wins there, so the two may not work together.
 - **Restart:** when the patches aren't the ones the game started with (you pressed Y, or moved one), the top row of the list says so: A on it, then A again, restarts the game with them. Otherwise they're used the next time you start the game.
 - **Saves:** a game with a patch on has its own battery save and save states by default, named `<game> + <patch>` (with several, all their names, whatever their order), so a romhack that changes the whole game never loads the original's. The two switches at the top of the list turn either off, for a patch that keeps the game's saves working (a colour patch, say).
@@ -200,7 +210,11 @@ GBA DS earns [RetroAchievements](https://retroachievements.org) in **casual (sof
 
 Until the second screen has something to show (title screen, intro, menus), it shows the game's logo. No logo files are shipped: the first time a game appears in the list, GBA DS boots it silently in the background, runs it to its title screen and renders just the layer that holds the logo, at the game's own resolution with transparency. It's saved as `states/logos/<CODE>.png`. The logo is drawn like a second GBA screen: at its own size, centred on dark grey in a GBA-sized picture (at half strength while it's all there is to show), with the second screen's scaling and the LCD grid, so its pixels match the game beside it. Everything else GBA DS puts on the second screen (maps, status screens, windows) is drawn the same way, at the game's own size. `show_logo = 0` in `gba-ds.cfg` leaves the second screen black instead.
 
-To use your own art instead, put `<CODE>.png` (or `.bmp`) in `gba-ds/logos/` (Android: `GBA DS/logos/`). Art up to 240×160 is treated like the extracted logos; bigger images are fitted, smoothly, to where the GBA picture would be (without the grid). `<CODE>` is the game's four-letter code, listed in [[Supported games]].
+To use your own art instead, put `<CODE>.png` (or `.bmp`, `.jpg` or `.webp`) in `gba-ds/logos/` (Android: `GBA DS/logos/`). `<CODE>` is the game's four-letter code, listed in [[Supported games]].
+
+**Scraped logos.** If a scraper has downloaded logos for your games (EmulationStation's marquees, Skraper's wheels), set `logo_folder` in `gba-ds.cfg` to that folder, for example `logo_folder = /storage/roms/gba/images`. GBA DS picks the image named after the ROM, whatever region or other details in brackets either name has: `Golden Sun.png`, `Golden Sun (USA).jpg` and `Golden Sun-marquee.png` all go with `Golden Sun (USA, Europe).gba`. If there are several, it prefers the ROM's exact name, then the plain title, then a marquee, wheel or logo, and PNG or WebP over JPG. WebP images work whatever their name ends in (some scrapers save them as `.png`). Point it at a folder of logos rather than one that mixes in box art, or the box art may be picked for a game with no logo. A JPG has no transparency, so its background shows as a box around the logo (the plain border outside it is cut off); a PNG or WebP looks better if your scraper offers one. A `logos/<CODE>.png` of your own still wins. If a logo you've added isn't used, GBA DS's log (`gba-ds.log`) and its bug reports say why on their `logo:` line: no file with a matching name, a folder that isn't there, or a file it can't read (GIF and animated WebP images aren't supported, whatever their name says).
+
+Your own logos and scraped ones are made as tall as the logo GBA DS took from the game, so they sit in the same place and nothing else on the second screen moves. **Custom Logos** in the pause menu's Display page (there only when the game has one of these) switches between **Pixelated**, shrunk to the GBA's own pixels to look like the game drew it, **Full Detail**, at the same size, and **Do Not Use**, which goes back to the logo GBA DS takes from the game, for every game.
 
 ## Where files go
 
