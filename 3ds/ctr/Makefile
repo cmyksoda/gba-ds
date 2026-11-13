@@ -24,9 +24,22 @@ VERSION := $(shell cat $(REPO)/3ds/VERSION)
 UPSTREAM := $(shell cat $(REPO)/VERSION)
 BUILD   := build$(if $(TEST),-test)
 
+# CORE=mgba (default): src/emu.c on libmgba, as every other GBA DS build (../mgba/build-libmgba.sh makes
+# it; MGBA_BUILD is its build folder). CORE=armgba: armGBA and its recompiler (../emu).
+CORE ?= mgba
 ARMGBA := $(REPO)/third_party/armgba
+ifeq ($(CORE),armgba)
 ARMGBA_BACKEND := a32
 include $(REPO)/3ds/emu/armgba.mk
+CORE_DEFS := -DGBADS_ARMGBA
+CORE_INC  := -I$(ARMGBA)/src
+else
+MGBA_BUILD ?= $(REPO)/deps/mgba-3ds/build
+ARMGBA_CORE_SRC :=
+# libmgba's own defines, as the other builds take them: its structs' layout depends on them.
+CORE_DEFS := $(shell sed -n 's/^C_DEFINES = //p' $(MGBA_BUILD)/CMakeFiles/mgba.dir/flags.make)
+CORE_INC  := -I$(MGBA_BUILD)/../include -I$(MGBA_BUILD)/include
+endif
 
 ARCH     := -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
 # As armGBA-3DS builds (its Makefile says why): -fwrapv or every game hangs after 128 seconds,
@@ -36,16 +49,22 @@ COMMON   := -g -fwrapv -flto -fomit-frame-pointer -ffunction-sections -mword-rel
 CFLAGS   := $(COMMON) -std=gnu11
 ASFLAGS  := -g $(ARCH)
 LDFLAGS  := -specs=3dsx.specs -g -O3 -fwrapv -flto=auto -mword-relocations $(ARCH) -Wl,-Map,$(BUILD)/$(TARGET).map -Wl,--gc-sections -Wl,--wrap=stat$(if $(TEST), -Wl$(comma)--wrap=malloc -Wl$(comma)--wrap=calloc)
-LIBS     := -L$(CTRULIB)/lib -L$(PORTLIBS)/lib -lcitro2d -lcitro3d -lctru -lz -lm
+LIBS     := $(if $(filter armgba,$(CORE)),,$(MGBA_BUILD)/libmgba.a) -L$(CTRULIB)/lib -L$(PORTLIBS)/lib -lcitro2d -lcitro3d -lctru -lz -lm
 
 D3 := $(REPO)/3ds
 S  := $(REPO)/src
 APP_SRC := $(addprefix $(S)/,main.c config.c font.c ui.c library.c mapper.c hotkeys.c game.c paths.c image.c brand_data.c \
 	bezel.c bezel_logo.c logo.c cheats.c textfont.c fonts_data.c ra.c sha256.c patch.c mapcap.c profiles.c logo_masks.c) \
-	$(D3)/emu/emu_armgba.c $(D3)/ctr/stubs.c
+	$(D3)/ctr/stubs.c
 # WebP logos: libwebp's decoder, vendored as for the other builds.
 WEBP_SRC := $(wildcard $(REPO)/third_party/libwebp/src/dec/*.c $(REPO)/third_party/libwebp/src/dsp/*.c $(REPO)/third_party/libwebp/src/utils/*.c)
-HOST_SRC := $(D3)/ctr/host.c $(D3)/ctr/sdl_ctr.c $(D3)/ctr/jitmem.c $(ARMGBA)/platform/3ds/source/svc.s
+HOST_SRC := $(D3)/ctr/host.c $(D3)/ctr/sdl_ctr.c
+ifeq ($(CORE),armgba)
+APP_SRC  += $(D3)/emu/emu_armgba.c
+HOST_SRC += $(D3)/ctr/jitmem.c $(ARMGBA)/platform/3ds/source/svc.s
+else
+APP_SRC  += $(S)/emu.c $(D3)/ctr/emu_ctr.c
+endif
 
 obj = $(patsubst $(REPO)/%,$(BUILD)/%.o,$(1))
 APP_OBJ  := $(call obj,$(APP_SRC))
@@ -54,18 +73,21 @@ CORE_OBJ := $(call obj,$(ARMGBA_CORE_SRC))
 WEBP_OBJ := $(call obj,$(WEBP_SRC))
 OBJ := $(APP_OBJ) $(HOST_OBJ) $(CORE_OBJ) $(WEBP_OBJ)
 
-# sdl/ stands where SDL2's headers do. armGBA's src first: its cheats.h is the one emu_armgba.c
-# means. The app's threads are made by host.c (the core they run on), and its main is called from
+# sdl/ stands where SDL2's headers do. The core's headers before src/: armGBA's cheats.h is the one
+# emu_armgba.c means. The app's threads are made by host.c (the core they run on), and its main is called from
 # host.c's.
-APP_INC := -I$(D3)/ctr/sdl -I$(D3)/ctr/compat -I$(D3)/ctr -I$(ARMGBA)/src -I$(S) -I$(REPO)/third_party/libwebp
-$(APP_OBJ):  EXTRA := -O2 -Wall -Wno-unused-parameter $(APP_INC) -DGBADS_ARMGBA -DGBADS_VERSION='"$(VERSION)"' \
+APP_INC := -I$(D3)/ctr/sdl -I$(D3)/ctr/compat -I$(D3)/ctr $(CORE_INC) -I$(S) -I$(REPO)/third_party/libwebp
+$(APP_OBJ):  EXTRA := -O2 -Wall -Wno-unused-parameter $(APP_INC) $(CORE_DEFS) -DGBADS_VERSION='"$(VERSION)"' \
                       -Dpthread_create=host_pthread_create -Dmain=gbads_main -D_GNU_SOURCE $(if $(TEST),-DGBADS_TEST_PROFILE)
-$(HOST_OBJ): EXTRA := -O2 -Wall -Wextra $(APP_INC) -DGBADS_VERSION='"$(VERSION)"' -DGBADS_UPSTREAM='"$(UPSTREAM)"' $(if $(LOG_URL),-DGBADS_LOG_URL='"$(LOG_URL)"')
+$(HOST_OBJ): EXTRA := -O2 -Wall -Wextra $(APP_INC) $(CORE_DEFS) -DGBADS_VERSION='"$(VERSION)"' -DGBADS_UPSTREAM='"$(UPSTREAM)"' $(if $(LOG_URL),-DGBADS_LOG_URL='"$(LOG_URL)"')
 $(CORE_OBJ): EXTRA := $(ARMGBA_CORE_FLAGS)
 $(WEBP_OBJ): EXTRA := -O2 -I$(REPO)/third_party/libwebp
 
 .PHONY: all cia-parts clean
 all: $(TARGET).3dsx
+
+# (a flag changed here rebuilds everything: objects built with other defines see other struct layouts)
+$(OBJ): Makefile
 
 $(BUILD)/%.c.o: $(REPO)/%.c
 	@mkdir -p $(dir $@)

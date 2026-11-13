@@ -314,7 +314,9 @@ int main(void) {
 	log_upload(APP_DIR "/log-prev.txt", "gba-ds-prev"); /* the last run's: all of it if that one crashed */
 #endif
 	int rc = gbads_main(1, args);
+#ifdef GBADS_ARMGBA
 	jitHostRestoreMemory();
+#endif
 	fflush(stderr);
 #ifdef GBADS_LOG_URL
 	log_upload(APP_DIR "/log.txt", "gba-ds");

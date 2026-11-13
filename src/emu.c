@@ -304,6 +304,15 @@ uint8_t* emu_rom_read_played(const char* path, size_t* size, int* patch, char* p
 	return rom;
 }
 
+#ifdef __3DS__
+/* 3ds/ctr/emu_ctr.c: one copy of the ROM in memory for every copy of the game */
+bool emu_ctr_load(struct mCore* core, const char* path);
+void emu_ctr_unload(const struct mCore* core);
+#define load_rom_file emu_ctr_load
+#else
+#define load_rom_file mCoreLoadFile
+#endif
+
 bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 	memset(e, 0, sizeof(*e));
 	mLogSetDefaultLogger(&quietLogger);
@@ -338,7 +347,7 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 			fprintf(stderr, "could not load the patched ROM %s\n", romPath);
 			return false;
 		}
-	} else if (!mCoreLoadFile(e->core, romPath)) {
+	} else if (!load_rom_file(e->core, romPath)) {
 		fprintf(stderr, "could not load ROM %s\n", romPath);
 		return false;
 	}
@@ -378,6 +387,9 @@ void emu_close(Emu* e) {
 		hide_release(e);
 		mCoreConfigDeinit(&e->core->config);
 		e->core->deinit(e->core);
+#ifdef __3DS__
+		emu_ctr_unload(e->core);
+#endif
 		e->core = NULL;
 	}
 	free(e->fb);
