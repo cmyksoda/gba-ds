@@ -76,19 +76,26 @@ static uint8_t* read_rom(const char* path, size_t* n) {
 	return NULL;
 }
 
+/* (under the lock) */
+static int find_rom(const char* path) {
+	for (int i = 0; i < MAX_ROMS; ++i) {
+		if (roms[i].rom && !strcmp(roms[i].path, path)) return i;
+	}
+	return -1;
+}
+
+static void drop_if_unused(int slot) {
+	if (slot >= 0 && !roms[slot].users) {
+		free(roms[slot].rom);
+		roms[slot].rom = NULL;
+	}
+}
+
 bool emu_ctr_load(struct mCore* core, const char* path) {
 	pthread_mutex_lock(&lock);
 	if (!sdmcArchive) FSUSER_OpenArchive(&sdmcArchive, ARCHIVE_SDMC, fsMakePath(PATH_EMPTY, ""));
-	int slot = -1, freeSlot = -1;
-	for (int i = 0; i < MAX_ROMS; ++i) {
-		if (roms[i].rom && !strcmp(roms[i].path, path)) slot = i;
-		else if (!roms[i].rom && freeSlot < 0) freeSlot = i;
-	}
-	int holder = -1;
-	for (int i = 0; i < MAX_CORES && holder < 0; ++i) {
-		if (!holders[i].core) holder = i;
-	}
-	if (slot < 0 && freeSlot >= 0 && holder >= 0) {
+	int slot = find_rom(path);
+	if (slot < 0) {
 		/* (read outside the lock: another copy's start needn't wait for this one's SD card) */
 		pthread_mutex_unlock(&lock);
 		size_t size;
@@ -98,24 +105,29 @@ bool emu_ctr_load(struct mCore* core, const char* path) {
 			pthread_mutex_unlock(&lock);
 			return false;
 		}
-		for (int i = 0; i < MAX_ROMS; ++i) {
-			if (roms[i].rom && !strcmp(roms[i].path, path)) slot = i;
-		}
-		if (slot >= 0 || roms[freeSlot].rom) {
-			free(rom); /* read twice at once: the first one kept */
-			if (slot < 0) {
-				pthread_mutex_unlock(&lock);
-				return false;
-			}
+		slot = find_rom(path);
+		if (slot >= 0) {
+			free(rom); /* (read twice at once: the first one kept) */
 		} else {
-			slot = freeSlot;
-			snprintf(roms[slot].path, sizeof(roms[slot].path), "%s", path);
-			roms[slot].rom = rom;
-			roms[slot].size = size;
-			roms[slot].users = 0;
+			for (int i = 0; i < MAX_ROMS && slot < 0; ++i) {
+				if (!roms[i].rom) slot = i;
+			}
+			if (slot >= 0) {
+				snprintf(roms[slot].path, sizeof(roms[slot].path), "%s", path);
+				roms[slot].rom = rom;
+				roms[slot].size = size;
+				roms[slot].users = 0;
+			} else {
+				free(rom);
+			}
 		}
 	}
+	int holder = -1;
+	for (int i = 0; i < MAX_CORES && holder < 0; ++i) {
+		if (!holders[i].core) holder = i;
+	}
 	if (slot < 0 || holder < 0) {
+		drop_if_unused(slot);
 		pthread_mutex_unlock(&lock);
 		fprintf(stderr, "%s: too many copies open to share its ROM\n", path);
 		return false;
@@ -130,10 +142,7 @@ bool emu_ctr_load(struct mCore* core, const char* path) {
 	} else if (vf) {
 		vf->close(vf);
 	}
-	if (!roms[slot].users) {
-		free(roms[slot].rom);
-		roms[slot].rom = NULL;
-	}
+	drop_if_unused(slot);
 	pthread_mutex_unlock(&lock);
 	return ok;
 }
