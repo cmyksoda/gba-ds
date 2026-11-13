@@ -1607,6 +1607,9 @@ double ui_display_hz(int view) {
 	}
 #endif /* __wasi__ */
 #endif
+#ifdef __3DS__
+	hz = 268111856.0 / 4481136.0; /* (the LCDs' refresh: 4481136 GPU clocks a frame, about 59.831 Hz) */
+#endif
 	if (hz <= 0) {
 		SDL_DisplayMode m;
 		int d = SDL_GetWindowDisplayIndex(views[view].win);
