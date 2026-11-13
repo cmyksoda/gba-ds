@@ -90,9 +90,12 @@ bool isNew3ds(void) {
 	return known;
 }
 
+size_t hostTopBytes; /* ROMs kept at the top of the heap's range (emu_ctr.c), past malloc's reach */
+
 size_t host_heap_free(void) {
 	struct mallinfo m = mallinfo();
-	return __ctru_heap_size > (u32) m.uordblks ? __ctru_heap_size - (u32) m.uordblks : 0;
+	u32 used = (u32) m.uordblks + hostTopBytes;
+	return __ctru_heap_size > used ? __ctru_heap_size - used : 0;
 }
 
 /* Between a background thread's reads of a large file: a moment for the
