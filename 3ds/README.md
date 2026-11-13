@@ -124,8 +124,8 @@ In the Azahar emulator (2126.2, a New 3DS whose CPU it runs at 268 MHz, a third 
 
 The heaviest scenes logged there take 38 to 44 ms of the emulated CPU's time a frame: Advance Wars'
 opening (38.5), F-Zero: Maximum Velocity's (39.6), Fire Emblem's (39.9), Super Mario Advance's
-(39.9), Metroid: Zero Mission while its map was being captured (41.5) and Mario Kart's race with its
-HUD (43.4). At the console's clock that's about 13 to 15 ms of the 16.7 a frame has, an estimate
+(39.9) and Mario Kart's race with its HUD (43.4). (A map capture ran on the game's core in Azahar
+and slowed the game while it lasted; on a New 3DS it has a core of its own.) At the console's clock that's about 13 to 15 ms of the 16.7 a frame has, an estimate
 until a console says otherwise.
 
 Not tested: the mGBA core on a console, an Old 3DS, odd-sized ROMs (trimmed dumps, some romhacks),
