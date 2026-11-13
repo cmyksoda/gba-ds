@@ -17,8 +17,8 @@ include $(DEVKITARM)/3ds_rules
 REPO    := $(abspath ../..)
 # TEST=1: gba-ds-test.3dsx, with the capture test's profile (src/profiles.c, GBADS_TEST_PROFILE). Never a player's.
 comma := ,
-TARGET  := gba-ds$(if $(TEST),-test)
-TITLE   := GBA DS$(if $(TEST), test)
+TARGET  := gba-ds$(if $(TEST),-test)$(if $(BENCH),-bench-$(BENCH))
+TITLE   := GBA DS$(if $(TEST), test)$(if $(BENCH), bench $(BENCH))
 # The 3DS port's own version (../VERSION); UPSTREAM is the GBA DS it is.
 VERSION := $(shell cat $(REPO)/3ds/VERSION)
 UPSTREAM := $(shell cat $(REPO)/VERSION)
@@ -79,7 +79,11 @@ OBJ := $(APP_OBJ) $(HOST_OBJ) $(CORE_OBJ) $(WEBP_OBJ)
 APP_INC := -I$(D3)/ctr/sdl -I$(D3)/ctr/compat -I$(D3)/ctr $(CORE_INC) -I$(S) -I$(REPO)/third_party/libwebp
 $(APP_OBJ):  EXTRA := -O2 -Wall -Wno-unused-parameter $(APP_INC) $(CORE_DEFS) -DGBADS_VERSION='"$(VERSION)"' \
                       -Dpthread_create=host_pthread_create -Dmain=gbads_main -D_GNU_SOURCE $(if $(TEST),-DGBADS_TEST_PROFILE)
-$(HOST_OBJ): EXTRA := -O2 -Wall -Wextra $(APP_INC) $(CORE_DEFS) -DGBADS_VERSION='"$(VERSION)"' -DGBADS_UPSTREAM='"$(UPSTREAM)"' $(if $(LOG_URL),-DGBADS_LOG_URL='"$(LOG_URL)"')
+# BENCH=TAG: a test bench build (its jobs from the LOG_URL machine, results back there), gba-ds-bench-TAG.3dsx
+ifneq ($(BENCH),)
+BENCH_DEF := -DGBADS_BENCH_TAG='"$(BENCH)"'
+endif
+$(HOST_OBJ): EXTRA := -O2 -Wall -Wextra $(APP_INC) $(CORE_DEFS) $(BENCH_DEF) -DGBADS_VERSION='"$(VERSION)"' -DGBADS_UPSTREAM='"$(UPSTREAM)"' $(if $(LOG_URL),-DGBADS_LOG_URL='"$(LOG_URL)"')
 $(CORE_OBJ): EXTRA := $(ARMGBA_CORE_FLAGS)
 $(WEBP_OBJ): EXTRA := -O2 -I$(REPO)/third_party/libwebp
 

@@ -15,6 +15,10 @@
 #include <sys/stat.h>
 
 #define APP_DIR "/3ds/gba-ds"
+#ifdef GBADS_BENCH_TAG
+/* (each bench program its own folder: jobs, scripts, results, saves, states) */
+#define BENCH_DIR "/3ds/gba-ds-bench-" GBADS_BENCH_TAG
+#endif
 #define ROM_DIR "/roms/gba"
 
 /* The recompiler's helpers and the app's menus keep long paths on the stack. */
@@ -278,6 +282,67 @@ static void log_upload(const char* path, const char* name) {
 }
 #endif
 
+#if defined(GBADS_LOG_URL) && defined(GBADS_BENCH_TAG)
+/* The bench's jobs and scripts from the PC that runs the log server (logserver.py --serve DIR), into DIR on the SD
+ * card; what's there already stays if the PC doesn't answer. */
+static bool http_get(const char* url, const char* path) {
+	httpcContext context;
+	u32 status = 0, got = 0;
+	bool ok = false;
+	if (R_FAILED(httpcOpenContext(&context, HTTPC_METHOD_GET, url, 0))) return false;
+	if (R_SUCCEEDED(httpcBeginRequest(&context)) && R_SUCCEEDED(httpcGetResponseStatusCodeTimeout(&context, &status, 5000000000ull)) &&
+	    status == 200) {
+		FILE* f = fopen(path, "wb");
+		static u8 buf[16384];
+		Result rc;
+		do {
+			rc = httpcDownloadData(&context, buf, sizeof(buf), &got);
+			if (f && got) fwrite(buf, 1, got, f);
+		} while (rc == (Result) HTTPC_RESULTCODE_DOWNLOADPENDING);
+		ok = f && R_SUCCEEDED(rc);
+		if (f) fclose(f);
+	}
+	httpcCloseContext(&context);
+	logLine("bench download %s: %s (HTTP %lu)", url, ok ? "done" : "failed", (unsigned long) status);
+	return ok;
+}
+
+static void bench_fetch(const char* dir) {
+	char base[200], url[300], path[400], line[1024];
+	snprintf(base, sizeof(base), "%s", GBADS_LOG_URL);
+	char* slash = strrchr(base, '/');
+	if (slash) *slash = 0; /* (http://host:port/log -> http://host:port) */
+	if (R_FAILED(httpcInit(1 << 20))) return;
+	snprintf(url, sizeof(url), "%s/bench/jobs.txt", base);
+	snprintf(path, sizeof(path), "%s/jobs.txt", dir);
+	if (http_get(url, path)) {
+		FILE* f = fopen(path, "r");
+		while (f && fgets(line, sizeof(line), f)) {
+			/* job ID | ROM | SCRIPT | FRAMES: the script */
+			char* p = line;
+			for (int i = 0; i < 2 && p; ++i) p = strchr(p + 1, '|');
+			if (strncmp(line, "job ", 4) || !p) continue;
+			char script[200];
+			if (sscanf(p + 1, " %199[^|\n ]", script) != 1) continue;
+			snprintf(url, sizeof(url), "%s/bench/%s", base, script);
+			char out[600];
+			snprintf(out, sizeof(out), "%s/%s", dir, script);
+			http_get(url, out);
+		}
+		if (f) fclose(f);
+	}
+	httpcExit();
+}
+
+void host_bench_report(const char* resultsPath) {
+	log_upload(resultsPath, "bench-" GBADS_BENCH_TAG);
+}
+#else
+void host_bench_report(const char* resultsPath) {
+	(void) resultsPath;
+}
+#endif
+
 /* The log so far, sent now: the game list calls this each time it comes up
  * (at start, and back from a game that ran or didn't), so what happened is
  * here without the app having to end well. */
@@ -321,11 +386,20 @@ int main(void) {
 	logLine("%s 3DS%s, heap %lu KiB, linear %lu KiB", isNew3ds() ? "New" : "Old", isEmulator() ? " (emulator)" : "",
 	        (unsigned long) (__ctru_heap_size >> 10), (unsigned long) (__ctru_linear_heap_size >> 10));
 	char name[] = "gba-ds";
-	char* args[] = { name, NULL };
+	char* args[] = { name, NULL, NULL };
+	int nArgs = 1;
 #ifdef GBADS_LOG_URL
 	log_upload(APP_DIR "/log-prev.txt", "gba-ds-prev"); /* the last run's: all of it if that one crashed */
 #endif
-	int rc = gbads_main(1, args);
+#if defined(GBADS_LOG_URL) && defined(GBADS_BENCH_TAG)
+	/* a bench build: its jobs from the PC, then nothing but them */
+	static char benchArg[200];
+	mkdir(BENCH_DIR, 0777);
+	bench_fetch(BENCH_DIR);
+	snprintf(benchArg, sizeof(benchArg), "--bench=%s/jobs.txt", BENCH_DIR);
+	args[nArgs++] = benchArg;
+#endif
+	int rc = gbads_main(nArgs, args);
 #ifdef GBADS_ARMGBA
 	jitHostRestoreMemory();
 #endif

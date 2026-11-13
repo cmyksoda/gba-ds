@@ -114,8 +114,9 @@ bool bench_run(Config* cfg) {
 		fclose(jobs);
 		return false;
 	}
-	snprintf(path, sizeof(path), "%s/results.txt", dir);
-	results = fopen(path, "a");
+	static char resultsPath[700];
+	snprintf(resultsPath, sizeof(resultsPath), "%s/results.txt", dir);
+	results = fopen(resultsPath, "a");
 	{
 		char line[256];
 		snprintf(line, sizeof(line), "bench start: GBA DS %s, jobs %s", GBADS_VERSION, cfg->bench);
@@ -177,7 +178,7 @@ bool bench_run(Config* cfg) {
 		put(msg);
 		++done;
 #ifdef __3DS__
-		host_log_checkpoint(); /* (a diagnosis build: the log so far to the network) */
+		host_bench_report(resultsPath); /* (a bench build: the results so far to the PC) */
 #endif
 	}
 	fclose(jobs);

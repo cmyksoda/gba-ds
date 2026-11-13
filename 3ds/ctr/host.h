@@ -39,6 +39,8 @@ int host_read_dir(const char* path, HostEntry** out);
 /* The first n bytes of a file on the SD card, with as few calls on it as
  * that takes. */
 bool host_read_head(const char* path, void* out, size_t n);
+/* A bench build: the results so far to the PC (a LOG_URL build), after each job. */
+void host_bench_report(const char* resultsPath);
 /* Before the app exits. */
 void jitHostRestoreMemory(void);
 
