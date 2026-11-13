@@ -104,6 +104,8 @@ double ui_last_present_ms(int view);
  * (the one the game is on: each frame is shown, none dropped when one comes
  * a little late); -1 for none. Elsewhere: nothing. */
 void ui_sync_view(int view);
+void ui_script_restart(const char* path);
+void ui_logo_prepare(const Config* c, const char* rom);
 bool ui_script_quiet(void);
 /* The refresh rate (Hz) of the display a view is on; 0 if unknown. */
 double ui_display_hz(int view);

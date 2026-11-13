@@ -740,6 +740,16 @@ void emu_frame(Emu* e, uint32_t keys) {
 	run_frame(e, keys, true);
 }
 
+/* (armGBA draws with its own threads, set up by its frontend options, not mGBA's proxy) */
+void emu_threaded_video(bool on) {
+	(void) on;
+}
+
+bool emu_threaded(const Emu* e) {
+	(void) e;
+	return false;
+}
+
 void emu_frame_blind(Emu* e, uint32_t keys) {
 	run_frame(e, keys, false);
 }

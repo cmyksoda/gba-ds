@@ -112,6 +112,7 @@ typedef struct Config {
 	char loadState[512];
 	int quitAfter;     /* UI ticks */
 	char inputScript[512];
+	char bench[512];     /* bench: a test bench's jobs file (bench.c) */
 } Config;
 
 void config_defaults(Config* c);

@@ -53,7 +53,7 @@ LIBS     := $(if $(filter armgba,$(CORE)),,$(MGBA_BUILD)/libmgba.a) -L$(CTRULIB)
 
 D3 := $(REPO)/3ds
 S  := $(REPO)/src
-APP_SRC := $(addprefix $(S)/,main.c config.c font.c ui.c library.c mapper.c hotkeys.c game.c paths.c image.c brand_data.c \
+APP_SRC := $(addprefix $(S)/,main.c bench.c config.c font.c ui.c library.c mapper.c hotkeys.c game.c paths.c image.c brand_data.c \
 	bezel.c bezel_logo.c logo.c cheats.c textfont.c fonts_data.c ra.c sha256.c patch.c mapcap.c profiles.c logo_masks.c) \
 	$(D3)/ctr/stubs.c
 # WebP logos: libwebp's decoder, vendored as for the other builds.

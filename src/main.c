@@ -9,6 +9,7 @@
 #include "android.h"
 #include "config.h"
 #include "esinteg.h"
+#include "bench.h"
 #include "game.h"
 #include "library.h"
 #include "logo.h"
@@ -211,7 +212,9 @@ int main(int argc, char** argv) {
 #endif
 	if (cfg.inputScript[0]) ui_load_script(cfg.inputScript);
 
-	if (cfg.rom[0]) {
+	if (cfg.bench[0]) {
+		bench_run(&cfg);
+	} else if (cfg.rom[0]) {
 		while (game_run(&cfg, cfg.rom, false) == GAME_RELOAD && !uiQuit) fprintf(stderr, "restarting %s\n", cfg.rom);
 	} else {
 		char rom[1024];

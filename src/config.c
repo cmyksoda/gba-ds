@@ -226,6 +226,7 @@ static bool set_option(Config* c, const char* key, const char* val) {
 	STR("es_config_dir", esConfigDir)
 	STR("library_view", libraryView)
 	STR("input_script", inputScript)
+	STR("bench", bench)
 	return false;
 #undef STR
 #undef BOOL

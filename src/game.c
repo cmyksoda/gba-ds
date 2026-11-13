@@ -1,5 +1,6 @@
 /* One play session: the emulator, the second-screen map, and the pause menu. */
 #include "game.h"
+#include "bench.h"
 #ifdef __wasi__
 extern void web_sleep(unsigned ms) __attribute__((import_module("env"), import_name("web_sleep")));
 #endif
@@ -8172,6 +8173,7 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 		Uint64 emuT1 = SDL_GetPerformanceCounter();
 		double emuCpu1 = thread_cpu_ms();
 		emuTicks += emuT1 - emuT0;
+		double benchEmuMs = (emuT1 - emuT0) * 1000.0 / SDL_GetPerformanceFrequency();
 		++frameCount;
 		/* the rewind buffer: a state every second emulated frame */
 		if (cfg->rewind && !rewinding && (rewindTick += runs) >= 2) {
@@ -8375,6 +8377,7 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 		}
 		Uint64 drawT1 = SDL_GetPerformanceCounter();
 		drawTicks += drawT1 - drawT0;
+		bench_frame(frameCount, benchEmuMs, (drawT1 - drawT0) * 1000.0 / SDL_GetPerformanceFrequency(), mc && mapcap_busy(mc));
 		{
 			double msPer = 1000.0 / (double) SDL_GetPerformanceFrequency();
 			double total = (double) (drawT1 - workT0) * msPer;

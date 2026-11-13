@@ -117,6 +117,16 @@ static uint32_t parse_btns(const char* s) {
 	return m;
 }
 
+/* A new script from tick 0 (the test bench's next job). */
+void ui_script_restart(const char* path) {
+	free(script);
+	script = NULL;
+	scriptLen = scriptPos = 0;
+	scriptBtns = 0;
+	ticks = 0;
+	ui_load_script(path);
+}
+
 void ui_load_script(const char* path) {
 	FILE* f = fopen(path, "r");
 	if (!f) {
@@ -2143,6 +2153,22 @@ static void extracted_path(const Config* c, const char* code, char* path, size_t
 	const MapProfile* prof = profile_find(code);
 	if (prof && prof->logo.rev) snprintf(path, n, "%s/logos/%.4s-r%d.png", c->stateDir, code, prof->logo.rev);
 	else snprintf(path, n, "%s/logos/%.4s.png", c->stateDir, code);
+}
+
+/* The game's own logo made now, if it isn't yet (the test bench, before its timing). */
+void ui_logo_prepare(const Config* c, const char* rom) {
+	uint8_t h[0xB0];
+	if (!emu_rom_header(rom, h, sizeof(h))) return;
+	char code[5] = { (char) h[0xAC], (char) h[0xAD], (char) h[0xAE], (char) h[0xAF], 0 };
+	char path[1200];
+	snprintf(path, sizeof(path), "%s/logos", c->stateDir);
+	mkdirs(path);
+	extracted_path(c, code, path, sizeof(path));
+	struct stat st;
+	if (stat(path, &st) == 0) return;
+	Uint32 t0 = SDL_GetTicks();
+	bool ok = logo_extract(rom, code, path);
+	fprintf(stderr, "logo: %s %s in %u ms (before the bench's timing)\n", code, ok ? "made" : "not made", (unsigned) (SDL_GetTicks() - t0));
 }
 
 /* The player's own logo for the game: <asset_dir>/logos/<CODE>.png|.bmp|.jpg|.webp. */
