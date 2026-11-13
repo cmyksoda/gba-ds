@@ -7,7 +7,9 @@
  * save; results go to stderr and to results.txt there. */
 #include "bench.h"
 
+#include "emu.h"
 #include "game.h"
+#include "profiles.h"
 #include "paths.h"
 #include "ui.h"
 #ifdef __3DS__
@@ -169,7 +171,13 @@ bool bench_run(Config* cfg) {
 		cfg->quitAfter = atoi(f[3]);
 		memset(&w, 0, sizeof(w));
 		lastT = 0;
-		snprintf(msg, sizeof(msg), "bench %s start: %s, %d frames", jobId, f[1], cfg->quitAfter);
+		{
+			uint8_t h[0xB0];
+			char code[5] = "????";
+			if (emu_rom_header(cfg->rom, h, sizeof(h))) memcpy(code, h + 0xAC, 4);
+			snprintf(msg, sizeof(msg), "bench %s start: %s, %d frames, profile: %s", jobId, f[1], cfg->quitAfter,
+			         profile_find(code) ? code : "none (one screen and the logo in this build)");
+		}
 		put(msg);
 		game_run(cfg, cfg->rom, false);
 		/* (the script's end quits the game: the next job; a quit before it ends the bench) */
