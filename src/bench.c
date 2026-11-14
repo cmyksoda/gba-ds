@@ -181,7 +181,12 @@ bool bench_run(Config* cfg) {
 			if (dot) *dot = 0;
 			snprintf(sav, sizeof(sav), "%s/%s.sav", saves, base);
 			remove(sav);
+			snprintf(sav, sizeof(sav), "%s/%s.srm", saves, base);
+			remove(sav);
 		}
+#ifdef __3DS__
+		host_mem_note("a bench job's start"); /* (a leak from one game to the next shows here) */
+#endif
 		ui_logo_prepare(cfg, cfg->rom); /* (made before the timing: on the side core it would weigh on the captures) */
 		snprintf(path, sizeof(path), "%s/job-%s.txt", dir, jobId);
 		jobResults = fopen(path, "w");
