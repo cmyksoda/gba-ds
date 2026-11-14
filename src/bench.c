@@ -32,6 +32,7 @@ static FILE* results;
 static FILE* jobResults; /* this job's lines alone (job-ID.txt): what a bench build posts after the job */
 static char jobId[64];
 static Uint64 lastT;
+static unsigned long jobFrames; /* (none: the game didn't start) */
 static struct {
 	int n;
 	double sum, worst, emu, draw, screen;
@@ -54,6 +55,7 @@ static void put(const char* line) {
 
 void bench_frame(uint64_t frame, double emuMs, double drawMs, double screenMs, bool captureBusy) {
 	if (!active) return;
+	++jobFrames;
 	Uint64 now = SDL_GetPerformanceCounter();
 	if (!lastT) {
 		lastT = now;
@@ -189,6 +191,7 @@ bool bench_run(Config* cfg) {
 		cfg->quitAfter = atoi(f[3]);
 		memset(&w, 0, sizeof(w));
 		lastT = 0;
+		jobFrames = 0;
 		{
 			uint8_t h[0xB0];
 			char code[5] = "????";
@@ -200,6 +203,10 @@ bool bench_run(Config* cfg) {
 		game_run(cfg, cfg->rom, false);
 		/* (the script's end quits the game: the next job; a quit before it ends the bench) */
 		if (ui_ticks() >= (uint64_t) cfg->quitAfter) uiQuit = 0;
+		if (!jobFrames) {
+			snprintf(msg, sizeof(msg), "bench %s failed: the game didn't start (the app's log says why)", jobId);
+			put(msg);
+		}
 		snprintf(msg, sizeof(msg), "bench %s done", jobId);
 		put(msg);
 		++done;
