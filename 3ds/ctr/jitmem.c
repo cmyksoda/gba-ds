@@ -81,8 +81,11 @@ static bool makeExecutable(uint8_t* code, size_t size, bool* protected) {
 		}
 	}
 	Result rc2 = 0;
-	if (R_FAILED(rc)) {
+	/* (the whole process stays RWX once set: in Azahar a second call after a game had run never returned) */
+	static bool processRwx;
+	if (R_FAILED(rc) && !processRwx) {
 		rc2 = svcLumaControlProcess(self, PROCESSOP_SET_MMU_TO_RWX, 0, 0);
+		processRwx = R_SUCCEEDED(rc2);
 	}
 	logLine("jit: svcControlProcessMemory %08lX%s, svcControlProcess(RWX) %08lX%s", (unsigned long) rc, isEmulator() ? " (skipped)" : "",
 	        (unsigned long) rc2, R_FAILED(rc) ? "" : " (not needed)");
