@@ -18,6 +18,7 @@
 #ifdef GBADS_BENCH_TAG
 /* (each bench program its own folder: jobs, scripts, results, saves, states) */
 #define BENCH_DIR "/3ds/gba-ds-bench-" GBADS_BENCH_TAG
+#define BENCH_ROMS "/3ds/gba-ds-bench-roms"
 #endif
 #define ROM_DIR "/roms/gba"
 
@@ -388,18 +389,24 @@ int main(void) {
 	logLine("%s 3DS%s, heap %lu KiB, linear %lu KiB", isNew3ds() ? "New" : "Old", isEmulator() ? " (emulator)" : "",
 	        (unsigned long) (__ctru_heap_size >> 10), (unsigned long) (__ctru_linear_heap_size >> 10));
 	char name[] = "gba-ds";
-	char* args[] = { name, NULL, NULL };
+	char* args[] = { name, NULL, NULL, NULL };
 	int nArgs = 1;
 #ifdef GBADS_LOG_URL
 	log_upload(APP_DIR "/log-prev.txt", "gba-ds-prev"); /* the last run's: all of it if that one crashed */
 #endif
-#if defined(GBADS_LOG_URL) && defined(GBADS_BENCH_TAG)
-	/* a bench build: its jobs from the PC, then nothing but them */
+#ifdef GBADS_BENCH_TAG
+	/* a bench build: its jobs (from the PC, with LOG_URL; else as they are on the SD card), then nothing but them */
 	static char benchArg[200];
 	mkdir(BENCH_DIR, 0777);
+#ifdef GBADS_LOG_URL
 	bench_fetch(BENCH_DIR);
+#endif
 	snprintf(benchArg, sizeof(benchArg), "--bench=%s/jobs.txt", BENCH_DIR);
 	args[nArgs++] = benchArg;
+	/* (the bench's own copy of the games, if it's there: beside nobody's saves, whatever gba-ds.cfg says) */
+	static char romArg[] = "--rom_dir=" BENCH_ROMS;
+	struct stat romSt;
+	if (stat(BENCH_ROMS, &romSt) == 0 && S_ISDIR(romSt.st_mode)) args[nArgs++] = romArg;
 #endif
 	int rc = gbads_main(nArgs, args);
 #ifdef GBADS_ARMGBA
