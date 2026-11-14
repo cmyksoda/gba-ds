@@ -118,8 +118,12 @@ static int gbw_game(Emu* s) {
 	return v == GBW_IRQ1 ? 1 : v == GBW_IRQ2 ? 2 : 0;
 }
 
+/* Advance Wars (USA) Rev 1 (26fd0fc9): the same RAM, its code and data moved (the battle map's routine, the unit intel's) */
+static const AwRegion awRev1 = { AW_ARMY, AW_CURSOR, AW_UNITS, AW_MENU_ROW, AW_MINIMAP_OPEN, 1, { { 4, 4, 0xFFE7C6 }, { 200, 100, 0xFFE7C6 } }, 124, { 0x03000ED0, 0x082E4148 }, 0x030036AC, 876, 0x0801FA95, 0, 537 };
+
 static const AwRegion* aw_r(Emu* s) {
 	if (!strncmp(s->gameCode, "BGWJ", 4)) return &awRegions[gbw_game(s) == 1 ? 2 : 3];
+	if (!strncmp(s->gameCode, "AWRE", 4) && emu_read8(s, 0x080000BC) == 1) return &awRev1; /* (the header's version byte) */
 	return &awRegions[(s->gameCode[2] == '2' ? 1 : 0) + (s->gameCode[3] == 'P' ? 4 : 0)];
 }
 
