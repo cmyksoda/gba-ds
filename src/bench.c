@@ -184,13 +184,15 @@ bool bench_run(Config* cfg) {
 			snprintf(sav, sizeof(sav), "%s/%s.srm", saves, base);
 			remove(sav);
 		}
-#ifdef __3DS__
-		host_mem_note("a bench job's start"); /* (a leak from one game to the next shows here) */
-#endif
 		ui_logo_prepare(cfg, cfg->rom); /* (made before the timing: on the side core it would weigh on the captures) */
 		snprintf(path, sizeof(path), "%s/job-%s.txt", dir, jobId);
 		jobResults = fopen(path, "w");
 		if (jobResults) fprintf(jobResults, "bench start: GBA DS %s, job %s\n", GBADS_VERSION, jobId);
+#ifdef __3DS__
+		/* (in the job's own lines: a leak from one game to the next shows here) */
+		snprintf(msg, sizeof(msg), "bench %s heap: %u KiB free at the start", jobId, (unsigned) (host_heap_free() >> 10));
+		put(msg);
+#endif
 		snprintf(path, sizeof(path), "%s/%s", dir, f[2]);
 		ui_script_restart(path);
 		cfg->quitAfter = atoi(f[3]);
@@ -208,6 +210,10 @@ bool bench_run(Config* cfg) {
 		game_run(cfg, cfg->rom, false);
 		/* (the script's end quits the game: the next job; a quit before it ends the bench) */
 		if (ui_ticks() >= (uint64_t) cfg->quitAfter) uiQuit = 0;
+#ifdef __3DS__
+		snprintf(msg, sizeof(msg), "bench %s heap: %u KiB free at the end", jobId, (unsigned) (host_heap_free() >> 10));
+		put(msg);
+#endif
 		if (!jobFrames) {
 			snprintf(msg, sizeof(msg), "bench %s failed: the game didn't start (the app's log says why)", jobId);
 			put(msg);
