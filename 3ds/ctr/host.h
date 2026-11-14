@@ -6,6 +6,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 /* armGBA's names for them (its 3DS host code calls these). */
 void logLine(const char* format, ...) __attribute__((format(printf, 1, 2)));
@@ -13,6 +14,11 @@ bool isEmulator(void); /* Azahar and Citra */
 bool isNew3ds(void);
 
 size_t host_heap_free(void);
+/* A ROM at the top of the heap's range, out of the way of the heap's own allocations (NULL: no room). */
+uint8_t* host_top_alloc(size_t size);
+bool host_top_free(void* p); /* false: not one of those */
+bool host_top_owns(const void* p);
+void host_rom_free(void* p); /* either kind */
 /* The core the app's side work runs on (the hidden copy of the game that
  * draws the second screen, a logo's extraction, files): the New 3DS's
  * fourth, else whichever the system gives. */

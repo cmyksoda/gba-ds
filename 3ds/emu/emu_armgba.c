@@ -73,12 +73,27 @@ void emu_read_cancel(const volatile bool* flag) {
 	readCancel = flag;
 }
 
-static uint8_t* read_file(const char* path, size_t* n) {
+#ifdef __3DS__
+#define rom_free host_rom_free
+#else
+#define rom_free free
+#endif
+
+/* top (3DS): read into a cartridge's whole buffer at the top of the heap's range, where a long session's
+ * small allocations can't cut up the room the next game's cartridge needs. */
+static uint8_t* read_file_to(const char* path, size_t* n, bool top) {
 	struct stat st;
 	*n = 0;
 	if (stat(path, &st) || st.st_size <= 0 || st.st_size > 64 * 1024 * 1024) return NULL;
 	FILE* f = fopen(path, "rb");
-	uint8_t* p = f ? malloc((size_t) st.st_size) : NULL;
+	uint8_t* p = NULL;
+#ifdef __3DS__
+	size_t const whole = gbaRomBufferSize((size_t) st.st_size);
+	if (f && top && (p = host_top_alloc(whole))) memset(p + st.st_size, 0, whole - (size_t) st.st_size);
+#else
+	(void) top;
+#endif
+	if (f && !p) p = malloc((size_t) st.st_size);
 #ifdef __3DS__
 	if (!f) fprintf(stderr, "%s: can't be opened\n", path);
 	else if (!p) fprintf(stderr, "%s: no memory for its %u KiB (%u KiB of the heap free)\n", path, (unsigned) (st.st_size >> 10), (unsigned) (host_heap_free() >> 10));
@@ -104,11 +119,15 @@ static uint8_t* read_file(const char* path, size_t* n) {
 	if (p && fread(p, 1, (size_t) st.st_size, f) == (size_t) st.st_size) *n = (size_t) st.st_size;
 #endif
 	else {
-		free(p);
+		rom_free(p);
 		p = NULL;
 	}
 	if (f) fclose(f);
 	return p;
+}
+
+static uint8_t* read_file(const char* path, size_t* n) {
+	return read_file_to(path, n, false);
 }
 
 static bool has_ext(const char* name, const char* const* exts) {
@@ -370,14 +389,19 @@ uint8_t* emu_rom_read_patched(const char* path, char files[][1024], int n, size_
 	return p ? p : emu_rom_read_all(path, size);
 }
 
-uint8_t* emu_rom_read_played(const char* path, size_t* size, int* patch, char* patchName, uint32_t* fileCrc) {
+/* top: a plain ROM file into a top block (read_file_to), for a core's own cartridge only (freed with rom_free) */
+static uint8_t* read_played(const char* path, size_t* size, int* patch, char* patchName, uint32_t* fileCrc, bool top) {
 	int r;
 	uint8_t* p = patched_rom(path, size, &r, patchName, fileCrc, NULL);
 	if (patch) *patch = r;
 	if (p) return p;
-	uint8_t* rom = emu_rom_read_all(path, size);
+	uint8_t* rom = emu_is_archive_name(path) ? zip_first_rom(path, 0, size) : read_file_to(path, size, top);
 	if (rom && fileCrc) *fileCrc = doCrc32(rom, *size);
 	return rom;
+}
+
+uint8_t* emu_rom_read_played(const char* path, size_t* size, int* patch, char* patchName, uint32_t* fileCrc) {
+	return read_played(path, size, patch, patchName, fileCrc, false);
 }
 
 /* ---------------------------------------------- one ROM, several cores
@@ -475,11 +499,17 @@ static void close_core(ArmCore* c) {
 			pthread_mutex_lock(&sharedLock);
 			c->gba->rom = NULL; /* gbaDestroy frees what's there */
 			if (--c->shared->users == 0) {
-				free(c->shared->rom);
+				rom_free(c->shared->rom);
 				memset(c->shared, 0, sizeof(*c->shared));
 			}
 			pthread_mutex_unlock(&sharedLock);
 		}
+#ifdef __3DS__
+		else if (host_top_owns(c->gba->rom)) {
+			host_top_free(c->gba->rom); /* (not malloc's, so not gbaDestroy's to free) */
+			c->gba->rom = NULL;
+		}
+#endif
 		/* (its render thread first: it draws with the hooks) */
 		renderThreadStop(c->gba);
 		split_release(c);
@@ -563,7 +593,7 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 	}
 #endif
 	if (!s) {
-		rom = emu_rom_read_played(romPath, &size, &e->patch, e->patchName, &e->fileCrc);
+		rom = read_played(romPath, &size, &e->patch, e->patchName, &e->fileCrc, true);
 		{
 			/* (the names of the ones left out, as src/emu.c reports them) */
 			int r;
@@ -604,7 +634,7 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 #ifdef __3DS__
 			/* the buffer the file was read into becomes the cartridge */
 			size_t whole = gbaRomBufferSize(size);
-			uint8_t* grown = whole > size ? realloc(rom, whole) : rom;
+			uint8_t* grown = whole > size && !host_top_owns(rom) ? realloc(rom, whole) : rom;
 			if (grown) {
 				rom = grown;
 				if (whole > size) memset(rom + size, 0, whole - size);
@@ -631,7 +661,7 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 			}
 		}
 		pthread_mutex_unlock(&sharedLock);
-		free(rom);
+		rom_free(rom);
 		if (!ok) {
 			fprintf(stderr, "could not load ROM %s\n", romPath);
 			goto fail;

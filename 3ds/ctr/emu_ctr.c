@@ -22,7 +22,7 @@ typedef struct {
 	char path[1024];
 	uint8_t* rom;
 	size_t size;
-	bool top; /* at the top of the heap's range (top_alloc), else malloc'd */
+	bool top; /* at the top of the heap's range (host_top_alloc), else malloc'd */
 	int users;
 } SharedRom;
 
@@ -44,82 +44,11 @@ void emu_read_cancel(const volatile bool* flag) {
 	readCancel = flag;
 }
 
-/* ROMs at the top of the heap's address range, the heap's end brought down below them: the heap's
- * own allocations stay underneath, so a 32 MiB ROM finds one stretch however the heap is cut up. */
-extern char* fake_heap_end;
-extern size_t hostTopBytes;
-void __malloc_lock(struct _reent* r);
-void __malloc_unlock(struct _reent* r);
-enum { TOP_BLOCKS = 8, HEAP_ROOM = 4 << 20 /* (always left for the heap to grow into) */ };
-static struct {
-	uint8_t* at;
-	size_t size;
-} topBlocks[TOP_BLOCKS];
-static char* topEnd; /* the heap's end before any ROM came */
-
-/* (under the malloc lock: sbrk reads fake_heap_end) */
-static void top_end_update(void) {
-	char* low = topEnd;
-	for (int i = 0; i < TOP_BLOCKS; ++i) {
-		if (topBlocks[i].at && (char*) topBlocks[i].at < low) low = (char*) topBlocks[i].at;
-	}
-	fake_heap_end = low;
-}
-
-static uint8_t* top_alloc(size_t size) {
-	size = (size + 0xFFF) & ~(size_t) 0xFFF;
-	__malloc_lock(_REENT);
-	if (!topEnd) topEnd = fake_heap_end;
-	char* brk = sbrk(0);
-	int slot = -1;
-	for (int i = 0; i < TOP_BLOCKS && slot < 0; ++i) {
-		if (!topBlocks[i].at) slot = i;
-	}
-	uint8_t* p = NULL;
-	/* the highest gap that takes it: between the blocks, else below the lowest */
-	for (char* ceiling = topEnd; slot >= 0;) {
-		int below = -1;
-		for (int i = 0; i < TOP_BLOCKS; ++i) {
-			if (topBlocks[i].at && (char*) topBlocks[i].at < ceiling && (below < 0 || topBlocks[i].at > topBlocks[below].at)) below = i;
-		}
-		char* floor = below >= 0 ? (char*) topBlocks[below].at + topBlocks[below].size : brk + HEAP_ROOM;
-		if (ceiling - floor >= (ptrdiff_t) size) {
-			p = (uint8_t*) (ceiling - size);
-			break;
-		}
-		if (below < 0) break;
-		ceiling = (char*) topBlocks[below].at;
-	}
-	if (p) {
-		topBlocks[slot].at = p;
-		topBlocks[slot].size = size;
-		hostTopBytes += size;
-		top_end_update();
-	}
-	__malloc_unlock(_REENT);
-	return p;
-}
-
-/* false: not one of these blocks */
-static bool top_free(uint8_t* p) {
-	bool found = false;
-	__malloc_lock(_REENT);
-	for (int i = 0; i < TOP_BLOCKS && !found; ++i) {
-		if (topBlocks[i].at != p) continue;
-		hostTopBytes -= topBlocks[i].size;
-		topBlocks[i].at = NULL;
-		top_end_update();
-		found = true;
-	}
-	__malloc_unlock(_REENT);
-	return found;
-}
-
 /* mGBA's own (memory-map-hook.patch): a MiB or more (a ROM copy for a copy of the game that writes
  * to it, an odd-sized ROM's 32 MiB) from the top as well, the rest from the heap. */
 void* anonymousMemoryMap(size_t size) {
 	if (size >= 1 << 20) {
-		uint8_t* p = top_alloc(size);
+		uint8_t* p = host_top_alloc(size);
 		if (p) {
 			memset(p, 0, size);
 			return p;
@@ -130,11 +59,11 @@ void* anonymousMemoryMap(size_t size) {
 
 void mappedMemoryFree(void* memory, size_t size) {
 	(void) size;
-	if (memory && !top_free(memory)) free(memory);
+	if (memory && !host_top_free(memory)) free(memory);
 }
 
 static void rom_free(uint8_t* p, bool top) {
-	if (top) top_free(p);
+	if (top) host_top_free(p);
 	else free(p);
 }
 
@@ -145,7 +74,7 @@ static uint8_t* read_rom(const char* path, size_t* n, bool* top) {
 	*n = 0;
 	if (stat(path, &st) || st.st_size <= 0 || st.st_size > 64 * 1024 * 1024) return NULL;
 	FILE* f = fopen(path, "rb");
-	uint8_t* p = f ? top_alloc((size_t) st.st_size) : NULL;
+	uint8_t* p = f ? host_top_alloc((size_t) st.st_size) : NULL;
 	if (p) *top = true;
 	else if (f) p = malloc((size_t) st.st_size);
 	if (!f) fprintf(stderr, "%s: can't be opened\n", path);
