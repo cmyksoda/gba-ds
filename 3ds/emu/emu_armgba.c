@@ -44,6 +44,9 @@ typedef struct ArmCore {
 	char* savePath;
 	int saveQuiet;
 	bool savePending;
+	/* armgba_stats: the lines' interval (0: none) and the counters at the last one (3DS, the game's core) */
+	unsigned statsEvery;
+	struct JitSeen* seen;
 	/* sound not yet read (emu_audio_read): stereo frames in a ring */
 	int16_t* ring;
 	size_t ringCap, ringHead, ringCount;
@@ -459,12 +462,8 @@ static void save_read(ArmCore* c) {
  * its own (the SD card can keep the game waiting for seconds). The file is never written over in place: power lost
  * half-way would leave half old, half new. */
 static int save_mode(void) {
-	static int mode = -1;
-	if (mode < 0) {
-		const char* v = getenv("GBADS_ARMGBA_SAVE");
-		mode = v ? atoi(v) & 1 : 0;
-	}
-	return mode;
+	const char* v = getenv("GBADS_ARMGBA_SAVE");
+	return v ? atoi(v) & 1 : 0;
 }
 
 static double ms_since(const struct timespec* t0) {
@@ -560,6 +559,9 @@ static bool saver_start(void) {
 	if (host_heap_free() < (1536u << 10)) return false;
 #endif
 	saver.quit = false;
+#ifdef __3DS__
+	host_next_thread_name("battery save");
+#endif
 	saver.started = pthread_create(&saver.thread, NULL, saver_main, NULL) == 0;
 	return saver.started;
 }
@@ -613,6 +615,62 @@ static void save_tick(ArmCore* c) {
 
 /* ---------------------------------------------- open, close, frames */
 
+/* gba-ds.cfg armgba_stats = N: every N frames of the game, a line in the log of what the recompiler did (blocks
+ * compiled, flushes, time in compiling and in the cache calls, code memory in use). */
+#ifdef __3DS__
+extern uint64_t jitCompileTicks, jitFlushTicks;
+extern uint32_t jitFlushCalls;
+extern bool jitStatsOn;
+
+struct JitSeen {
+	uint64_t compiled, deferred, flushes0, flushes1, compileTicks, flushTicks, invalidations, codeWrites, stepped, revived;
+	uint32_t flushCalls;
+	unsigned last;
+};
+
+/* (the game's core, once its machine is made: the key is read here, so a bench job's options can switch it) */
+static void jit_stats_open(ArmCore* c) {
+	const char* v = getenv("GBADS_ARMGBA_STATS");
+	int every = v ? atoi(v) : 0;
+	jitStatsOn = every > 0;
+	c->seen = every > 0 ? calloc(1, sizeof(*c->seen)) : NULL;
+	if (!c->seen) return;
+	c->statsEvery = (unsigned) every;
+	c->seen->compileTicks = jitCompileTicks; /* (these three are the whole program's, not this machine's) */
+	c->seen->flushTicks = jitFlushTicks;
+	c->seen->flushCalls = jitFlushCalls;
+}
+
+static void jit_stats(ArmCore* c, unsigned frame) {
+	struct JitSeen* seen = c->seen;
+	struct Jit* jit = c->gba->jit;
+	if (!seen || !jit || frame % c->statsEvery) return;
+	double const perMs = 268111.856, frames = frame - seen->last ? frame - seen->last : 1;
+	fprintf(stderr,
+	        "jit: frames %u-%u: compiled +%u, first visits stepped +%u, flushes +%u by writes or waits +%u by full memory, compiling %.2f ms and cache calls %.2f ms (%u) a frame, code %u of %u KiB (hot %u, cold %u, careful copies %u, unused %u), heap %u KiB free; invalidated +%u, writes to code +%u, instructions stepped +%u, revived +%u\n",
+	        seen->last, frame, (unsigned) (jit->compiled - seen->compiled), (unsigned) (jit->deferred - seen->deferred),
+	        (unsigned) (jit->flushReasons[0] - seen->flushes0), (unsigned) (jit->flushReasons[1] - seen->flushes1),
+	        (jitCompileTicks - seen->compileTicks) / perMs / frames, (jitFlushTicks - seen->flushTicks) / perMs / frames,
+	        (unsigned) (jitFlushCalls - seen->flushCalls), (unsigned) ((jit->codeNext - jit->codeStart) >> 10),
+	        (unsigned) (jit->codeSize >> 10), (unsigned) (jit->hotBytes >> 10), (unsigned) (jit->coldBytes >> 10),
+	        (unsigned) (jit->carefulBytes >> 10), (unsigned) (jit->wastedBytes >> 10), (unsigned) (host_heap_free() >> 10),
+	        (unsigned) (jit->invalidations - seen->invalidations), (unsigned) (jit->codeWrites - seen->codeWrites),
+	        (unsigned) (jit->stepped - seen->stepped), (unsigned) (jit->revived - seen->revived));
+	seen->invalidations = jit->invalidations;
+	seen->codeWrites = jit->codeWrites;
+	seen->stepped = jit->stepped;
+	seen->revived = jit->revived;
+	seen->compiled = jit->compiled;
+	seen->deferred = jit->deferred;
+	seen->flushes0 = jit->flushReasons[0];
+	seen->flushes1 = jit->flushReasons[1];
+	seen->compileTicks = jitCompileTicks;
+	seen->flushTicks = jitFlushTicks;
+	seen->flushCalls = jitFlushCalls;
+	seen->last = frame;
+}
+#endif
+
 static void close_core(ArmCore* c) {
 	if (!c) return;
 	if (c->gba) {
@@ -641,6 +699,9 @@ static void close_core(ArmCore* c) {
 		gbaDestroy(c->gba);
 	}
 	free(c->savePath);
+#ifdef __3DS__
+	free(c->seen);
+#endif
 	free(c->ring);
 	free(c);
 }
@@ -812,6 +873,9 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 
 	e->fb = calloc(GBA_W * GBA_H, sizeof(uint32_t));
 	e->audio = audio;
+#ifdef __3DS__
+	if (audio) jit_stats_open(c);
+#endif
 	if (audio) {
 		c->ringCap = 8192;
 		c->ring = calloc(c->ringCap, 2 * sizeof(int16_t));
@@ -857,50 +921,6 @@ static void take_picture(Emu* e) {
 	}
 }
 
-/* gba-ds.cfg armgba_stats = N: every N frames of the game, a line in the log of what the recompiler did (blocks
- * compiled, flushes, time in compiling and in the cache calls, code memory in use). */
-#ifdef __3DS__
-extern uint64_t jitCompileTicks, jitFlushTicks;
-extern uint32_t jitFlushCalls;
-extern bool jitStatsOn;
-
-static void jit_stats(struct GBA* gba, unsigned frame) {
-	static int every = -1;
-	if (every < 0) {
-		const char* v = getenv("GBADS_ARMGBA_STATS");
-		every = v ? atoi(v) : 0;
-		jitStatsOn = every > 0;
-	}
-	if (every <= 0 || !gba->jit || frame % every) return;
-	static uint64_t compiled, deferred, flushes0, flushes1, compileTicks, flushTicks, invalidations, codeWrites, stepped, revived;
-	static uint32_t flushCalls;
-	static unsigned last;
-	struct Jit* jit = gba->jit;
-	double const perMs = 268111.856, frames = frame - last ? frame - last : 1;
-	fprintf(stderr,
-	        "jit: frames %u-%u: compiled +%u, first visits stepped +%u, flushes +%u by writes or waits +%u by full memory, compiling %.2f ms and cache calls %.2f ms (%u) a frame, code %u of %u KiB (hot %u, cold %u, careful copies %u, unused %u), heap %u KiB free; invalidated +%u, writes to code +%u, instructions stepped +%u, revived +%u\n",
-	        last, frame, (unsigned) (jit->compiled - compiled), (unsigned) (jit->deferred - deferred),
-	        (unsigned) (jit->flushReasons[0] - flushes0), (unsigned) (jit->flushReasons[1] - flushes1), (jitCompileTicks - compileTicks) / perMs / frames,
-	        (jitFlushTicks - flushTicks) / perMs / frames, (unsigned) (jitFlushCalls - flushCalls), (unsigned) ((jit->codeNext - jit->codeStart) >> 10),
-	        (unsigned) (jit->codeSize >> 10), (unsigned) (jit->hotBytes >> 10), (unsigned) (jit->coldBytes >> 10),
-	        (unsigned) (jit->carefulBytes >> 10), (unsigned) (jit->wastedBytes >> 10), (unsigned) (host_heap_free() >> 10),
-	        (unsigned) (jit->invalidations - invalidations), (unsigned) (jit->codeWrites - codeWrites), (unsigned) (jit->stepped - stepped),
-	        (unsigned) (jit->revived - revived));
-	invalidations = jit->invalidations;
-	codeWrites = jit->codeWrites;
-	stepped = jit->stepped;
-	revived = jit->revived;
-	compiled = jit->compiled;
-	deferred = jit->deferred;
-	flushes0 = jit->flushReasons[0];
-	flushes1 = jit->flushReasons[1];
-	compileTicks = jitCompileTicks;
-	flushTicks = jitFlushTicks;
-	flushCalls = jitFlushCalls;
-	last = frame;
-}
-#endif
-
 static void run_frame(Emu* e, uint32_t keys, bool draw) {
 	if (emu_cancelled(e)) return;
 	ArmCore* c = AC(e);
@@ -919,7 +939,7 @@ static void run_frame(Emu* e, uint32_t keys, bool draw) {
 	if (draw) split_frame(c);
 	audioThreadTake(gba);
 #ifdef __3DS__
-	if (e->audio) jit_stats(gba, gba->video.frameCounter);
+	if (e->audio) jit_stats(c, gba->video.frameCounter);
 #endif
 	if (c->ring) {
 		const int16_t* in = (const int16_t*) gba->audio.out;

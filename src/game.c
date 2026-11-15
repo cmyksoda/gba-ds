@@ -7178,6 +7178,7 @@ static void logo_refresh(void) {
 enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 	cfg = c;
 	lateness = 1;
+	config_apply_core_env(c);
 	debug = getenv("GBADS_DEBUG") != NULL;
 	romPath = rom, lastLoop = 0;
 	game_paths(cfg, rom, &gp);

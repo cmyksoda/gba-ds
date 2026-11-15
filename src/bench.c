@@ -119,7 +119,10 @@ static void* writer_main(void* arg) {
 }
 
 static void put(const char* line) {
-	if (!q.started) q.started = pthread_create(&q.thread, NULL, writer_main, NULL) == 0;
+	if (!q.started) {
+		host_next_thread_name("bench lines");
+		q.started = pthread_create(&q.thread, NULL, writer_main, NULL) == 0;
+	}
 	if (!q.started) {
 		write_line(line);
 		return;
