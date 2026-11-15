@@ -307,7 +307,7 @@ void host_set_cores(int side, int capture, int ahead, int video, int core1, bool
 	captureCore = capture;
 	aheadCore = ahead;
 	core1Percent = core1;
-	if (video >= 0 && isNew3ds()) gbadsVideoCore = video;
+	gbadsVideoCore = video >= 0 && isNew3ds() ? video : 2;
 	core_ready(gbadsVideoCore);
 	logLine("cores: side %d, capture %d, ahead %d (-1: as built in), video %d, core 1 share %d%%", side, capture, ahead, gbadsVideoCore, core1);
 	if (probe && isNew3ds()) core_probe();
