@@ -35,9 +35,9 @@ void host_threads_job_start(void);
 void host_threads_describe(char* out, size_t n);
 /* The time sdl_ctr.c's drawing has waited for the GPU, in SDL_GetPerformanceCounter ticks (a sum that wraps). */
 uint32_t host_gpu_wait_ticks(void);
-/* gba-ds.cfg's side_core, capture_core, ahead_core (-1: as built in), core1_limit (a thread on
+/* gba-ds.cfg's side_core, capture_core, ahead_core, video_core (-1: as built in), core1_limit (a thread on
  * core 1 needs the app's share of it set) and core_probe; before any thread is made. */
-void host_set_cores(int side, int capture, int ahead, int core1Percent, bool probe);
+void host_set_cores(int side, int capture, int ahead, int video, int core1Percent, bool probe);
 /* What to give host_next_thread_core for the map capture's thread, and for the Frame Buffer's (mGBA's
  * drawing thread on or not). */
 int host_capture_core(void);

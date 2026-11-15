@@ -61,6 +61,7 @@ typedef struct Config {
 	int captureCore;   /* capture_core: the hidden copy's thread */
 	int aheadCore;     /* ahead_core: frame_buffer's thread */
 	int sideCore;      /* side_core: the pad thread, logos, files and the rest */
+	int videoCore;     /* video_core: mGBA's drawing thread (needs the patched libmgba) */
 	int core1Limit;    /* core1_limit: the percent of the system core given to a thread on core 1 */
 	bool coreProbe;    /* core_probe: how much CPU each core gives a thread, in the log at start */
 	bool abSwap;       /* GBA A on the bottom face button instead of the right one */

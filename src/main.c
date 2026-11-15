@@ -208,7 +208,7 @@ int main(int argc, char** argv) {
 	signal(SIGHUP, on_signal);
 
 #ifdef __3DS__
-	host_set_cores(cfg.sideCore, cfg.captureCore, cfg.aheadCore, cfg.core1Limit, cfg.coreProbe);
+	host_set_cores(cfg.sideCore, cfg.captureCore, cfg.aheadCore, cfg.videoCore, cfg.core1Limit, cfg.coreProbe);
 #endif
 	if (!ui_init(&cfg, true)) return 1;
 	ra_init(&cfg); /* signs in to RetroAchievements in the background */

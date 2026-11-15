@@ -216,6 +216,7 @@ void host_mem_note(const char* what) {
 }
 
 static int sideCore = -1, captureCore = -1, aheadCore = -1;
+int gbadsVideoCore = 2; /* (the patched libmgba's threading.h reads it: mGBA's drawing thread) */
 static int core1Percent = 50;
 static bool core1Set;
 
@@ -301,12 +302,14 @@ static void core_probe(void) {
 	}
 }
 
-void host_set_cores(int side, int capture, int ahead, int core1, bool probe) {
+void host_set_cores(int side, int capture, int ahead, int video, int core1, bool probe) {
 	sideCore = side;
 	captureCore = capture;
 	aheadCore = ahead;
 	core1Percent = core1;
-	logLine("cores: side %d, capture %d, ahead %d (-1: as built in), core 1 share %d%%", side, capture, ahead, core1);
+	if (video >= 0 && isNew3ds()) gbadsVideoCore = video;
+	core_ready(gbadsVideoCore);
+	logLine("cores: side %d, capture %d, ahead %d (-1: as built in), video %d, core 1 share %d%%", side, capture, ahead, gbadsVideoCore, core1);
 	if (probe && isNew3ds()) core_probe();
 }
 

@@ -43,7 +43,7 @@ void config_defaults(Config* c) {
 	strcpy(c->bezelInner, "1A1A1A");
 	strcpy(c->bezelOuter, "102060");
 	c->mapInterval = 60;
-	c->captureCore = c->aheadCore = c->sideCore = -1;
+	c->captureCore = c->aheadCore = c->sideCore = c->videoCore = -1;
 	c->core1Limit = 50;
 	c->sway = true;
 	c->audioLatency = 64;
@@ -172,6 +172,7 @@ static bool set_option(Config* c, const char* key, const char* val) {
 	CORE("capture_core", captureCore)
 	CORE("ahead_core", aheadCore)
 	CORE("side_core", sideCore)
+	CORE("video_core", videoCore)
 	INT("core1_limit", core1Limit)
 	BOOL("core_probe", coreProbe)
 	BOOL("ab_swap", abSwap)
