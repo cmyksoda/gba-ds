@@ -8264,8 +8264,9 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 			const MapProfile* ip = mapcap_profile(mc);
 			int every = ip && ip->interval > 0 && ip->interval < cfg->mapInterval ? ip->interval : cfg->mapInterval;
 			int interval = cheapFail ? every : every << SDL_min(fails, 3);
-			/* capture_throttle: further apart while the frames run late (squared: 87% speed, 1.3 times) */
-			if (cfg->captureThrottle > 0) interval = (int) (interval * SDL_min(lateness * lateness, (double) cfg->captureThrottle));
+			/* capture_throttle: further apart while the frames run late (squared: 87% speed, 1.3 times); not after
+			 * failures, whose backoff above already spaces them out */
+			if (cfg->captureThrottle > 0 && !fails) interval = (int) (interval * SDL_min(lateness * lateness, (double) cfg->captureThrottle));
 			/* after failures, a room change still triggers a try, but no more
 			 * often than the normal interval */
 			bool due = sinceMapRequest >= interval ||
