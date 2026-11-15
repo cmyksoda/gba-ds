@@ -706,7 +706,8 @@ SDL_Texture* SDL_CreateTexture(SDL_Renderer* r, Uint32 format, int access, int w
 		/* (a new game's textures are made while the last game's wait to be freed: its memory may be what's missing) */
 		int freed = doomed_flush();
 		if (freed) ok = texture_alloc(t, access);
-		logLine("textures: no memory for a %dx%d texture, %d waiting ones freed: %s", w, h, freed, ok ? "made" : "not made");
+		static int told; /* (a texture that keeps failing is asked for every frame) */
+		if (told < 200) ++told, logLine("textures: no memory for a %dx%d texture, %d waiting ones freed: %s", w, h, freed, ok ? "made" : "not made");
 	}
 	if (!ok) {
 		set_error("no memory for a %dx%d texture", w, h);
