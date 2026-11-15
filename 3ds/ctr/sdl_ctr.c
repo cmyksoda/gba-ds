@@ -751,6 +751,12 @@ static int doomed_flush(void) {
 	if (!n) return 0;
 	if (inFrame) {
 		C2D_Flush();
+		/* (as SDL_RenderPresent leaves them: frame_begin takes the blend and the scissor as these) */
+		if (boundBlend != SDL_BLENDMODE_BLEND) set_blend(SDL_BLENDMODE_BLEND);
+		if (scissorOn) {
+			C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+			scissorOn = false;
+		}
 		C3D_FrameEnd(0);
 		inFrame = false;
 		bound = NULL;
