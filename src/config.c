@@ -28,6 +28,7 @@ void config_defaults(Config* c) {
 	strcpy(c->topScreen, "auto");
 	strcpy(c->screenMatch, "keep");
 	strcpy(c->touchMap, "window");
+	strcpy(c->idleLoops, "remove");
 	c->touchRotate = -1;
 	c->map = true;
 	c->mapCrop = true;
@@ -196,6 +197,7 @@ static bool set_option(Config* c, const char* key, const char* val) {
 	}
 	BOOL("match_display", matchDisplay)
 	BOOL("threaded_video", threadedVideo)
+	STR("idle_loops", idleLoops)
 	BOOL("rewind", rewind)
 	INT("rewind_seconds", rewindSeconds)
 	INT("map_interval", mapInterval)

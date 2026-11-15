@@ -967,6 +967,10 @@ void emu_threaded_video(bool on) {
 	(void) on;
 }
 
+void emu_idle_loops(const char* mode) {
+	(void) mode;
+}
+
 bool emu_threaded(const Emu* e) {
 	(void) e;
 	return false;

@@ -7184,6 +7184,7 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 	game_paths(cfg, rom, &gp);
 	patches_setup(rom); /* GEN-9: the patches folder, what's on, and the plan every core opens the ROM with */
 	profile_set_rom(NULL, 0);
+	emu_idle_loops(cfg->idleLoops);
 #ifdef __3DS__
 	/* (again for each game: the bench's per-job options) */
 	host_set_cores(cfg->sideCore, cfg->captureCore, cfg->aheadCore, cfg->videoCore, cfg->core1Limit, false);

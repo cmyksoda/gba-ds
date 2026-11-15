@@ -75,6 +75,9 @@ void emu_frame(Emu* e, uint32_t keys);
 void emu_frame_blind(Emu* e, uint32_t keys);
 /* The next game core opened with sound has its picture drawn on a thread of mGBA's (threaded_video). */
 void emu_threaded_video(bool on);
+/* How the next cores opened skip their games' idle loops (idle_loops): "remove" (mGBA's own table), "detect",
+ * "ignore", or "known" (remove for the games with a known loop, mGBA's table and ours, ignore for the rest). */
+void emu_idle_loops(const char* mode);
 /* this core's picture is drawn on mGBA's thread */
 bool emu_threaded(const Emu* e);
 /* mGBA's core only: the time emu_frame has waited for that thread's last lines, in microseconds (a sum that wraps). */
