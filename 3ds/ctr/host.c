@@ -218,14 +218,15 @@ void host_mem_note(const char* what) {
 static int sideCore = -1, captureCore = -1, aheadCore = -1;
 int gbadsVideoCore = 2; /* (the patched libmgba's threading.h reads it: mGBA's drawing thread) */
 static int core1Percent = 50;
-static bool core1Set;
+static int core1Applied; /* (0: not yet: once set it can't go back, but another value can be asked for) */
 
-/* A thread on the system core needs the app's share of it first, which then stays set. */
+/* A thread on the system core needs the app's share of it first; a later core1_limit (another job's) is asked for again. */
 static void core_ready(int core) {
-	if (core != 1 || core1Set) return;
-	core1Set = true;
+	if (core != 1) return;
 	if (core1Percent < 5) core1Percent = 5;
 	if (core1Percent > 89) core1Percent = 89;
+	if (core1Applied == core1Percent) return;
+	core1Applied = core1Percent;
 	Result rc = APT_SetAppCpuTimeLimit(core1Percent);
 	logLine("core 1: the app's share set to %d%% (%08lX)", core1Percent, (unsigned long) rc);
 }
