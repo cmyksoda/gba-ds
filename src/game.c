@@ -7391,6 +7391,7 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 	android_pin_game_thread();
 #endif
 	while (!done) {
+		Uint64 loopT0 = SDL_GetPerformanceCounter(); /* (before the wait for the frame buffer's thread: capture_throttle counts it) */
 		ahead_sync(); /* the core is the loop's again */
 		screen_restore_apply();
 		bug_tick();
@@ -8387,7 +8388,7 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 		bench_frame(frameCount, benchEmuMs, (drawT1 - drawT0) * 1000.0 / SDL_GetPerformanceFrequency(),
 		            (drawT0 - emuT1) * 1000.0 / SDL_GetPerformanceFrequency(), mc && mapcap_busy(mc));
 		if (cfg->captureThrottle > 0 && !ff) {
-			double over = (double) (drawT1 - workT0) / SDL_GetPerformanceFrequency() / frameSec;
+			double over = (double) (drawT1 - loopT0) / SDL_GetPerformanceFrequency() / frameSec;
 			lateness += (SDL_max(over, 1.0) - lateness) / 32;
 		}
 		{
