@@ -497,10 +497,30 @@ static long frame_luma(const uint32_t* px, size_t n) {
 static void place_rate(MapCapture* mc);
 
 static const char* do_capture_(MapCapture* mc, const void* state);
-static uint32_t captureUs, captureFrames;
+/* The bench's sums: finished captures plus the one running so far, so a capture that outlasts a bench window is shared
+ * out over the windows it ran in (the game thread reads; it also owns mc). */
+static pthread_mutex_t workLock = PTHREAD_MUTEX_INITIALIZER;
+static struct {
+	uint32_t us, frames, since;
+	MapCapture* mc;
+	unsigned long f0;
+} work;
+
+static uint32_t clock_us(const struct timespec* t) {
+	return (uint32_t) t->tv_sec * 1000000u + (uint32_t) (t->tv_nsec / 1000);
+}
+
 void mapcap_work_totals(uint32_t* us, uint32_t* frames) {
-	*us = __atomic_load_n(&captureUs, __ATOMIC_RELAXED);
-	*frames = __atomic_load_n(&captureFrames, __ATOMIC_RELAXED);
+	struct timespec t;
+	pthread_mutex_lock(&workLock);
+	clock_gettime(CLOCK_MONOTONIC, &t); /* (inside the lock: a total never reads more than its capture's end gives) */
+	*us = work.us;
+	*frames = work.frames;
+	if (work.mc) {
+		*us += clock_us(&t) - work.since;
+		*frames += (uint32_t) (__atomic_load_n(&work.mc->shadow.frames, __ATOMIC_RELAXED) - work.f0);
+	}
+	pthread_mutex_unlock(&workLock);
 }
 /* A capture, timed for GBADS_DEBUG: how long, how many of the shadow
  * core's frames */
@@ -508,12 +528,16 @@ static const char* do_capture(MapCapture* mc, const void* state) {
 	static int dbg = -1;
 	if (dbg < 0) dbg = getenv("GBADS_DEBUG") != NULL;
 	struct timespec t0, t1;
-	clock_gettime(CLOCK_MONOTONIC, &t0);
 	unsigned long f0 = mc->shadow.frames, b0 = mc->shadow.blindFrames;
+	pthread_mutex_lock(&workLock);
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	work.since = clock_us(&t0), work.f0 = f0, work.mc = mc;
+	pthread_mutex_unlock(&workLock);
 	const char* err = do_capture_(mc, state);
+	pthread_mutex_lock(&workLock);
 	clock_gettime(CLOCK_MONOTONIC, &t1);
-	__atomic_fetch_add(&captureUs, (uint32_t) ((t1.tv_sec - t0.tv_sec) * 1000000 + (t1.tv_nsec - t0.tv_nsec) / 1000), __ATOMIC_RELAXED);
-	__atomic_fetch_add(&captureFrames, (uint32_t) (mc->shadow.frames - f0), __ATOMIC_RELAXED);
+	work.us += clock_us(&t1) - clock_us(&t0), work.frames += (uint32_t) (mc->shadow.frames - f0), work.mc = NULL;
+	pthread_mutex_unlock(&workLock);
 	if (dbg) fprintf(stderr, "capture: %.0f ms, %lu frames (%lu drawn)%s%s\n", (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6,
 	                 mc->shadow.frames - f0, (mc->shadow.frames - f0) - (mc->shadow.blindFrames - b0),
 	                 mc->cancel ? ", called off" : err ? ": " : "", mc->cancel ? "" : err ? err : "");
