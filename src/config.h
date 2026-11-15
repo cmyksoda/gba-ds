@@ -55,6 +55,7 @@ typedef struct Config {
 	bool matchDisplay; /* run at the display's refresh rate (if close to the GBA's) instead of 59.73 Hz */
 	bool threadedVideo; /* threaded_video: mGBA draws the picture on a thread of its own (the 3DS's default, on a New 3DS) */
 	char idleLoops[8];  /* idle_loops: remove | detect | ignore | known (see emu_idle_loops); armGBA ignores it */
+	bool hudLayers;     /* hud_layers: the HUD's second screen is a backdrop with its pieces put on it by the GPU (the 3DS's default) */
 	bool showLogo;     /* the game's logo on the second screen when it has nothing else (off: blank) */
 	int mapInterval;   /* frames between periodic map refreshes */
 	int captureThrottle; /* capture_throttle: up to this many times map_interval while frames run over budget (0: off) */
