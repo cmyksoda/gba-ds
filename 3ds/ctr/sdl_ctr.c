@@ -107,13 +107,13 @@ static void thread_main(void* arg) {
 /* The app's own side threads (a save written, a file read): on the system's
  * core, below the game. */
 SDL_Thread* SDL_CreateThread(SDL_ThreadFunction fn, const char* name, void* data) {
-	(void) name;
 	SDL_Thread* t = calloc(1, sizeof(*t));
 	if (!t) return NULL;
 	t->fn = fn;
 	t->data = data;
 	s32 priority = 0x30;
 	svcGetThreadPriority(&priority, CUR_THREAD_HANDLE);
+	host_next_thread_name(name ? name : "sdl thread");
 	t->t = threadCreate(thread_main, t, 64 * 1024, priority + 1, host_side_core(), true);
 	if (!t->t) {
 		set_error("no thread");
@@ -433,6 +433,20 @@ int SDL_RenderSetVSync(SDL_Renderer* r, int vsync) {
 static void doomed_free(void);
 static void doomed_targets_free(void);
 
+/* The bench's "gpu wait": what the calls that can wait for the GPU take (C3D_FrameBegin and C3D_FrameEnd, a picture's
+ * display transfer). */
+static atomic_uint gpuWait;
+#define GPU_WAIT(call) \
+	do { \
+		u64 waitT0 = svcGetSystemTick(); \
+		call; \
+		atomic_fetch_add(&gpuWait, (unsigned) (svcGetSystemTick() - waitT0)); \
+	} while (0)
+
+uint32_t host_gpu_wait_ticks(void) {
+	return atomic_load(&gpuWait);
+}
+
 static void frame_begin(void) {
 	if (inFrame) return;
 	bool sync = false;
@@ -441,7 +455,7 @@ static void frame_begin(void) {
 		if (windows[i].ren) windows[i].ren->presented = false;
 	}
 	doomed_targets_free(); /* (citro3d stops the app if a render target goes inside a frame) */
-	C3D_FrameBegin(sync ? C3D_FRAME_SYNCDRAW : 0);
+	GPU_WAIT(C3D_FrameBegin(sync ? C3D_FRAME_SYNCDRAW : 0));
 	doomed_free();
 	inFrame = true;
 	bound = NULL;
@@ -527,7 +541,7 @@ void SDL_RenderPresent(SDL_Renderer* r) {
 		C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
 		scissorOn = false;
 	}
-	C3D_FrameEnd(0);
+	GPU_WAIT(C3D_FrameEnd(0));
 	inFrame = false;
 	bound = NULL;
 	static int frames;
@@ -846,9 +860,9 @@ static bool update_by_gpu(SDL_Texture* t, const void* pixels, int pitch) {
 		}
 	}
 	cache_flush(stage, need * 4);
-	C3D_SyncDisplayTransfer(stage, GX_BUFFER_DIM(texW, h), (u32*) t->tex.data, GX_BUFFER_DIM(texW, h),
-	                        GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
-	                            GX_TRANSFER_OUT_TILED(1));
+	GPU_WAIT(C3D_SyncDisplayTransfer(stage, GX_BUFFER_DIM(texW, h), (u32*) t->tex.data, GX_BUFFER_DIM(texW, h),
+	                                 GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
+	                                     GX_TRANSFER_OUT_TILED(1)));
 	return true;
 }
 
@@ -1185,6 +1199,7 @@ static void pad_start(void) {
 	s32 priority = 0x30;
 	svcGetThreadPriority(&priority, CUR_THREAD_HANDLE);
 	padStop = false;
+	host_next_thread_name("pad");
 	padThread = threadCreate(pad_main, NULL, 8 * 1024, priority - 1, host_side_core(), false);
 }
 

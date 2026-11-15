@@ -1,5 +1,6 @@
 /* The test bench (bench = JOBS): every job starts a game from power-on, plays its input script unpaced and logs
- * frame times every 60 frames. */
+ * frame times every 60 frames (after "second screen": video wait, hidden copy, hidden frames and, on the 3DS, gpu
+ * wait). A 3DS job also logs which core each thread ran on, and a job line's OPTIONS (bench.c) set gba-ds.cfg keys. */
 #ifndef GBADS_BENCH_H
 #define GBADS_BENCH_H
 

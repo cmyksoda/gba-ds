@@ -830,6 +830,7 @@ static bool ahead_start(uint32_t keys) {
 #ifdef __3DS__
 		/* (the New 3DS's third core, unless mGBA's drawing thread is there) */
 		host_next_thread_core(emu_threaded(&emu) ? 3 : 2);
+		host_next_thread_name("frame buffer");
 #endif
 		ahead.started = pthread_create(&ahead.thread, NULL, ahead_worker, NULL) == 0;
 	}

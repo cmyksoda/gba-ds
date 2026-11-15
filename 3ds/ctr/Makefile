@@ -48,7 +48,7 @@ COMMON   := -g -fwrapv -flto -fomit-frame-pointer -ffunction-sections -mword-rel
             -D__3DS__ -I$(CTRULIB)/include -I$(PORTLIBS)/include
 CFLAGS   := $(COMMON) -std=gnu11
 ASFLAGS  := -g $(ARCH)
-LDFLAGS  := -specs=3dsx.specs -g -O3 -fwrapv -flto=auto -mword-relocations $(ARCH) -Wl,-Map,$(BUILD)/$(TARGET).map -Wl,--gc-sections -Wl,--wrap=stat$(if $(TEST), -Wl$(comma)--wrap=malloc -Wl$(comma)--wrap=calloc)
+LDFLAGS  := -specs=3dsx.specs -g -O3 -fwrapv -flto=auto -mword-relocations $(ARCH) -Wl,-Map,$(BUILD)/$(TARGET).map -Wl,--gc-sections -Wl,--wrap=stat -Wl,--wrap=threadCreate$(if $(TEST), -Wl$(comma)--wrap=malloc -Wl$(comma)--wrap=calloc)
 LIBS     := $(if $(filter armgba,$(CORE)),,$(MGBA_BUILD)/libmgba.a) -L$(CTRULIB)/lib -L$(PORTLIBS)/lib -lcitro2d -lcitro3d -lctru -lz -lm
 
 D3 := $(REPO)/3ds

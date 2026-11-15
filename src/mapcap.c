@@ -3,6 +3,9 @@
 #ifdef __ANDROID__
 #include "android.h"
 #endif
+#ifdef __3DS__
+#include "host.h"
+#endif
 
 #include <pthread.h>
 #include <sys/resource.h>
@@ -494,6 +497,11 @@ static long frame_luma(const uint32_t* px, size_t n) {
 static void place_rate(MapCapture* mc);
 
 static const char* do_capture_(MapCapture* mc, const void* state);
+static uint32_t captureUs, captureFrames;
+void mapcap_work_totals(uint32_t* us, uint32_t* frames) {
+	*us = __atomic_load_n(&captureUs, __ATOMIC_RELAXED);
+	*frames = __atomic_load_n(&captureFrames, __ATOMIC_RELAXED);
+}
 /* A capture, timed for GBADS_DEBUG: how long, how many of the shadow
  * core's frames */
 static const char* do_capture(MapCapture* mc, const void* state) {
@@ -504,6 +512,8 @@ static const char* do_capture(MapCapture* mc, const void* state) {
 	unsigned long f0 = mc->shadow.frames, b0 = mc->shadow.blindFrames;
 	const char* err = do_capture_(mc, state);
 	clock_gettime(CLOCK_MONOTONIC, &t1);
+	__atomic_fetch_add(&captureUs, (uint32_t) ((t1.tv_sec - t0.tv_sec) * 1000000 + (t1.tv_nsec - t0.tv_nsec) / 1000), __ATOMIC_RELAXED);
+	__atomic_fetch_add(&captureFrames, (uint32_t) (mc->shadow.frames - f0), __ATOMIC_RELAXED);
 	if (dbg) fprintf(stderr, "capture: %.0f ms, %lu frames (%lu drawn)%s%s\n", (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6,
 	                 mc->shadow.frames - f0, (mc->shadow.frames - f0) - (mc->shadow.blindFrames - b0),
 	                 mc->cancel ? ", called off" : err ? ": " : "", mc->cancel ? "" : err ? err : "");
@@ -841,6 +851,9 @@ static void start_thread(MapCapture* mc) {
 	if (sync) mc->noThread = true;
 	if (!mc->running && !mc->noThread) {
 		mc->running = true;
+#ifdef __3DS__
+		host_next_thread_name("hidden copy");
+#endif
 		if (pthread_create(&mc->thread, NULL, worker, mc) != 0) mc->running = false, mc->noThread = true;
 	}
 }

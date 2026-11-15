@@ -224,6 +224,122 @@ void host_next_thread_core(int core) {
 	nextCore = core;
 }
 
+/* Every thread made (libmgba's and libctru's too: the build wraps threadCreate), with the core it asked for and
+ * the one svcGetProcessorID gave inside it. */
+enum { THREAD_ROWS = 24 };
+static struct {
+	char name[48];
+	s8 asked[4];
+	u8 tries;
+	int ran; /* -1: not started */
+	bool made, alive;
+} rows[THREAD_ROWS];
+static LightLock rowsLock;
+static const char* nextName;
+
+static void __attribute__((constructor)) threads_init(void) {
+	LightLock_Init(&rowsLock);
+}
+
+void host_next_thread_name(const char* name) {
+	nextName = name;
+}
+
+struct traced {
+	ThreadFunc fn;
+	void* arg;
+	int row;
+};
+
+static void traced_main(void* p) {
+	struct traced t = *(struct traced*) p;
+	free(p);
+	int core = (int) svcGetProcessorID();
+	LightLock_Lock(&rowsLock);
+	rows[t.row].ran = core;
+	rows[t.row].alive = true;
+	LightLock_Unlock(&rowsLock);
+	t.fn(t.arg);
+	LightLock_Lock(&rowsLock);
+	rows[t.row].alive = false;
+	LightLock_Unlock(&rowsLock);
+}
+
+Thread __real_threadCreate(ThreadFunc entry, void* arg, size_t stackSize, int prio, int core, bool detached);
+Thread __wrap_threadCreate(ThreadFunc entry, void* arg, size_t stackSize, int prio, int core, bool detached) {
+	char name[sizeof(rows[0].name)];
+	if (nextName) snprintf(name, sizeof(name), "%s", nextName);
+	/* (known by their stack and priority: libmgba's threading.h, and libctru's aptInit, gspInit and ndspInit) */
+	else if (stackSize == 0x8000 && prio == 0x18) snprintf(name, sizeof(name), "mgba video");
+	else if (stackSize == 0x1000 && prio == 0x31) snprintf(name, sizeof(name), "apt events");
+	else if (stackSize == 0x1000 && prio == 0x1a) snprintf(name, sizeof(name), "gpu events");
+	else if (stackSize == 0x1000 && prio == 0x18) snprintf(name, sizeof(name), "audio (ndsp)");
+	else snprintf(name, sizeof(name), "other %uK prio %x from %p", (unsigned) (stackSize >> 10), prio, __builtin_return_address(0));
+	nextName = NULL;
+	int row = -1;
+	LightLock_Lock(&rowsLock);
+	/* (a creator that failed on one core and tries another: the same row) */
+	for (int i = 0; i < THREAD_ROWS && row < 0; ++i) {
+		if (rows[i].tries && !rows[i].made && rows[i].tries < 4 && !strcmp(rows[i].name, name)) row = i;
+	}
+	for (int i = 0; i < THREAD_ROWS && row < 0; ++i) {
+		if (!rows[i].tries) {
+			row = i;
+			memset(&rows[i], 0, sizeof(rows[i]));
+			snprintf(rows[i].name, sizeof(rows[i].name), "%s", name);
+			rows[i].ran = -1;
+		}
+	}
+	if (row >= 0) rows[row].asked[rows[row].tries++] = (s8) core;
+	LightLock_Unlock(&rowsLock);
+	struct traced* t = row >= 0 ? malloc(sizeof(*t)) : NULL;
+	if (t) *t = (struct traced) { entry, arg, row };
+	Thread made = __real_threadCreate(t ? traced_main : entry, t ? (void*) t : arg, stackSize, prio, core, detached);
+	if (!made) free(t);
+	if (made && t) {
+		LightLock_Lock(&rowsLock);
+		rows[row].made = true;
+		LightLock_Unlock(&rowsLock);
+	}
+	return made;
+}
+
+void host_threads_job_start(void) {
+	LightLock_Lock(&rowsLock);
+	for (int i = 0; i < THREAD_ROWS; ++i) {
+		if (!rows[i].alive) rows[i].tries = 0;
+	}
+	LightLock_Unlock(&rowsLock);
+}
+
+/* (an emulator's processor id is not 0 to 3: marked with a ?) */
+static const char* core_text(int core, char* buf) {
+	snprintf(buf, 16, core >= 0 && core <= 3 ? "%d" : "?%d", core);
+	return buf;
+}
+
+void host_threads_describe(char* out, size_t n) {
+	char c[16];
+	size_t used = (size_t) snprintf(out, n, "game core %s", core_text((int) svcGetProcessorID(), c));
+	LightLock_Lock(&rowsLock);
+	for (int i = 0; i < THREAD_ROWS && used < n; ++i) {
+		if (!rows[i].tries) continue;
+		used += (size_t) snprintf(out + used, n - used, "; %s ", rows[i].name);
+		if (used >= n) break;
+		if (!rows[i].made) used += (size_t) snprintf(out + used, n - used, "not made");
+		else if (rows[i].ran < 0) used += (size_t) snprintf(out + used, n - used, "not started");
+		else used += (size_t) snprintf(out + used, n - used, "core %s", core_text(rows[i].ran, c));
+		if (rows[i].tries > 1 || rows[i].asked[0] != rows[i].ran) {
+			for (int k = 0; k < rows[i].tries && used < n; ++k) {
+				bool last = k == rows[i].tries - 1;
+				used += (size_t) snprintf(out + used, n - used, "%s%d%s", k ? ", then " : " (asked ", rows[i].asked[k],
+				                          last ? (rows[i].made ? ")" : ", refused)") : ", refused");
+			}
+		}
+	}
+	LightLock_Unlock(&rowsLock);
+}
+
 /* pthread_create for the app's threads (the build names it in place of the
  * C library's): on the side core, a step below the game, with room on the
  * stack for an emulator. libctru's pthread_t is its Thread, so pthread_join
@@ -250,9 +366,17 @@ int host_pthread_create(pthread_t* thread, const pthread_attr_t* attr, void* (*f
 	svcGetThreadPriority(&priority, CUR_THREAD_HANDLE);
 	int core = nextCore != -100 && isNew3ds() ? nextCore : host_side_core();
 	nextCore = -100;
+	const char* name = nextName ? nextName : "thread";
+	nextName = name;
 	Thread t = threadCreate(start_main, s, 256 * 1024, priority + 1, core, false);
-	if (!t && core != host_side_core()) t = threadCreate(start_main, s, 256 * 1024, priority + 1, core = host_side_core(), false);
-	if (!t && core != -2) t = threadCreate(start_main, s, 256 * 1024, priority + 1, core = -2, false);
+	if (!t && core != host_side_core()) {
+		nextName = name;
+		t = threadCreate(start_main, s, 256 * 1024, priority + 1, core = host_side_core(), false);
+	}
+	if (!t && core != -2) {
+		nextName = name;
+		t = threadCreate(start_main, s, 256 * 1024, priority + 1, core = -2, false);
+	}
 	logLine("thread %p: %s (core %d asked)", (void*) fn, t ? "made" : "not made", core);
 	host_mem_note("a thread");
 	if (!t) {

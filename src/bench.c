@@ -1,14 +1,16 @@
 /* The test bench: see bench.h. A jobs file holds lines
  *
- *   job ID | ROM FILE | SCRIPT | FRAMES
+ *   job ID | ROM FILE | SCRIPT | FRAMES | OPTIONS
  *
  * the ROM in rom_dir, the script (an input script, its ticks the game's frames) beside the jobs file. Each job runs
  * with the bench's own saves/ and states/ folders beside the jobs file, never the player's, starting with no battery
- * save; results go to stderr and to results.txt there. */
+ * save; results go to stderr and to results.txt there. OPTIONS (optional): gba-ds.cfg lines as key=value words, set
+ * for this job alone (job ID@suffix: the same game run under other options). */
 #include "bench.h"
 
 #include "emu.h"
 #include "game.h"
+#include "mapcap.h"
 #include "profiles.h"
 #include "paths.h"
 #include "ui.h"
@@ -39,6 +41,27 @@ static struct {
 	int busy;
 	uint64_t first;
 } w;
+/* what the other threads' sums stood at when this window began (the sums wrap: only differences count) */
+typedef struct {
+	uint32_t video, hiddenUs, hiddenFrames, gpu;
+} Sums;
+static Sums base;
+static char threadsShown[512];
+
+static void sums_read(Sums* s) {
+#ifndef GBADS_ARMGBA
+	s->video = emu_video_wait_us();
+#else
+	s->video = 0;
+#endif
+	mapcap_work_totals(&s->hiddenUs, &s->hiddenFrames);
+#ifdef __3DS__
+	s->gpu = host_gpu_wait_ticks();
+#else
+	s->gpu = 0;
+#endif
+}
+
 
 bool bench_active(void) {
 	return active;
@@ -53,12 +76,27 @@ static void put(const char* line) {
 	if (jobResults) fprintf(jobResults, "%s\n", line);
 }
 
+/* Which core each thread ran on (the console's; an emulator's processor ids mean nothing), once for a job, again if it
+ * changed by the end. */
+static void threads_line(void) {
+#ifdef __3DS__
+	char now[sizeof(threadsShown)];
+	host_threads_describe(now, sizeof(now));
+	if (!strcmp(now, threadsShown)) return;
+	memcpy(threadsShown, now, sizeof(now));
+	char line[sizeof(now) + 96];
+	snprintf(line, sizeof(line), "bench %s threads: %s", jobId, now);
+	put(line);
+#endif
+}
+
 void bench_frame(uint64_t frame, double emuMs, double drawMs, double screenMs, bool captureBusy) {
 	if (!active) return;
 	++jobFrames;
 	Uint64 now = SDL_GetPerformanceCounter();
 	if (!lastT) {
 		lastT = now;
+		sums_read(&base);
 		return;
 	}
 	double ms = (now - lastT) * 1000.0 / SDL_GetPerformanceFrequency();
@@ -72,12 +110,25 @@ void bench_frame(uint64_t frame, double emuMs, double drawMs, double screenMs, b
 	w.screen += screenMs;
 	w.busy += captureBusy;
 	if (w.n == WINDOW) {
-		char line[256];
-		snprintf(line, sizeof(line), "bench %s frames %llu-%llu: %.2f ms, worst %.2f, emulating %.2f, drawing %.2f, capture busy %d%%, second screen %.2f",
-		         jobId, (unsigned long long) w.first, (unsigned long long) frame, w.sum / w.n, w.worst, w.emu / w.n, w.draw / w.n,
-		         w.busy * 100 / w.n, w.screen / w.n);
+		/* (the columns after "second screen" are appended: video wait is part of emulating, the others are not) */
+		char line[384];
+		Sums s;
+		sums_read(&s);
+		int len = snprintf(line, sizeof(line),
+		                   "bench %s frames %llu-%llu: %.2f ms, worst %.2f, emulating %.2f, drawing %.2f, capture busy %d%%, second screen %.2f",
+		                   jobId, (unsigned long long) w.first, (unsigned long long) frame, w.sum / w.n, w.worst, w.emu / w.n,
+		                   w.draw / w.n, w.busy * 100 / w.n, w.screen / w.n);
+		len += snprintf(line + len, sizeof(line) - (size_t) len, ", video wait %.2f, hidden copy %.2f, hidden frames %u",
+		                (s.video - base.video) / 1000.0 / w.n, (s.hiddenUs - base.hiddenUs) / 1000.0 / w.n,
+		                (unsigned) (s.hiddenFrames - base.hiddenFrames));
+#ifdef __3DS__
+		len += snprintf(line + len, sizeof(line) - (size_t) len, ", gpu wait %.2f",
+		                (s.gpu - base.gpu) * 1000.0 / SDL_GetPerformanceFrequency() / w.n);
+#endif
 		put(line);
+		base = s;
 		memset(&w, 0, sizeof(w));
+		if (!threadsShown[0]) threads_line();
 	}
 }
 
@@ -97,6 +148,23 @@ static bool same_dir(const char* a, const char* b) {
 	while (na > 1 && ra[na - 1] == '/') ra[--na] = 0;
 	while (nb > 1 && rb[nb - 1] == '/') rb[--nb] = 0;
 	return !strcmp(ra, rb);
+}
+
+/* A job's OPTIONS on cfg: key=value words, the keys as gba-ds.cfg has them (a - is fine for a _). False, with the word
+ * that isn't an option, if one isn't. */
+static bool apply_options(Config* cfg, char* words, char* bad, size_t badSize) {
+	for (char* word = strtok(words, " \t"); word; word = strtok(NULL, " \t")) {
+		char* eq = strchr(word, '=');
+		if (eq) *eq = 0;
+		for (char* k = word; *k; ++k) {
+			if (*k == '-') *k = '_';
+		}
+		if (!eq || !config_set(cfg, word, eq + 1)) {
+			snprintf(bad, badSize, "%s", word);
+			return false;
+		}
+	}
+	return true;
 }
 
 bool bench_run(Config* cfg) {
@@ -156,9 +224,9 @@ bool bench_run(Config* cfg) {
 	while (!uiQuit && fgets(line, sizeof(line), jobs)) {
 		char* s = trim(line);
 		if (strncmp(s, "job ", 4)) continue;
-		char* f[4] = { 0 };
+		char* f[5] = { 0 };
 		char* p = s + 4;
-		for (int i = 0; i < 4 && p; ++i) {
+		for (int i = 0; i < 5 && p; ++i) {
 			char* bar = strchr(p, '|');
 			if (bar) *bar = 0;
 			f[i] = trim(p);
@@ -184,6 +252,21 @@ bool bench_run(Config* cfg) {
 			snprintf(sav, sizeof(sav), "%s/%s.srm", saves, base);
 			remove(sav);
 		}
+		static Config before; /* (the config as the job found it: back when it has had options) */
+		char options[256] = "", bad[64];
+		if (f[4]) snprintf(options, sizeof(options), "%s", f[4]);
+		bool optioned = *options != 0;
+		if (optioned) {
+			char words[sizeof(options)];
+			memcpy(words, options, sizeof(words));
+			before = *cfg;
+			if (!apply_options(cfg, words, bad, sizeof(bad))) {
+				*cfg = before;
+				snprintf(msg, sizeof(msg), "bench %s failed: no such option '%s' (the job's options: %s)", jobId, bad, options);
+				put(msg);
+				continue;
+			}
+		}
 		ui_logo_prepare(cfg, cfg->rom); /* (made before the timing: on the side core it would weigh on the captures) */
 		snprintf(path, sizeof(path), "%s/job-%s.txt", dir, jobId);
 		jobResults = fopen(path, "w");
@@ -203,13 +286,21 @@ bool bench_run(Config* cfg) {
 			uint8_t h[0xB0];
 			char code[5] = "????";
 			if (emu_rom_header(cfg->rom, h, sizeof(h))) memcpy(code, h + 0xAC, 4);
-			snprintf(msg, sizeof(msg), "bench %s start: %s, %d frames, profile: %s", jobId, f[1], cfg->quitAfter,
+			char opt[sizeof(options) + 16] = "";
+			if (optioned) snprintf(opt, sizeof(opt), ", options: %s", options);
+			snprintf(msg, sizeof(msg), "bench %s start: %s, %d frames%s, profile: %s", jobId, f[1], cfg->quitAfter, opt,
 			         profile_find(code) ? code : "none (one screen and the logo in this build)");
 		}
 		put(msg);
+		threadsShown[0] = 0;
+#ifdef __3DS__
+		host_threads_job_start();
+#endif
 		game_run(cfg, cfg->rom, false);
 		/* (the script's end quits the game: the next job; a quit before it ends the bench) */
 		if (ui_ticks() >= (uint64_t) cfg->quitAfter) uiQuit = 0;
+		threads_line();
+		if (optioned) *cfg = before;
 #ifdef __3DS__
 		snprintf(msg, sizeof(msg), "bench %s heap: %u KiB free at the end", jobId, (unsigned) (host_heap_free() >> 10));
 		put(msg);
