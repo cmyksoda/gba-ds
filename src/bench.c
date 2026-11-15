@@ -255,6 +255,11 @@ bool bench_run(Config* cfg) {
 		static Config before; /* (the config as the job found it: back when it has had options) */
 		char options[256] = "", bad[64];
 		if (f[4]) snprintf(options, sizeof(options), "%s", f[4]);
+		if (f[4] && strlen(f[4]) >= sizeof(options)) {
+			snprintf(msg, sizeof(msg), "bench %s failed: the job's options are longer than %d characters", jobId, (int) sizeof(options) - 1);
+			put(msg);
+			continue;
+		}
 		bool optioned = *options != 0;
 		if (optioned) {
 			char words[sizeof(options)];
