@@ -12,6 +12,9 @@
 #include "gba.h"
 #include "cheats.h"
 #include "cpu/jit.h"
+#ifdef __3DS__
+#include "cpu/jit-internal.h"
+#endif
 #include "video/render.h"
 
 #include "emu.h"
@@ -28,6 +31,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <zlib.h>
 
 /* What Emu.core points at (the other builds' struct mCore). */
@@ -40,6 +44,9 @@ typedef struct ArmCore {
 	char* savePath;
 	int saveQuiet;
 	bool savePending;
+	/* armgba_stats: the lines' interval (0: none) and the counters at the last one (3DS, the game's core) */
+	unsigned statsEvery;
+	struct JitSeen* seen;
 	/* sound not yet read (emu_audio_read): stereo frames in a ring */
 	int16_t* ring;
 	size_t ringCap, ringHead, ringCount;
@@ -451,27 +458,141 @@ static void save_read(ArmCore* c) {
 	free(file);
 }
 
-/* Written to a new file, then put in the old one's place. */
-static bool save_write(ArmCore* c) {
-	size_t n = save_size(c->gba);
-	if (!c->savePath || !n) return false;
-	size_t len = strlen(c->savePath) + 8;
+/* gba-ds.cfg armgba_save: 0 a new file put in the old one's place, in the game's own frame; 1 the same on a thread of
+ * its own (the SD card can keep the game waiting for seconds). The file is never written over in place: power lost
+ * half-way would leave half old, half new. */
+static int save_mode(void) {
+	const char* v = getenv("GBADS_ARMGBA_SAVE");
+	return v ? atoi(v) & 1 : 0;
+}
+
+static double ms_since(const struct timespec* t0) {
+	struct timespec t1;
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	return (t1.tv_sec - t0->tv_sec) * 1000.0 + (t1.tv_nsec - t0->tv_nsec) / 1e6;
+}
+
+static bool save_file(const char* path, const uint8_t* data, size_t n) {
+	size_t len = strlen(path) + 8;
 	char* tmp = malloc(len);
 	if (!tmp) return false;
-	snprintf(tmp, len, "%s.new", c->savePath);
+	snprintf(tmp, len, "%s.new", path);
 	FILE* f = fopen(tmp, "wb");
-	bool ok = f && fwrite(c->gba->savedata.storage, 1, n, f) == n;
+	bool ok = f && fwrite(data, 1, n, f) == n;
 	if (f) ok = fclose(f) == 0 && ok;
-	if (ok) {
-		remove(c->savePath); /* (FAT: rename doesn't replace) */
-		ok = rename(tmp, c->savePath) == 0;
-	}
 	if (!ok) {
-		fprintf(stderr, "save: couldn't write %s\n", c->savePath);
+		fprintf(stderr, "save: couldn't write %s\n", tmp);
 		remove(tmp);
+	} else {
+		remove(path); /* (FAT: rename doesn't replace) */
+		ok = rename(tmp, path) == 0;
+		/* (the old file is gone: if only this failed, the new one is the only whole copy and stays) */
+		if (!ok) fprintf(stderr, "save: couldn't put %s in place of %s\n", tmp, path);
 	}
 	free(tmp);
 	return ok;
+}
+
+/* (the log line says what the SD card cost: the console's bench lost 0.2 to 14 s to it at each save. No float printing:
+ * newlib keeps a thread's float buffers for good, and a thread for each game leaves them high in the heap, in the way of the
+ * next big ROM) */
+static bool save_timed(const char* path, const uint8_t* data, size_t n, unsigned frame) {
+	struct timespec t0;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	bool ok = save_file(path, data, n);
+	fprintf(stderr, "save: %u bytes written at frame %u in %u ms\n", (unsigned) n, frame, (unsigned) (ms_since(&t0) + 0.5));
+	return ok;
+}
+
+static bool save_write(ArmCore* c) {
+	size_t n = save_size(c->gba);
+	if (!c->savePath || !n) return false;
+	return save_timed(c->savePath, c->gba->savedata.storage, n, c->gba->video.frameCounter);
+}
+
+/* The writing thread, made at the first save and kept until its game closes: a game's saves are
+ * handed to it as copies. */
+static struct {
+	pthread_mutex_t lock;
+	pthread_cond_t wake;
+	pthread_t thread;
+	bool started, busy, quit;
+	char* path;
+	uint8_t* data;
+	size_t n;
+	unsigned frame;
+} saver = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER };
+
+static void* saver_main(void* arg) {
+	(void) arg;
+	pthread_mutex_lock(&saver.lock);
+	for (;;) {
+		while (!saver.busy && !saver.quit) pthread_cond_wait(&saver.wake, &saver.lock);
+		if (!saver.busy) break;
+		pthread_mutex_unlock(&saver.lock);
+		save_timed(saver.path, saver.data, saver.n, saver.frame);
+		pthread_mutex_lock(&saver.lock);
+		free(saver.path);
+		free(saver.data);
+		saver.busy = false;
+		pthread_cond_broadcast(&saver.wake);
+	}
+	pthread_mutex_unlock(&saver.lock);
+	return NULL;
+}
+
+/* Waits for the write in hand, and ends the thread. */
+static void saver_stop(void) {
+	if (!saver.started) return;
+	pthread_mutex_lock(&saver.lock);
+	saver.quit = true;
+	pthread_cond_broadcast(&saver.wake);
+	pthread_mutex_unlock(&saver.lock);
+	pthread_join(saver.thread, NULL);
+	saver.started = saver.quit = false;
+}
+
+/* The thread, if there is room for it (a 32 MiB game leaves the heap little). */
+static bool saver_start(void) {
+	if (saver.started) return true;
+#ifdef __3DS__
+	if (host_heap_free() < (1536u << 10)) return false;
+#endif
+	saver.quit = false;
+#ifdef __3DS__
+	host_next_thread_name("battery save");
+#endif
+	saver.started = pthread_create(&saver.thread, NULL, saver_main, NULL) == 0;
+	return saver.started;
+}
+
+/* A save handed to the thread; false: it's still on the last one (try again next frame). Without a thread
+ * (none could be made, or no memory for the copy) the game writes it itself. */
+static bool save_hand_off(ArmCore* c) {
+	size_t n = save_size(c->gba);
+	if (!c->savePath || !n) return true;
+	pthread_mutex_lock(&saver.lock);
+	bool busy = saver.busy;
+	pthread_mutex_unlock(&saver.lock);
+	if (busy) return false;
+	char* path = strdup(c->savePath);
+	uint8_t* data = malloc(n);
+	if (!path || !data || !saver_start()) {
+		free(path);
+		free(data);
+		save_write(c);
+		return true;
+	}
+	memcpy(data, c->gba->savedata.storage, n);
+	pthread_mutex_lock(&saver.lock);
+	saver.path = path;
+	saver.data = data;
+	saver.n = n;
+	saver.frame = c->gba->video.frameCounter;
+	saver.busy = true;
+	pthread_cond_broadcast(&saver.wake);
+	pthread_mutex_unlock(&saver.lock);
+	return true;
 }
 
 /* The game's writes to its save go to the file once they've stopped for a
@@ -483,16 +604,77 @@ static void save_tick(ArmCore* c) {
 		c->savePending = true;
 		c->saveQuiet = 0;
 	} else if (c->savePending && ++c->saveQuiet >= 15) {
-		c->savePending = false;
-		save_write(c);
+		if (save_mode() & 1) {
+			c->savePending = !save_hand_off(c);
+		} else {
+			c->savePending = false;
+			save_write(c);
+		}
 	}
 }
 
 /* ---------------------------------------------- open, close, frames */
 
+/* gba-ds.cfg armgba_stats = N: every N frames of the game, a line in the log of what the recompiler did (blocks
+ * compiled, flushes, time in compiling and in the cache calls, code memory in use). */
+#ifdef __3DS__
+extern uint64_t jitCompileTicks, jitFlushTicks;
+extern uint32_t jitFlushCalls;
+extern bool jitStatsOn;
+
+struct JitSeen {
+	uint64_t compiled, deferred, flushes0, flushes1, compileTicks, flushTicks, invalidations, codeWrites, stepped, revived;
+	uint32_t flushCalls;
+	unsigned last;
+};
+
+/* (the game's core, once its machine is made: the key is read here, so a bench job's options can switch it) */
+static void jit_stats_open(ArmCore* c) {
+	const char* v = getenv("GBADS_ARMGBA_STATS");
+	int every = v ? atoi(v) : 0;
+	jitStatsOn = every > 0;
+	c->seen = every > 0 ? calloc(1, sizeof(*c->seen)) : NULL;
+	if (!c->seen) return;
+	c->statsEvery = (unsigned) every;
+	c->seen->compileTicks = jitCompileTicks; /* (these three are the whole program's, not this machine's) */
+	c->seen->flushTicks = jitFlushTicks;
+	c->seen->flushCalls = jitFlushCalls;
+}
+
+static void jit_stats(ArmCore* c, unsigned frame) {
+	struct JitSeen* seen = c->seen;
+	struct Jit* jit = c->gba->jit;
+	if (!seen || !jit || frame % c->statsEvery) return;
+	double const perMs = 268111.856, frames = frame - seen->last ? frame - seen->last : 1;
+	fprintf(stderr,
+	        "jit: frames %u-%u: compiled +%u, first visits stepped +%u, flushes +%u by writes or waits +%u by full memory, compiling %.2f ms and cache calls %.2f ms (%u) a frame, code %u of %u KiB (hot %u, cold %u, careful copies %u, unused %u), heap %u KiB free; invalidated +%u, writes to code +%u, instructions stepped +%u, revived +%u\n",
+	        seen->last, frame, (unsigned) (jit->compiled - seen->compiled), (unsigned) (jit->deferred - seen->deferred),
+	        (unsigned) (jit->flushReasons[0] - seen->flushes0), (unsigned) (jit->flushReasons[1] - seen->flushes1),
+	        (jitCompileTicks - seen->compileTicks) / perMs / frames, (jitFlushTicks - seen->flushTicks) / perMs / frames,
+	        (unsigned) (jitFlushCalls - seen->flushCalls), (unsigned) ((jit->codeNext - jit->codeStart) >> 10),
+	        (unsigned) (jit->codeSize >> 10), (unsigned) (jit->hotBytes >> 10), (unsigned) (jit->coldBytes >> 10),
+	        (unsigned) (jit->carefulBytes >> 10), (unsigned) (jit->wastedBytes >> 10), (unsigned) (host_heap_free() >> 10),
+	        (unsigned) (jit->invalidations - seen->invalidations), (unsigned) (jit->codeWrites - seen->codeWrites),
+	        (unsigned) (jit->stepped - seen->stepped), (unsigned) (jit->revived - seen->revived));
+	seen->invalidations = jit->invalidations;
+	seen->codeWrites = jit->codeWrites;
+	seen->stepped = jit->stepped;
+	seen->revived = jit->revived;
+	seen->compiled = jit->compiled;
+	seen->deferred = jit->deferred;
+	seen->flushes0 = jit->flushReasons[0];
+	seen->flushes1 = jit->flushReasons[1];
+	seen->compileTicks = jitCompileTicks;
+	seen->flushTicks = jitFlushTicks;
+	seen->flushCalls = jitFlushCalls;
+	seen->last = frame;
+}
+#endif
+
 static void close_core(ArmCore* c) {
 	if (!c) return;
 	if (c->gba) {
+		if (c->savePath) saver_stop(); /* (what it has in hand lands before the last write) */
 		if (c->savePath && (c->savePending || c->gba->savedata.dirty)) save_write(c);
 		if (c->cheatsOn) cheatsClear(&c->cheats, c->gba);
 		if (c->shared) {
@@ -517,6 +699,9 @@ static void close_core(ArmCore* c) {
 		gbaDestroy(c->gba);
 	}
 	free(c->savePath);
+#ifdef __3DS__
+	free(c->seen);
+#endif
 	free(c->ring);
 	free(c);
 }
@@ -672,6 +857,7 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 	if (savePath) {
 		c->savePath = strdup(savePath);
 		if (c->savePath) save_read(c);
+		if (c->savePath && (save_mode() & 1)) saver_start(); /* (its log lines here, not in a frame) */
 	}
 	gbaReset(gba, true);
 	gba->savedata.dirty = false;
@@ -687,6 +873,9 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 
 	e->fb = calloc(GBA_W * GBA_H, sizeof(uint32_t));
 	e->audio = audio;
+#ifdef __3DS__
+	if (audio) jit_stats_open(c);
+#endif
 	if (audio) {
 		c->ringCap = 8192;
 		c->ring = calloc(c->ringCap, 2 * sizeof(int16_t));
@@ -749,6 +938,9 @@ static void run_frame(Emu* e, uint32_t keys, bool draw) {
 	if (draw) take_picture(e);
 	if (draw) split_frame(c);
 	audioThreadTake(gba);
+#ifdef __3DS__
+	if (e->audio) jit_stats(c, gba->video.frameCounter);
+#endif
 	if (c->ring) {
 		const int16_t* in = (const int16_t*) gba->audio.out;
 		for (uint32_t i = 0; i < gba->audio.outCount; ++i) {

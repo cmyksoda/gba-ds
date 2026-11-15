@@ -147,13 +147,19 @@ void* jitHostAllocCode(size_t* size) {
 		logLine("jit: %u KiB of the heap free, %u KiB wanted (%s)", (unsigned) (avail >> 10), (unsigned) (*size >> 10), main ? "the game" : "a copy");
 		// The game: what is left once its ROM is loaded and the later machines have theirs. A copy:
 		// half of what there is.
-		size_t const reserve = main ? HEAP_LATER + romPending : HEAP_LOW;
+		size_t later = HEAP_LATER;
+		const char* laterMib = getenv("GBADS_ARMGBA_LATER_MIB"); /* (a test: Azahar's heap is half the console's) */
+		if (laterMib && atoi(laterMib) >= 0) later = (size_t) atoi(laterMib) << 20;
+		size_t const reserve = main ? later + romPending : HEAP_LOW;
 		// (5/7: what the recompiler keeps about the code, 0.4 bytes a byte, comes out of the same heap
 		// as the code fills)
 		size_t spare = avail > reserve ? (main ? (avail - reserve) / 7 * 5 : (avail - reserve) / 2) : 0;
 		romPending = 0;
 		spare &= ~(size_t) 0xFFFFF;
-		size_t const most = main ? MAIN_MAX : OTHER_MAX;
+		size_t most = main ? MAIN_MAX : OTHER_MAX;
+		/* (gba-ds.cfg armgba_code_mib: the game's code memory up to this many MiB, 4 to 24: armGBA's own frontend takes up to 24) */
+		const char* wanted = getenv("GBADS_ARMGBA_CODE_MIB");
+		if (main && wanted && atoi(wanted) >= 4 && atoi(wanted) <= 24) most = (size_t) atoi(wanted) << 20;
 		size_t const least = main ? MAIN_MIN : OTHER_MIN;
 		if (spare > *size) {
 			spare = *size;
@@ -243,13 +249,24 @@ bool renderThreadHostCreate(pthread_t* thread, void* (*function)(void*), void* a
 	return true;
 }
 
-// GBA DS keeps the fourth core for the hidden copy of the game: one render worker draws every line.
+// GBA DS keeps the fourth core for the hidden copy of the game, so one render worker draws every line, unless
+// gba-ds.cfg says armgba_render_workers = 2: a second one there, each drawing every other line (as armGBA's own app does).
 bool renderThreadHostCreateSecond(pthread_t* thread, void* (*function)(void*), void* argument) {
-	(void) thread;
-	(void) function;
-	(void) argument;
 	renderThreadSecond = false;
-	return false;
+	const char* workers = getenv("GBADS_ARMGBA_RENDER_WORKERS");
+	if (!workers || atoi(workers) < 2 || renderThreadCore != 2) {
+		return false;
+	}
+	s32 priority = 0x30;
+	svcGetThreadPriority(&priority, CUR_THREAD_HANDLE);
+	Thread t = threadCreate((ThreadFunc) (void*) function, argument, 256 * 1024, priority, 3, false);
+	logLine("second render thread on core 3: %s", t ? "started" : "refused");
+	if (!t) {
+		return false;
+	}
+	renderThreadSecond = true;
+	*thread = (pthread_t) t;
+	return true;
 }
 
 // The sound thread beside the render worker, one step above it: it sleeps until it has a batch to
@@ -269,7 +286,24 @@ bool audioThreadHostCreate(pthread_t* thread, void* (*function)(void*), void* ar
 	return true;
 }
 
+// What the cache calls took (gba-ds.cfg armgba_stats turns the counting on).
+uint64_t jitFlushTicks;
+uint32_t jitFlushCalls;
+bool jitStatsOn;
+
+static void flush_code(void* start, void* end);
 void jitHostFlushCode(void* start, void* end) {
+	if (!jitStatsOn) {
+		flush_code(start, end);
+		return;
+	}
+	uint64_t const began = svcGetSystemTick();
+	flush_code(start, end);
+	jitFlushTicks += svcGetSystemTick() - began;
+	++jitFlushCalls;
+}
+
+static void flush_code(void* start, void* end) {
 	u32 const from = (u32) start & ~31u;
 	u32 const to = ((u32) end + 31) & ~31u;
 	if (isEmulator()) {

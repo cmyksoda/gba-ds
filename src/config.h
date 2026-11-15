@@ -121,6 +121,8 @@ typedef struct Config {
 	int quitAfter;     /* UI ticks */
 	char inputScript[512];
 	char bench[512];     /* bench: a test bench's jobs file (bench.c) */
+	/* the armGBA core's own switches (armgba_save, armgba_stats...): config_apply_core_env hands them to the core */
+	char armgba[5][12];
 } Config;
 
 void config_defaults(Config* c);
@@ -130,6 +132,9 @@ void config_load_file(Config* c, const char* path);
 bool config_parse_args(Config* c, int argc, char** argv);
 /* One gba-ds.cfg option by its name (the bench's per-job options); false if there's no such option. */
 bool config_set(Config* c, const char* key, const char* val);
+/* Hands the armgba_* switches to the armGBA core (its environment), the ones this config doesn't have back to off; a game's
+ * start calls it, so a bench job's options (which come back with the config) don't outlast the job. */
+void config_apply_core_env(const Config* c);
 void config_usage(const char* argv0);
 
 #endif

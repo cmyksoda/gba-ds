@@ -69,6 +69,28 @@ void config_defaults(Config* c) {
 	strcpy(c->borderColor, "000000");
 }
 
+/* The armGBA core's switches (3ds/emu/emu_armgba.c, 3ds/ctr/jitmem.c), in Config.armgba in this order; the core reads them
+ * from the environment (GBADS_ARMGBA_SAVE...). */
+enum { ARMGBA_KEYS = sizeof(((Config*) 0)->armgba) / sizeof(((Config*) 0)->armgba[0]) };
+static const char* const armgbaKeys[ARMGBA_KEYS] = { "save", "stats", "code_mib", "render_workers", "later_mib" };
+
+void config_apply_core_env(const Config* c) {
+	static bool set[ARMGBA_KEYS]; /* (only what this put there is taken back: the environment may have its own) */
+	for (int i = 0; i < ARMGBA_KEYS; ++i) {
+		char name[32] = "GBADS_ARMGBA_";
+		size_t n = strlen(name);
+		for (const char* k = armgbaKeys[i]; *k && n < sizeof(name) - 1; ++k) name[n++] = (char) toupper((unsigned char) *k);
+		name[n] = 0;
+		if (c->armgba[i][0]) {
+			setenv(name, c->armgba[i], 1);
+			set[i] = true;
+		} else if (set[i]) {
+			unsetenv(name);
+			set[i] = false;
+		}
+	}
+}
+
 static bool parse_bool(const char* v) {
 	return !strcmp(v, "1") || !strcasecmp(v, "true") || !strcasecmp(v, "yes") || !strcasecmp(v, "on");
 }
@@ -149,6 +171,15 @@ static bool set_option(Config* c, const char* key, const char* val) {
 	BOOL("vsync", vsync)
 	BOOL("pin_cores", pinCores)
 	BOOL("frame_buffer", frameBuffer)
+	if (!strncmp(key, "armgba_", 7)) {
+		for (int i = 0; i < ARMGBA_KEYS; ++i) {
+			if (!strcmp(key + 7, armgbaKeys[i])) {
+				snprintf(c->armgba[i], sizeof(c->armgba[i]), "%s", val);
+				return true;
+			}
+		}
+		return false;
+	}
 	BOOL("map", map)
 	BOOL("map_crop", mapCrop)
 	BOOL("map_animations", mapAnim)
