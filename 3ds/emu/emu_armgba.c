@@ -494,12 +494,14 @@ static bool save_file(const char* path, const uint8_t* data, size_t n) {
 	return ok;
 }
 
-/* (the log line says what the SD card cost: the console's bench lost 0.2 to 14 s to it at each save) */
+/* (the log line says what the SD card cost: the console's bench lost 0.2 to 14 s to it at each save. No float printing:
+ * newlib keeps a thread's float buffers for good, and a thread for each game leaves them high in the heap, in the way of the
+ * next big ROM) */
 static bool save_timed(const char* path, const uint8_t* data, size_t n, unsigned frame) {
 	struct timespec t0;
 	clock_gettime(CLOCK_MONOTONIC, &t0);
 	bool ok = save_file(path, data, n);
-	fprintf(stderr, "save: %u bytes written at frame %u in %.0f ms\n", (unsigned) n, frame, ms_since(&t0));
+	fprintf(stderr, "save: %u bytes written at frame %u in %u ms\n", (unsigned) n, frame, (unsigned) (ms_since(&t0) + 0.5));
 	return ok;
 }
 
