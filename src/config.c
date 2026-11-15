@@ -149,6 +149,15 @@ static bool set_option(Config* c, const char* key, const char* val) {
 	BOOL("vsync", vsync)
 	BOOL("pin_cores", pinCores)
 	BOOL("frame_buffer", frameBuffer)
+	if (!strncmp(key, "armgba_", 7)) {
+		/* (the armGBA core's own switches, read from the environment where the core is: GBADS_ARMGBA_SAVE) */
+		char name[64] = "GBADS_";
+		size_t n = strlen(name);
+		for (const char* k = key; *k && n < sizeof(name) - 1; ++k) name[n++] = (char) toupper((unsigned char) *k);
+		name[n] = 0;
+		setenv(name, val, 1);
+		return true;
+	}
 	BOOL("map", map)
 	BOOL("map_crop", mapCrop)
 	BOOL("map_animations", mapAnim)
