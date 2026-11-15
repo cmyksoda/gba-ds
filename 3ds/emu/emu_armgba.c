@@ -455,14 +455,14 @@ static void save_read(ArmCore* c) {
 	free(file);
 }
 
-/* gba-ds.cfg armgba_save: 0 a new file put in the old one's place, in the game's own frame; bit 1 the same on a thread
- * of its own (the SD card can keep the game waiting for seconds); bit 2 over the file that's there, when it's the
- * same size (no new file, no remove, no rename). */
+/* gba-ds.cfg armgba_save: 0 a new file put in the old one's place, in the game's own frame; 1 the same on a thread of
+ * its own (the SD card can keep the game waiting for seconds). The file is never written over in place: power lost
+ * half-way would leave half old, half new. */
 static int save_mode(void) {
 	static int mode = -1;
 	if (mode < 0) {
 		const char* v = getenv("GBADS_ARMGBA_SAVE");
-		mode = v ? atoi(v) & 3 : 0;
+		mode = v ? atoi(v) & 1 : 0;
 	}
 	return mode;
 }
@@ -473,14 +473,7 @@ static double ms_since(const struct timespec* t0) {
 	return (t1.tv_sec - t0->tv_sec) * 1000.0 + (t1.tv_nsec - t0->tv_nsec) / 1e6;
 }
 
-static bool save_file(const char* path, const uint8_t* data, size_t n, bool inPlace) {
-	struct stat st;
-	if (inPlace && !stat(path, &st) && (size_t) st.st_size == n) {
-		FILE* f = fopen(path, "r+b");
-		bool ok = f && fwrite(data, 1, n, f) == n;
-		if (f) ok = fclose(f) == 0 && ok;
-		if (ok) return true;
-	}
+static bool save_file(const char* path, const uint8_t* data, size_t n) {
 	size_t len = strlen(path) + 8;
 	char* tmp = malloc(len);
 	if (!tmp) return false;
@@ -488,31 +481,32 @@ static bool save_file(const char* path, const uint8_t* data, size_t n, bool inPl
 	FILE* f = fopen(tmp, "wb");
 	bool ok = f && fwrite(data, 1, n, f) == n;
 	if (f) ok = fclose(f) == 0 && ok;
-	if (ok) {
+	if (!ok) {
+		fprintf(stderr, "save: couldn't write %s\n", tmp);
+		remove(tmp);
+	} else {
 		remove(path); /* (FAT: rename doesn't replace) */
 		ok = rename(tmp, path) == 0;
-	}
-	if (!ok) {
-		fprintf(stderr, "save: couldn't write %s\n", path);
-		remove(tmp);
+		/* (the old file is gone: if only this failed, the new one is the only whole copy and stays) */
+		if (!ok) fprintf(stderr, "save: couldn't put %s in place of %s\n", tmp, path);
 	}
 	free(tmp);
 	return ok;
 }
 
 /* (the log line says what the SD card cost: the console's bench lost 0.2 to 14 s to it at each save) */
-static bool save_timed(const char* path, const uint8_t* data, size_t n, bool inPlace, unsigned frame) {
+static bool save_timed(const char* path, const uint8_t* data, size_t n, unsigned frame) {
 	struct timespec t0;
 	clock_gettime(CLOCK_MONOTONIC, &t0);
-	bool ok = save_file(path, data, n, inPlace);
-	fprintf(stderr, "save: %u bytes written at frame %u in %.0f ms%s\n", (unsigned) n, frame, ms_since(&t0), inPlace ? " (in place)" : "");
+	bool ok = save_file(path, data, n);
+	fprintf(stderr, "save: %u bytes written at frame %u in %.0f ms\n", (unsigned) n, frame, ms_since(&t0));
 	return ok;
 }
 
 static bool save_write(ArmCore* c) {
 	size_t n = save_size(c->gba);
 	if (!c->savePath || !n) return false;
-	return save_timed(c->savePath, c->gba->savedata.storage, n, save_mode() & 2, c->gba->video.frameCounter);
+	return save_timed(c->savePath, c->gba->savedata.storage, n, c->gba->video.frameCounter);
 }
 
 /* The writing thread, made at the first save and kept until its game closes: a game's saves are
@@ -526,7 +520,6 @@ static struct {
 	uint8_t* data;
 	size_t n;
 	unsigned frame;
-	bool inPlace;
 } saver = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER };
 
 static void* saver_main(void* arg) {
@@ -536,7 +529,7 @@ static void* saver_main(void* arg) {
 		while (!saver.busy && !saver.quit) pthread_cond_wait(&saver.wake, &saver.lock);
 		if (!saver.busy) break;
 		pthread_mutex_unlock(&saver.lock);
-		save_timed(saver.path, saver.data, saver.n, saver.inPlace, saver.frame);
+		save_timed(saver.path, saver.data, saver.n, saver.frame);
 		pthread_mutex_lock(&saver.lock);
 		free(saver.path);
 		free(saver.data);
@@ -592,7 +585,6 @@ static bool save_hand_off(ArmCore* c) {
 	saver.data = data;
 	saver.n = n;
 	saver.frame = c->gba->video.frameCounter;
-	saver.inPlace = save_mode() & 2;
 	saver.busy = true;
 	pthread_cond_broadcast(&saver.wake);
 	pthread_mutex_unlock(&saver.lock);
