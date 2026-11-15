@@ -7034,6 +7034,7 @@ static void ss_setup(const char* rom, const char* code) {
 		hudOffLatch = false;
 		hudLogoDone = false;
 		hudLogoBelowDone = false;
+		cardLogoMade = false; /* (the last game's logo stays in card_logo's picture otherwise) */
 		mapTitleN = 0;
 		hudBackValid = false;
 		hudRegrab = 0;
