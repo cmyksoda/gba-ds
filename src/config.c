@@ -47,6 +47,7 @@ void config_defaults(Config* c) {
 	c->audioLatency = 64;
 	c->ffSpeed = 3;
 #ifdef __3DS__
+	c->overlayMode = OVM_OFF; /* (black beside the picture, as most emulators show it) */
 	c->ffMute = 1;
 	c->tallLive = false; /* (Pinball's live view runs two more copies of the game, two frames each, every frame) */
 	c->threadedVideo = true;
