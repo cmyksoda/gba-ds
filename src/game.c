@@ -4017,6 +4017,17 @@ static void map_hold_update(const typeof(hudProf->hud)* h, uint32_t clear) {
 	}
 }
 
+/* The first pixel of a row from x to x1 that isn't the clear colour (x1 + 1: none), over the empty stretches eight at a time */
+static inline int next_lit(const uint32_t* row, int x, int x1, uint32_t clear) {
+	for (; x + 7 <= x1; x += 8) {
+		uint32_t d = (row[x] ^ clear) | (row[x + 1] ^ clear) | (row[x + 2] ^ clear) | (row[x + 3] ^ clear) | (row[x + 4] ^ clear) |
+		             (row[x + 5] ^ clear) | (row[x + 6] ^ clear) | (row[x + 7] ^ clear);
+		if (d & 0xFFFFFF) break;
+	}
+	while (x <= x1 && (row[x] & 0xFFFFFF) == clear) ++x;
+	return x;
+}
+
 /* ---- hud_layers (see hudLayered) */
 
 static void hud_stale_all(void) {
@@ -4197,8 +4208,7 @@ static void hud_compose(void) {
 	/* the map's box: grown over the race's first frames, then kept */
 	if (racing && h->map.x1 && (hudFrames <= 8 || h->mapAt.scale)) {
 		for (int y = h->map.y0; y <= h->map.y1; ++y) {
-			for (int x = h->map.x0; x <= h->map.x1; ++x) {
-				if ((hudPx[y * GBA_W + x] & 0xFFFFFF) == clear) continue;
+			for (int x = h->map.x0; (x = next_lit(&hudPx[y * GBA_W], x, h->map.x1, clear)) <= h->map.x1; ++x) {
 				if (!mapFound) mapX0 = mapX1 = x, mapY0 = mapY1 = y, mapFound = true;
 				mapX0 = SDL_min(mapX0, x), mapX1 = SDL_max(mapX1, x);
 				mapY0 = SDL_min(mapY0, y), mapY1 = SDL_max(mapY1, y);
@@ -4347,8 +4357,8 @@ static void hud_compose(void) {
 		if (mv->ifTile && !oam_has_tile(mv->ifTile)) continue;
 		int lo = GBA_W, hi = -1, top = GBA_H, bot = -1;
 		for (int y = SDL_max(mv->y0, 0); y <= SDL_min(mv->y1, GBA_H - 1); ++y) {
-			for (int x = SDL_max(mv->x0, 0); x <= SDL_min(mv->x1, GBA_W - 1); ++x) {
-				if ((hudPx[y * GBA_W + x] & 0xFFFFFF) == clear) continue;
+			int x1 = SDL_min(mv->x1, GBA_W - 1);
+			for (int x = SDL_max(mv->x0, 0); (x = next_lit(&hudPx[y * GBA_W], x, x1, clear)) <= x1; ++x) {
 				lo = SDL_min(lo, x), hi = SDL_max(hi, x), top = SDL_min(top, y), bot = SDL_max(bot, y);
 			}
 		}
@@ -4377,15 +4387,19 @@ static void hud_compose(void) {
 		}
 		if (ubot >= 0) moveDx[m] = ulo - pieceLo[m], moveDy[m] = ubot + 1 + mv->under - pieceTop[m];
 	}
+	int movingIdx[HUD_MOVES], nMoving = 0; /* (the pieces that move, to look through for each pixel) */
+	for (int m = 0; m < HUD_MOVES; ++m) {
+		if (moving[m]) movingIdx[nMoving++] = m;
+	}
 	for (int y = 0; y < GBA_H; ++y) {
-		for (int x = 0; x < GBA_W; ++x) {
+		for (int x = 0; (x = next_lit(&hudPx[y * GBA_W], x, GBA_W - 1, clear)) < GBA_W; ++x) {
 			uint32_t c = hudPx[y * GBA_W + x];
-			if ((c & 0xFFFFFF) == clear) continue;
 			int nx = x, ny = y;
 			bool toGame = false;
-			for (int m = 0; m < HUD_MOVES; ++m) {
+			for (int k = 0; k < nMoving; ++k) {
+				int m = movingIdx[k];
 				const HudMove* mv = &moves[m];
-				if (moving[m] && x >= mv->x0 && x <= mv->x1 && y >= mv->y0 && y <= mv->y1) {
+				if (x >= mv->x0 && x <= mv->x1 && y >= mv->y0 && y <= mv->y1) {
 					nx = x + moveDx[m], ny = y + moveDy[m];
 					toGame = mv->toGame;
 					break;
