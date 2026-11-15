@@ -215,13 +215,103 @@ void host_mem_note(const char* what) {
 	logLine("memory: %u KiB of the heap free, %u KiB of linear (%s)", (unsigned) (host_heap_free() >> 10), (unsigned) (linearSpaceFree() >> 10), what);
 }
 
-int host_side_core(void) {
-	return isNew3ds() ? 3 : -2;
+static int sideCore = -1, captureCore = -1, aheadCore = -1;
+int gbadsVideoCore = 2; /* (the patched libmgba's threading.h reads it: mGBA's drawing thread) */
+static int core1Percent = 50;
+static int core1Applied; /* (0: not yet: once set it can't go back, but another value can be asked for) */
+
+/* A thread on the system core needs the app's share of it first; a later core1_limit (another job's) is asked for again. */
+static void core_ready(int core) {
+	if (core != 1) return;
+	if (core1Percent < 5) core1Percent = 5;
+	if (core1Percent > 89) core1Percent = 89;
+	if (core1Applied == core1Percent) return;
+	core1Applied = core1Percent;
+	Result rc = APT_SetAppCpuTimeLimit(core1Percent);
+	logLine("core 1: the app's share set to %d%% (%08lX)", core1Percent, (unsigned long) rc);
 }
 
-static int nextCore = -100;
+int host_side_core(void) {
+	if (!isNew3ds()) return -2;
+	int core = sideCore >= 0 ? sideCore : 3;
+	core_ready(core);
+	return core;
+}
+
+static int nextCore = HOST_CORE_AUTO;
 void host_next_thread_core(int core) {
 	nextCore = core;
+}
+
+int host_capture_core(void) {
+	return captureCore >= 0 ? captureCore : HOST_CORE_AUTO;
+}
+
+int host_ahead_core(bool threadedVideo) {
+	return aheadCore >= 0 ? aheadCore : threadedVideo ? 3 : 2;
+}
+
+struct spin {
+	Thread thread;
+	bool made;
+	volatile u32 loops;
+};
+
+static void spin_main(void* p) {
+	u64 end = svcGetSystemTick() + SYSCLOCK_ARM11 / 10;
+	u32 loops = 0, x = 1;
+	do {
+		for (int i = 0; i < 2048; ++i) x = x * 1664525u + 1013904223u;
+		++loops;
+	} while (svcGetSystemTick() < end);
+	((struct spin*) p)->loops = x ? loops : 0; /* (x is used, so the loop stays) */
+}
+
+static void spin_end(struct spin* s) {
+	if (!s->thread) return;
+	threadJoin(s->thread, U64_MAX);
+	threadFree(s->thread);
+	s->thread = NULL;
+}
+
+/* A tenth of a second of arithmetic on each core: the share of core 0's speed a thread there gets,
+ * one core at a time and then all at once (the system's own threads take what they take). */
+static void core_probe(void) {
+	s32 priority = 0x30;
+	svcGetThreadPriority(&priority, CUR_THREAD_HANDLE);
+	struct spin ref = { 0 };
+	spin_main(&ref);
+	for (int together = 0; together < 2; ++together) {
+		struct spin s[4] = { { 0 } };
+		for (int core = 1; core < 4; ++core) {
+			core_ready(core);
+			host_next_thread_name("core probe");
+			s[core].thread = threadCreate(spin_main, &s[core], 16 * 1024, priority, core, false);
+			s[core].made = s[core].thread != NULL;
+			if (!together) spin_end(&s[core]);
+		}
+		if (together) spin_main(&s[0]);
+		char line[160];
+		int n = snprintf(line, sizeof(line), "core probe, %s:", together ? "all at once" : "one at a time");
+		for (int core = 1; core < 4; ++core) {
+			spin_end(&s[core]);
+			if (s[core].made) n += snprintf(line + n, sizeof(line) - n, " core %d %.2f", core, (double) s[core].loops / ref.loops);
+			else n += snprintf(line + n, sizeof(line) - n, " core %d refused", core);
+		}
+		if (together) snprintf(line + n, sizeof(line) - n, " (core 0 %.2f)", (double) s[0].loops / ref.loops);
+		logLine("%s", line);
+	}
+}
+
+void host_set_cores(int side, int capture, int ahead, int video, int core1, bool probe) {
+	sideCore = side;
+	captureCore = capture;
+	aheadCore = ahead;
+	core1Percent = core1;
+	gbadsVideoCore = video >= 0 && isNew3ds() ? video : 2;
+	core_ready(gbadsVideoCore);
+	logLine("cores: side %d, capture %d, ahead %d (-1: as built in), video %d, core 1 share %d%%", side, capture, ahead, gbadsVideoCore, core1);
+	if (probe && isNew3ds()) core_probe();
 }
 
 /* Every thread made (libmgba's and libctru's too: the build wraps threadCreate), with the core it asked for and
@@ -364,8 +454,9 @@ int host_pthread_create(pthread_t* thread, const pthread_attr_t* attr, void* (*f
 	s->arg = arg;
 	s32 priority = 0x30;
 	svcGetThreadPriority(&priority, CUR_THREAD_HANDLE);
-	int core = nextCore != -100 && isNew3ds() ? nextCore : host_side_core();
-	nextCore = -100;
+	int core = nextCore != HOST_CORE_AUTO && isNew3ds() ? nextCore : host_side_core();
+	nextCore = HOST_CORE_AUTO;
+	core_ready(core);
 	const char* name = nextName ? nextName : "thread";
 	nextName = name;
 	Thread t = threadCreate(start_main, s, 256 * 1024, priority + 1, core, false);

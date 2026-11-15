@@ -111,6 +111,7 @@ static struct {
 } ahead = { .lock = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER };
 static bool aheadInFlight; /* the worker is emulating the next frame */
 static bool aheadReady;    /* it has: that frame is emulated but not yet used */
+static double lateness = 1; /* capture_throttle: frames' work over their budget, averaged (1: on time) */
 static uint32_t aheadFb[GBA_W * GBA_H]; /* the frame on screen, while the worker writes the next */
 
 /* Bits above the GBA keys, for run_frame: the SNES layout's camera pan
@@ -829,7 +830,7 @@ static bool ahead_start(uint32_t keys) {
 		ahead.quit = false;
 #ifdef __3DS__
 		/* (the New 3DS's third core, unless mGBA's drawing thread is there) */
-		host_next_thread_core(emu_threaded(&emu) ? 3 : 2);
+		host_next_thread_core(host_ahead_core(emu_threaded(&emu)));
 		host_next_thread_name("frame buffer");
 #endif
 		ahead.started = pthread_create(&ahead.thread, NULL, ahead_worker, NULL) == 0;
@@ -7176,12 +7177,15 @@ static void logo_refresh(void) {
 
 enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 	cfg = c;
+	lateness = 1;
 	debug = getenv("GBADS_DEBUG") != NULL;
 	romPath = rom, lastLoop = 0;
 	game_paths(cfg, rom, &gp);
 	patches_setup(rom); /* GEN-9: the patches folder, what's on, and the plan every core opens the ROM with */
 	profile_set_rom(NULL, 0);
 #ifdef __3DS__
+	/* (again for each game: the bench's per-job options) */
+	host_set_cores(cfg->sideCore, cfg->captureCore, cfg->aheadCore, cfg->videoCore, cfg->core1Limit, false);
 	emu_threaded_video(cfg->threadedVideo && isNew3ds()); /* (mGBA's drawing thread on the New 3DS's third core) */
 #else
 	emu_threaded_video(cfg->threadedVideo);
@@ -7388,6 +7392,7 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 	android_pin_game_thread();
 #endif
 	while (!done) {
+		Uint64 loopT0 = SDL_GetPerformanceCounter(); /* (before the wait for the frame buffer's thread: capture_throttle counts it) */
 		ahead_sync(); /* the core is the loop's again */
 		screen_restore_apply();
 		bug_tick();
@@ -8260,6 +8265,9 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 			const MapProfile* ip = mapcap_profile(mc);
 			int every = ip && ip->interval > 0 && ip->interval < cfg->mapInterval ? ip->interval : cfg->mapInterval;
 			int interval = cheapFail ? every : every << SDL_min(fails, 3);
+			/* capture_throttle: further apart while the frames run late (squared: 87% speed, 1.3 times); not after
+			 * failures, whose backoff above already spaces them out */
+			if (cfg->captureThrottle > 0 && !fails) interval = (int) (interval * SDL_min(lateness * lateness, (double) cfg->captureThrottle));
 			/* after failures, a room change still triggers a try, but no more
 			 * often than the normal interval */
 			bool due = sinceMapRequest >= interval ||
@@ -8381,6 +8389,10 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 		drawTicks += drawT1 - drawT0;
 		bench_frame(frameCount, benchEmuMs, (drawT1 - drawT0) * 1000.0 / SDL_GetPerformanceFrequency(),
 		            (drawT0 - emuT1) * 1000.0 / SDL_GetPerformanceFrequency(), mc && mapcap_busy(mc));
+		if (cfg->captureThrottle > 0 && !ff) {
+			double over = (double) (drawT1 - loopT0) / SDL_GetPerformanceFrequency() / frameSec;
+			lateness += (SDL_max(over, 1.0) - lateness) / 32;
+		}
 		{
 			double msPer = 1000.0 / (double) SDL_GetPerformanceFrequency();
 			double total = (double) (drawT1 - workT0) * msPer;

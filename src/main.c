@@ -31,6 +31,9 @@
 #include <string.h>
 #include <strings.h>
 #include <unistd.h>
+#ifdef __3DS__
+#include "host.h"
+#endif
 
 /* true if the folder has a .png in it */
 static bool dir_has_png(const char* path) {
@@ -204,6 +207,9 @@ int main(int argc, char** argv) {
 	signal(SIGINT, on_signal);
 	signal(SIGHUP, on_signal);
 
+#ifdef __3DS__
+	host_set_cores(cfg.sideCore, cfg.captureCore, cfg.aheadCore, cfg.videoCore, cfg.core1Limit, cfg.coreProbe);
+#endif
 	if (!ui_init(&cfg, true)) return 1;
 	ra_init(&cfg); /* signs in to RetroAchievements in the background */
 	update_init(&cfg, exeDir, argc, argv);

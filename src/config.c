@@ -43,6 +43,8 @@ void config_defaults(Config* c) {
 	strcpy(c->bezelInner, "1A1A1A");
 	strcpy(c->bezelOuter, "102060");
 	c->mapInterval = 60;
+	c->captureCore = c->aheadCore = c->sideCore = c->videoCore = -1;
+	c->core1Limit = 50;
 	c->sway = true;
 	c->audioLatency = 64;
 	c->ffSpeed = 3;
@@ -80,6 +82,11 @@ static bool set_option(Config* c, const char* key, const char* val) {
 #define BOOL(name, field) \
 	if (!strcmp(key, name)) { \
 		c->field = parse_bool(val); \
+		return true; \
+	}
+#define CORE(name, field) /* auto, or the core's number */ \
+	if (!strcmp(key, name)) { \
+		c->field = val[0] >= '0' && val[0] <= '3' ? val[0] - '0' : -1; \
 		return true; \
 	}
 #define INT(name, field) \
@@ -161,6 +168,13 @@ static bool set_option(Config* c, const char* key, const char* val) {
 	BOOL("rewind", rewind)
 	INT("rewind_seconds", rewindSeconds)
 	INT("map_interval", mapInterval)
+	INT("capture_throttle", captureThrottle)
+	CORE("capture_core", captureCore)
+	CORE("ahead_core", aheadCore)
+	CORE("side_core", sideCore)
+	CORE("video_core", videoCore)
+	INT("core1_limit", core1Limit)
+	BOOL("core_probe", coreProbe)
 	BOOL("ab_swap", abSwap)
 	STR("hotkey", hotkey)
 	if (!strcmp(key, "hotkey_fps")) return true; /* (a test build's: the quick menu has the FPS counter) */
@@ -232,6 +246,7 @@ static bool set_option(Config* c, const char* key, const char* val) {
 #undef STR
 #undef BOOL
 #undef INT
+#undef CORE
 }
 
 void config_load_file(Config* c, const char* path) {

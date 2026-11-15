@@ -56,6 +56,14 @@ typedef struct Config {
 	bool threadedVideo; /* threaded_video: mGBA draws the picture on a thread of its own (the 3DS's default, on a New 3DS) */
 	bool showLogo;     /* the game's logo on the second screen when it has nothing else (off: blank) */
 	int mapInterval;   /* frames between periodic map refreshes */
+	int captureThrottle; /* capture_throttle: up to this many times map_interval while frames run over budget (0: off) */
+	/* the 3DS's cores (3ds/ctr/host.c); -1: as built in */
+	int captureCore;   /* capture_core: the hidden copy's thread */
+	int aheadCore;     /* ahead_core: frame_buffer's thread */
+	int sideCore;      /* side_core: the pad thread, logos, files and the rest */
+	int videoCore;     /* video_core: mGBA's drawing thread (needs the patched libmgba) */
+	int core1Limit;    /* core1_limit: the percent of the system core given to a thread on core 1 */
+	bool coreProbe;    /* core_probe: how much CPU each core gives a thread, in the log at start */
 	bool abSwap;       /* GBA A on the bottom face button instead of the right one */
 	char hotkey[16];   /* home | select | start | l3 (older names: guide = home, back = select) */
 	char hotkeyBtn[HK_COUNT][8]; /* each hotkey action's button (hotkey_quit ...), or none */

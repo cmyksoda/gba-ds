@@ -21,10 +21,11 @@ bool host_top_owns(const void* p);
 void host_rom_free(void* p); /* either kind */
 /* The core the app's side work runs on (the hidden copy of the game that
  * draws the second screen, a logo's extraction, files): the New 3DS's
- * fourth, else whichever the system gives. */
+ * fourth (side_core in gba-ds.cfg), else whichever the system gives. */
 int host_side_core(void);
 /* The core the next pthread_create puts its thread on (the New 3DS's third, 2, for the game's own
  * frames), once; the side core after. */
+#define HOST_CORE_AUTO (-100)
 void host_next_thread_core(int core);
 /* The name the next thread made is listed under (host_threads_describe), once. */
 void host_next_thread_name(const char* name);
@@ -34,6 +35,13 @@ void host_threads_job_start(void);
 void host_threads_describe(char* out, size_t n);
 /* The time sdl_ctr.c's drawing has waited for the GPU, in SDL_GetPerformanceCounter ticks (a sum that wraps). */
 uint32_t host_gpu_wait_ticks(void);
+/* gba-ds.cfg's side_core, capture_core, ahead_core, video_core (-1: as built in), core1_limit (a thread on
+ * core 1 needs the app's share of it set) and core_probe; at the start, and again for each game. */
+void host_set_cores(int side, int capture, int ahead, int video, int core1Percent, bool probe);
+/* What to give host_next_thread_core for the map capture's thread, and for the Frame Buffer's (mGBA's
+ * drawing thread on or not). */
+int host_capture_core(void);
+int host_ahead_core(bool threadedVideo);
 /* The next machine made is the game itself (the large share of the
  * recompiler's memory), or a copy. */
 void host_log_checkpoint(void);
