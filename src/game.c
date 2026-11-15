@@ -4267,7 +4267,6 @@ static void hud_compose(void) {
 		if (!hudLogoBelowDone) hud_make_logo_below();
 		hud_backdrop_from(hudLogoBelow, HUD_KEY(2, hudLogoBelowGen));
 	} else if (hudBackValid) {
-		hud_backdrop_from(hudBack, HUD_KEY(3, hudBackGen));
 		/* the game fading the whole screen to black or white: the
 		 * backdrop too. By BLDCNT (every BG layer, darken or brighten, by
 		 * BLDY, in 16ths) */
@@ -4293,23 +4292,27 @@ static void hud_compose(void) {
 			for (int i = 0; i < HUD_CW * HUD_CH; ++i) hudCanvas[i] = eff == 2 ? 0xFFFFFFFF : 0xFF000000;
 			hud_base_changed(0);
 			fade = 0;
-		} else if (hudFadeIn > 0) {
-			/* a new backdrop, faded in over 16 frames from how the last
-			 * scene faded out, or less if the game's own fade is less */
-			int in = hudFadeIn-- * 4;
-			if (in > fade || eff != hudFadeEff) eff = hudFadeEff, fade = in;
-		}
-		if (fade) {
-			for (int i = 0; i < HUD_CW * HUD_CH; ++i) {
-				uint32_t c = hudCanvas[i], o = 0xFF000000;
-				for (int k = 0; k < 24; k += 8) {
-					int v = (c >> k) & 0xFF;
-					v = eff == 3 ? v - v * fade / 64 : v + (255 - v) * fade / 64;
-					o |= (uint32_t) v << k;
-				}
-				hudCanvas[i] = o;
+		} else {
+			if (hudFadeIn > 0) {
+				/* a new backdrop, faded in over 16 frames from how the last
+				 * scene faded out, or less if the game's own fade is less */
+				int in = hudFadeIn-- * 4;
+				if (in > fade || eff != hudFadeEff) eff = hudFadeEff, fade = in;
 			}
-			hud_base_changed(0);
+			/* (the backdrop as faded by this much: kept while it stays so, not faded again each frame) */
+			uint64_t key = HUD_KEY(3, hudBackGen) | (fade ? ((uint64_t) ((eff & 3) << 7 | fade) + 1) << 48 : 0);
+			if (!lay || hudBaseKey != key) {
+				memcpy(hudCanvas, hudBack, sizeof(hudCanvas));
+				if (fade) {
+					uint8_t lut[256];
+					for (int v = 0; v < 256; ++v) lut[v] = (uint8_t) (eff == 3 ? v - v * fade / 64 : v + (255 - v) * fade / 64);
+					for (int i = 0; i < HUD_CW * HUD_CH; ++i) {
+						uint32_t c = hudCanvas[i];
+						hudCanvas[i] = 0xFF000000 | lut[c & 0xFF] | (uint32_t) lut[(c >> 8) & 0xFF] << 8 | (uint32_t) lut[(c >> 16) & 0xFF] << 16;
+					}
+				}
+				hud_base_changed(key);
+			}
 		}
 	} else if (h->card.tile) {
 		const uint32_t* cl = card_logo();
