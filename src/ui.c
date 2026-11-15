@@ -1977,6 +1977,7 @@ void ui_image_pixels(int screen, SDL_Texture* const* texPerView, int w, int h, c
 
 /* ui_image_pixels' drawing, into dst on the current (screen) target. */
 static void draw_pixels(SDL_Renderer* ren, int v, SDL_Texture* src, int w, int h, const SDL_Rect* dstp, int lcd) {
+	if (!src) return; /* (no texture could be made: not the cached target's last picture, which is another game's) */
 	SDL_Rect dst = *dstp;
 	int k = SDL_max(1, SDL_min(dst.w / w, dst.h / h));
 	bool exact = dst.w == w * k && dst.h == h * k;

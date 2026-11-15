@@ -662,21 +662,10 @@ static inline u32 tiled(u32 x, u32 y, u32 w) {
 	       ((x & 1) | ((y & 1) << 1) | ((x & 2) << 1) | ((y & 2) << 2) | ((x & 4) << 2) | ((y & 4) << 3));
 }
 
-SDL_Texture* SDL_CreateTexture(SDL_Renderer* r, Uint32 format, int access, int w, int h) {
-	(void) r;
-	if (w <= 0 || h <= 0) {
-		set_error("a %dx%d texture", w, h);
-		return NULL;
-	}
-	SDL_Texture* t = calloc(1, sizeof(*t));
-	if (!t) return NULL;
-	t->w = w, t->h = h;
-	t->tw = w, t->th = h;
-	while (t->tw > 1024 || t->th > 1024) t->tw = (t->tw + 1) / 2, t->th = (t->th + 1) / 2;
-	t->format = format;
-	t->streaming = access == SDL_TEXTUREACCESS_STREAMING;
-	t->blend = SDL_BLENDMODE_NONE;
-	t->r = t->g = t->b = t->a = 255;
+static int doomed_flush(void);
+
+/* t's GPU texture (in VRAM for a render target, else linear memory). */
+static bool texture_alloc(SDL_Texture* t, int access) {
 	bool ok;
 	if (access == SDL_TEXTUREACCESS_TARGET) {
 		ok = C3D_TexInitVRAM(&t->tex, (u16) pow2(t->tw), (u16) pow2(t->th), GPU_RGBA8);
@@ -693,6 +682,31 @@ SDL_Texture* SDL_CreateTexture(SDL_Renderer* r, Uint32 format, int access, int w
 			memset(t->tex.data, 0, t->tex.size);
 			cache_flush(t->tex.data, t->tex.size);
 		}
+	}
+	return ok;
+}
+
+SDL_Texture* SDL_CreateTexture(SDL_Renderer* r, Uint32 format, int access, int w, int h) {
+	(void) r;
+	if (w <= 0 || h <= 0) {
+		set_error("a %dx%d texture", w, h);
+		return NULL;
+	}
+	SDL_Texture* t = calloc(1, sizeof(*t));
+	if (!t) return NULL;
+	t->w = w, t->h = h;
+	t->tw = w, t->th = h;
+	while (t->tw > 1024 || t->th > 1024) t->tw = (t->tw + 1) / 2, t->th = (t->th + 1) / 2;
+	t->format = format;
+	t->streaming = access == SDL_TEXTUREACCESS_STREAMING;
+	t->blend = SDL_BLENDMODE_NONE;
+	t->r = t->g = t->b = t->a = 255;
+	bool ok = texture_alloc(t, access);
+	if (!ok) {
+		/* (a new game's textures are made while the last game's wait to be freed: its memory may be what's missing) */
+		int freed = doomed_flush();
+		if (freed) ok = texture_alloc(t, access);
+		logLine("textures: no memory for a %dx%d texture, %d waiting ones freed: %s", w, h, freed, ok ? "made" : "not made");
 	}
 	if (!ok) {
 		set_error("no memory for a %dx%d texture", w, h);
@@ -730,6 +744,22 @@ static void doomed_free(void) {
 	nDoomed = 0;
 }
 
+/* The textures let go, freed now: finish what's drawn, wait for the GPU, free. Returns how many. */
+static int doomed_flush(void) {
+	int n = nDoomed;
+	if (!n) return 0;
+	if (inFrame) {
+		C2D_Flush();
+		C3D_FrameEnd(0);
+		inFrame = false;
+		bound = NULL;
+	}
+	C3D_FrameBegin(0);
+	C3D_FrameEnd(0);
+	doomed_free();
+	return n;
+}
+
 void SDL_DestroyTexture(SDL_Texture* t) {
 	if (!t) return;
 	for (int i = 0; i < 2; ++i) {
@@ -739,18 +769,8 @@ void SDL_DestroyTexture(SDL_Texture* t) {
 		C2D_Flush();
 		bound = NULL;
 	}
-	if (nDoomed == (int) SDL_arraysize(doomed)) {
-		/* (more than a frame ever lets go: finish what's drawn, then free) */
-		if (inFrame) {
-			C2D_Flush();
-			C3D_FrameEnd(0);
-			inFrame = false;
-			bound = NULL;
-		}
-		C3D_FrameBegin(0);
-		C3D_FrameEnd(0);
-		doomed_free();
-	}
+	/* (more than a frame ever lets go) */
+	if (nDoomed == (int) SDL_arraysize(doomed)) doomed_flush();
 	doomed[nDoomed++] = t;
 }
 
