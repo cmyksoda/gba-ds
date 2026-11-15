@@ -90,6 +90,7 @@ int main(int argc, char** argv) {
 	/* GBADS_THREADED_VIDEO=1: the picture drawn on mGBA's thread, as on the 3DS (opened as the game, with sound) */
 	bool threaded = getenv("GBADS_THREADED_VIDEO") != NULL;
 	emu_threaded_video(threaded);
+	emu_idle_loops(getenv("GBADS_IDLE_LOOPS")); /* remove (the default), detect or ignore */
 	if (!emu_open(&emu, argv[1], NULL, threaded)) {
 		return 1;
 	}

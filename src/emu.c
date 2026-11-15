@@ -319,6 +319,11 @@ void emu_threaded_video(bool on) {
 	threadedVideo = on;
 }
 
+static char idleLoops[8] = "remove";
+void emu_idle_loops(const char* mode) {
+	snprintf(idleLoops, sizeof(idleLoops), "%s", mode && *mode ? mode : "remove");
+}
+
 bool emu_threaded(const Emu* e) {
 	return e->core && e->core->videoLogger;
 }
@@ -343,6 +348,7 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 		mCoreConfigSetIntValue(&e->core->config, "threadedVideo", 1);
 		mCoreConfigSetIntValue(&e->core->config, "threadedVideo.flushScanline", 0);
 	}
+	mCoreConfigSetDefaultValue(&e->core->config, "idleOptimization", idleLoops);
 	mCoreLoadConfig(e->core);
 
 	e->fb = calloc(GBA_W * GBA_H, sizeof(uint32_t));
