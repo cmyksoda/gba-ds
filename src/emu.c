@@ -19,6 +19,7 @@
 #include <mgba-util/vfs.h>
 #include <mgba/core/log.h>
 #include "patch.h"
+#include "idle_loops.h"
 #include <stdarg.h>
 #include <sys/stat.h>
 #include <pthread.h>
@@ -348,7 +349,7 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 		mCoreConfigSetIntValue(&e->core->config, "threadedVideo", 1);
 		mCoreConfigSetIntValue(&e->core->config, "threadedVideo.flushScanline", 0);
 	}
-	mCoreConfigSetDefaultValue(&e->core->config, "idleOptimization", idleLoops);
+	mCoreConfigSetDefaultValue(&e->core->config, "idleOptimization", strcmp(idleLoops, "known") ? idleLoops : "remove");
 	mCoreLoadConfig(e->core);
 
 	e->fb = calloc(GBA_W * GBA_H, sizeof(uint32_t));
@@ -396,6 +397,14 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 	e->gameCode[4] = 0;
 	e->core->checksum(e->core, &e->romCrc, mCHECKSUM_CRC32); /* (worked out by mGBA as it loaded the ROM) */
 	if (e->patch != PATCH_APPLIED && e->patch != PATCH_PARTIAL) e->fileCrc = e->romCrc;
+	if (!strcmp(idleLoops, "known")) {
+		struct GBA* gba = e->core->board;
+		for (size_t i = 0; i < sizeof(idleKnown) / sizeof(*idleKnown) && gba->idleLoop == GBA_IDLE_LOOP_NONE; ++i) {
+			if (!strcmp(idleKnown[i].code, e->gameCode) && idleKnown[i].crc == e->romCrc) gba->idleLoop = idleKnown[i].address;
+		}
+		/* (a game with no loop to skip then pays for no idle checks at all) */
+		gba->idleOptimization = gba->idleLoop == GBA_IDLE_LOOP_NONE ? IDLE_LOOP_IGNORE : IDLE_LOOP_REMOVE;
+	}
 	return true;
 }
 

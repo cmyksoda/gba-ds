@@ -54,7 +54,7 @@ typedef struct Config {
 	bool fastForward;  /* hold R2 to fast-forward */
 	bool matchDisplay; /* run at the display's refresh rate (if close to the GBA's) instead of 59.73 Hz */
 	bool threadedVideo; /* threaded_video: mGBA draws the picture on a thread of its own (the 3DS's default, on a New 3DS) */
-	char idleLoops[8];  /* idle_loops: remove (mGBA's known loops only) | detect (finds a loop itself) | ignore; armGBA has no use for it */
+	char idleLoops[8];  /* idle_loops: remove | detect | ignore | known (see emu_idle_loops); armGBA ignores it */
 	bool showLogo;     /* the game's logo on the second screen when it has nothing else (off: blank) */
 	int mapInterval;   /* frames between periodic map refreshes */
 	bool abSwap;       /* GBA A on the bottom face button instead of the right one */
