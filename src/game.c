@@ -4019,7 +4019,8 @@ static void map_hold_update(const typeof(hudProf->hud)* h, uint32_t clear) {
 
 /* The first pixel of a row from x to x1 that isn't the clear colour (x1 + 1: none), over the empty stretches eight at a time */
 static inline int next_lit(const uint32_t* row, int x, int x1, uint32_t clear) {
-	for (; x + 7 <= x1; x += 8) {
+	if (x > x1 || (row[x] & 0xFFFFFF) != clear) return x;
+	for (++x; x + 7 <= x1; x += 8) {
 		uint32_t d = (row[x] ^ clear) | (row[x + 1] ^ clear) | (row[x + 2] ^ clear) | (row[x + 3] ^ clear) | (row[x + 4] ^ clear) |
 		             (row[x + 5] ^ clear) | (row[x + 6] ^ clear) | (row[x + 7] ^ clear);
 		if (d & 0xFFFFFF) break;
