@@ -15,6 +15,9 @@
 #include <stdlib.h>
 #include <time.h>
 #include <string.h>
+#ifdef __3DS__
+#include "host.h"
+#endif
 
 struct MapCapture {
 	const MapProfile* prof;
@@ -876,6 +879,7 @@ static void start_thread(MapCapture* mc) {
 	if (!mc->running && !mc->noThread) {
 		mc->running = true;
 #ifdef __3DS__
+		host_next_thread_core(host_capture_core());
 		host_next_thread_name("hidden copy");
 #endif
 		if (pthread_create(&mc->thread, NULL, worker, mc) != 0) mc->running = false, mc->noThread = true;

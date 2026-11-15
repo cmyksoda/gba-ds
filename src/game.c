@@ -111,6 +111,7 @@ static struct {
 } ahead = { .lock = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER };
 static bool aheadInFlight; /* the worker is emulating the next frame */
 static bool aheadReady;    /* it has: that frame is emulated but not yet used */
+static double lateness = 1; /* capture_throttle: frames' work over their budget, averaged (1: on time) */
 static uint32_t aheadFb[GBA_W * GBA_H]; /* the frame on screen, while the worker writes the next */
 
 /* Bits above the GBA keys, for run_frame: the SNES layout's camera pan
@@ -829,7 +830,7 @@ static bool ahead_start(uint32_t keys) {
 		ahead.quit = false;
 #ifdef __3DS__
 		/* (the New 3DS's third core, unless mGBA's drawing thread is there) */
-		host_next_thread_core(emu_threaded(&emu) ? 3 : 2);
+		host_next_thread_core(host_ahead_core(emu_threaded(&emu)));
 		host_next_thread_name("frame buffer");
 #endif
 		ahead.started = pthread_create(&ahead.thread, NULL, ahead_worker, NULL) == 0;
@@ -7175,6 +7176,7 @@ static void logo_refresh(void) {
 
 enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 	cfg = c;
+	lateness = 1;
 	debug = getenv("GBADS_DEBUG") != NULL;
 	romPath = rom, lastLoop = 0;
 	game_paths(cfg, rom, &gp);
@@ -8259,6 +8261,8 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 			const MapProfile* ip = mapcap_profile(mc);
 			int every = ip && ip->interval > 0 && ip->interval < cfg->mapInterval ? ip->interval : cfg->mapInterval;
 			int interval = cheapFail ? every : every << SDL_min(fails, 3);
+			/* capture_throttle: further apart while the frames run late (squared: 87% speed, 1.3 times) */
+			if (cfg->captureThrottle > 0) interval = (int) (interval * SDL_min(lateness * lateness, (double) cfg->captureThrottle));
 			/* after failures, a room change still triggers a try, but no more
 			 * often than the normal interval */
 			bool due = sinceMapRequest >= interval ||
@@ -8380,6 +8384,10 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 		drawTicks += drawT1 - drawT0;
 		bench_frame(frameCount, benchEmuMs, (drawT1 - drawT0) * 1000.0 / SDL_GetPerformanceFrequency(),
 		            (drawT0 - emuT1) * 1000.0 / SDL_GetPerformanceFrequency(), mc && mapcap_busy(mc));
+		if (cfg->captureThrottle > 0 && !ff) {
+			double over = (double) (drawT1 - workT0) / SDL_GetPerformanceFrequency() / frameSec;
+			lateness += (SDL_max(over, 1.0) - lateness) / 32;
+		}
 		{
 			double msPer = 1000.0 / (double) SDL_GetPerformanceFrequency();
 			double total = (double) (drawT1 - workT0) * msPer;
