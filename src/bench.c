@@ -16,6 +16,8 @@
 #include "ui.h"
 #ifdef __3DS__
 #include "host.h"
+#include <pthread.h>
+#include <time.h>
 #endif
 
 #include <SDL.h>
@@ -37,7 +39,7 @@ static Uint64 lastT;
 static unsigned long jobFrames; /* (none: the game didn't start) */
 static struct {
 	int n;
-	double sum, worst, emu, draw, screen;
+	double sum, worst, emu, draw, screen, pre, gap;
 	int busy;
 	uint64_t first;
 } w;
@@ -67,7 +69,7 @@ bool bench_active(void) {
 	return active;
 }
 
-static void put(const char* line) {
+static void write_line(const char* line) {
 	fprintf(stderr, "%s\n", line);
 	if (results) {
 		fprintf(results, "%s\n", line);
@@ -75,6 +77,93 @@ static void put(const char* line) {
 	}
 	if (jobResults) fprintf(jobResults, "%s\n", line);
 }
+
+#ifdef __3DS__
+/* The lines are written by a thread of their own: the SD card can make a write wait for seconds, and
+ * the console's first bench run lost 6.6 s to one every minute or so, in the game's frame. The
+ * longest write of each window is in the next line (sd). */
+enum { QUEUE = 64, LINE_MAX_LEN = 1280 };
+static struct {
+	pthread_mutex_t lock;
+	/* (one thread to a condition variable: libctru's remembers a single wake, and a second waiter loses it) */
+	pthread_cond_t wake, idle;
+	pthread_t thread;
+	bool started, quit;
+	char lines[QUEUE][LINE_MAX_LEN];
+	int head, count;
+	double worstMs;
+} q = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, PTHREAD_COND_INITIALIZER };
+
+static void* writer_main(void* arg) {
+	(void) arg;
+	pthread_mutex_lock(&q.lock);
+	for (;;) {
+		while (!q.count && !q.quit) pthread_cond_wait(&q.wake, &q.lock);
+		if (!q.count) break;
+		static char line[LINE_MAX_LEN];
+		memcpy(line, q.lines[q.head], sizeof(line));
+		pthread_mutex_unlock(&q.lock);
+		struct timespec t0, t1;
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+		write_line(line);
+		clock_gettime(CLOCK_MONOTONIC, &t1);
+		double ms = (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
+		pthread_mutex_lock(&q.lock);
+		if (ms > q.worstMs) q.worstMs = ms;
+		q.head = (q.head + 1) % QUEUE;
+		--q.count;
+		pthread_cond_broadcast(&q.idle);
+	}
+	pthread_mutex_unlock(&q.lock);
+	return NULL;
+}
+
+static void put(const char* line) {
+	if (!q.started) q.started = pthread_create(&q.thread, NULL, writer_main, NULL) == 0;
+	if (!q.started) {
+		write_line(line);
+		return;
+	}
+	pthread_mutex_lock(&q.lock);
+	while (q.count == QUEUE) pthread_cond_wait(&q.idle, &q.lock);
+	snprintf(q.lines[(q.head + q.count) % QUEUE], LINE_MAX_LEN, "%s", line);
+	++q.count;
+	pthread_cond_broadcast(&q.wake);
+	pthread_mutex_unlock(&q.lock);
+}
+
+/* Everything put so far is written (a job's file is closed, or sent, after this). */
+static void drain(void) {
+	if (!q.started) return;
+	pthread_mutex_lock(&q.lock);
+	while (q.count) pthread_cond_wait(&q.idle, &q.lock);
+	pthread_mutex_unlock(&q.lock);
+}
+
+static void stop_writer(void) {
+	if (!q.started) return;
+	pthread_mutex_lock(&q.lock);
+	q.quit = true;
+	pthread_cond_broadcast(&q.wake);
+	pthread_mutex_unlock(&q.lock);
+	pthread_join(q.thread, NULL);
+	q.started = q.quit = false;
+}
+
+static double take_worst_write(void) {
+	pthread_mutex_lock(&q.lock);
+	double ms = q.worstMs;
+	q.worstMs = 0;
+	pthread_mutex_unlock(&q.lock);
+	return ms;
+}
+#else
+static void put(const char* line) {
+	write_line(line);
+}
+static void drain(void) {}
+static void stop_writer(void) {}
+#endif
 
 /* Which core each thread ran on (the console's; an emulator's processor ids mean nothing), once for a job, again if it
  * changed by the end. */
@@ -90,7 +179,7 @@ static void threads_line(void) {
 #endif
 }
 
-void bench_frame(uint64_t frame, double emuMs, double drawMs, double screenMs, bool captureBusy) {
+void bench_frame(uint64_t frame, double emuMs, double drawMs, double screenMs, bool captureBusy, double preMs, double loopMs) {
 	if (!active) return;
 	++jobFrames;
 	Uint64 now = SDL_GetPerformanceCounter();
@@ -108,10 +197,23 @@ void bench_frame(uint64_t frame, double emuMs, double drawMs, double screenMs, b
 	w.emu += emuMs;
 	w.draw += drawMs;
 	w.screen += screenMs;
+	w.pre += preMs;
+	w.gap += ms - loopMs;
 	w.busy += captureBusy;
+#ifdef __3DS__
+	if (ms > 1000) {
+		/* (a frame that stopped: where, as the game loop saw it) */
+		char note[320];
+		snprintf(note, sizeof(note), "bench %s stall at frame %llu: %.0f ms = before emulating %.0f + emulating %.0f + second screen %.0f + drawing %.0f + outside the loop %.0f",
+		         jobId, (unsigned long long) frame, ms, preMs, emuMs, screenMs, drawMs, ms - loopMs);
+		put(note);
+	}
+#else
+	(void) preMs, (void) loopMs;
+#endif
 	if (w.n == WINDOW) {
-		/* (the columns after "second screen" are appended: video wait is part of emulating, the others are not) */
-		char line[384];
+		/* (the columns after "second screen" are appended: video wait is part of emulating, the others are not; pre, gap and sd, on the 3DS, come last) */
+		char line[448];
 		Sums s;
 		sums_read(&s);
 		int len = snprintf(line, sizeof(line),
@@ -124,6 +226,8 @@ void bench_frame(uint64_t frame, double emuMs, double drawMs, double screenMs, b
 #ifdef __3DS__
 		len += snprintf(line + len, sizeof(line) - (size_t) len, ", gpu wait %.2f",
 		                (s.gpu - base.gpu) * 1000.0 / SDL_GetPerformanceFrequency() / w.n);
+		/* of the "other": before emulating, and outside the loop (its end, the lines written, the loop's start); sd: the longest write */
+		snprintf(line + len, sizeof(line) - (size_t) len, ", pre %.2f, gap %.2f, sd %.1f", w.pre / w.n, w.gap / w.n, take_worst_write());
 #endif
 		put(line);
 		base = s;
@@ -317,6 +421,7 @@ bool bench_run(Config* cfg) {
 		snprintf(msg, sizeof(msg), "bench %s done", jobId);
 		put(msg);
 		++done;
+		drain();
 		if (jobResults) fclose(jobResults);
 		jobResults = NULL;
 #ifdef __3DS__
@@ -328,6 +433,7 @@ bool bench_run(Config* cfg) {
 	fclose(jobs);
 	snprintf(msg, sizeof(msg), "bench end: %d job(s)", done);
 	put(msg);
+	drain();
 	snprintf(path, sizeof(path), "%s/end.txt", dir);
 	FILE* endFile = fopen(path, "w");
 	if (endFile) {
@@ -337,6 +443,7 @@ bool bench_run(Config* cfg) {
 #ifdef __3DS__
 	host_bench_report(path, "end");
 #endif
+	stop_writer();
 	if (results) fclose(results);
 	results = NULL;
 	active = false;

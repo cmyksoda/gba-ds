@@ -1,6 +1,7 @@
 /* The test bench (bench = JOBS): every job starts a game from power-on, plays its input script unpaced and logs
  * frame times every 60 frames (after "second screen": video wait, hidden copy, hidden frames and, on the 3DS, gpu
- * wait). A 3DS job also logs which core each thread ran on, and a job line's OPTIONS (bench.c) set gba-ds.cfg keys. */
+ * wait; then, on the 3DS, pre, gap and sd: the "other" time's parts and the longest write, and a frame over 1 s gets a
+ * "stall at frame" line). A 3DS job also logs which core each thread ran on, and a job line's OPTIONS (bench.c) set gba-ds.cfg keys. */
 #ifndef GBADS_BENCH_H
 #define GBADS_BENCH_H
 
@@ -13,7 +14,8 @@
 bool bench_run(Config* cfg);
 bool bench_active(void);
 /* Once a frame from the game loop: this frame's emulating and drawing times, and GBA DS's own work between them
- * (the second screen's map, HUD and snapshot pictures). */
-void bench_frame(uint64_t frame, double emuMs, double drawMs, double screenMs, bool captureBusy);
+ * (the second screen's map, HUD and snapshot pictures); the loop's work before emulating, and the whole of its
+ * body (what the frame took outside it is the lines written, the loop's start and its end). */
+void bench_frame(uint64_t frame, double emuMs, double drawMs, double screenMs, bool captureBusy, double preMs, double loopMs);
 
 #endif
