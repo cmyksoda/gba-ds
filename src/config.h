@@ -120,6 +120,8 @@ void config_defaults(Config* c);
 void config_load_file(Config* c, const char* path);
 /* Parses --key=value / --flag arguments and an optional ROM path. Returns false on error. */
 bool config_parse_args(Config* c, int argc, char** argv);
+/* One gba-ds.cfg option by its name (the bench's per-job options); false if there's no such option. */
+bool config_set(Config* c, const char* key, const char* val);
 void config_usage(const char* argv0);
 
 #endif

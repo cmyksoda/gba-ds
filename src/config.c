@@ -295,6 +295,10 @@ bool config_parse_args(Config* c, int argc, char** argv) {
 	return true;
 }
 
+bool config_set(Config* c, const char* key, const char* val) {
+	return set_option(c, key, val);
+}
+
 void config_usage(const char* argv0) {
 	fprintf(stderr,
 	        "GBA DS " GBADS_VERSION "\n"

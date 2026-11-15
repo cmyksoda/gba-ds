@@ -77,6 +77,8 @@ void emu_frame_blind(Emu* e, uint32_t keys);
 void emu_threaded_video(bool on);
 /* this core's picture is drawn on mGBA's thread */
 bool emu_threaded(const Emu* e);
+/* mGBA's core only: the time emu_frame has waited for that thread's last lines, in microseconds (a sum that wraps). */
+uint32_t emu_video_wait_us(void);
 /* true while this core's capture has been called off (Emu.cancel) */
 bool emu_cancelled(const Emu* e);
 void emu_reset(Emu* e);

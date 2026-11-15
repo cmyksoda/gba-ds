@@ -28,6 +28,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <time.h>
 #include <fcntl.h>
 
 static void quiet_log(struct mLogger* l, int cat, enum mLogLevel level, const char* fmt, va_list args) {
@@ -418,6 +419,11 @@ bool emu_cancelled(const Emu* e) {
 	return e->cancel && *e->cancel;
 }
 
+static uint32_t videoWaitUs;
+uint32_t emu_video_wait_us(void) {
+	return __atomic_load_n(&videoWaitUs, __ATOMIC_RELAXED);
+}
+
 void emu_frame(Emu* e, uint32_t keys) {
 	if (emu_cancelled(e)) return;
 	++e->frames;
@@ -427,7 +433,11 @@ void emu_frame(Emu* e, uint32_t keys) {
 		/* (the picture is drawn on mGBA's thread: wait for its last lines) */
 		const void* px;
 		size_t stride;
+		struct timespec t0, t1;
+		clock_gettime(CLOCK_MONOTONIC, &t0);
 		e->core->getPixels(e->core, &px, &stride);
+		clock_gettime(CLOCK_MONOTONIC, &t1);
+		__atomic_fetch_add(&videoWaitUs, (uint32_t) ((t1.tv_sec - t0.tv_sec) * 1000000 + (t1.tv_nsec - t0.tv_nsec) / 1000), __ATOMIC_RELAXED);
 	}
 	if (!e->audio) {
 		struct mAudioBuffer* ab = e->core->getAudioBuffer(e->core);

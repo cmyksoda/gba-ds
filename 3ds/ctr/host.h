@@ -26,6 +26,14 @@ int host_side_core(void);
 /* The core the next pthread_create puts its thread on (the New 3DS's third, 2, for the game's own
  * frames), once; the side core after. */
 void host_next_thread_core(int core);
+/* The name the next thread made is listed under (host_threads_describe), once. */
+void host_next_thread_name(const char* name);
+/* The bench: a job begins (ended threads are forgotten) / one line with the core each thread found itself on and
+ * whether the core asked for was refused. */
+void host_threads_job_start(void);
+void host_threads_describe(char* out, size_t n);
+/* The time sdl_ctr.c's drawing has waited for the GPU, in SDL_GetPerformanceCounter ticks (a sum that wraps). */
+uint32_t host_gpu_wait_ticks(void);
 /* The next machine made is the game itself (the large share of the
  * recompiler's memory), or a copy. */
 void host_log_checkpoint(void);
