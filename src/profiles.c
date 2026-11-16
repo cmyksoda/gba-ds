@@ -4502,6 +4502,20 @@ static const uint32_t* mmbn_live_view(Emu* live, const char* rom) {
 	return out;
 }
 
+/* The game's over: the map's worker stopped, and its copy of the game (a whole machine and a share of the ROM) and
+ * its state closed, which kept about 20 MiB of the heap for the rest of the run. */
+void profile_live_end(void) {
+	mmbnStop = true;
+	if (mmbnThread) pthread_join(mmbnThread, NULL), mmbnThread = 0;
+	if (mmbnEmuOpen) emu_close(&mmbnEmu), mmbnEmuOpen = false;
+	free(mmbnJob);
+	mmbnJob = NULL;
+	mmbnJobSize = 0;
+	free(mmbnMap.px);
+	memset(&mmbnMap, 0, sizeof(mmbnMap));
+	mmbnBusy = false;
+}
+
 static const char* mmbn_compose(Emu* s, const void* state, uint32_t* out, int w, int h) {
 	if (w != GBA_W || h != GBA_H) return "not a GBA screen";
 	if (!emu_state_load(s, state)) return "state load failed";
