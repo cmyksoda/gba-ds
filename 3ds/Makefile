@@ -15,7 +15,7 @@ AZAHAR_IMAGE ?= lscr.io/linuxserver/azahar:latest
 TOOLS ?= $(HOME)/3ds-tools/bin
 VERSION := $(shell cat $(REPO)/3ds/VERSION)
 
-CORE ?= mgba
+CORE ?= armgba
 LIBMGBA := $(REPO)/deps/mgba-3ds/build/libmgba.a
 
 .PHONY: 3ds 3ds-test cia sim azahar-test libmgba

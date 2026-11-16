@@ -13,7 +13,7 @@ every other system. What differs is underneath:
 
 | | other systems | 3DS |
 |---|---|---|
-| emulator | libmgba (`src/emu.c`) | the same, built for the 3DS (`mgba/build-libmgba.sh`); `CORE=armgba` builds ratherDashing's armGBA with its ARM recompiler instead (`emu/emu_armgba.c`) |
+| emulator | libmgba (`src/emu.c`) | ratherDashing's armGBA with its ARM recompiler (`emu/emu_armgba.c`), the default; `CORE=mgba` builds on libmgba instead (`mgba/build-libmgba.sh`) |
 | screens, input, sound | SDL2 | `ctr/sdl_ctr.c`: the part of SDL2 the app uses, on the GPU (citro2d), hid and ndsp |
 | threads | pthreads | `ctr/host.c`: map captures and logos on the New 3DS's fourth core, the Frame Buffer option's emulation thread on its third |
 

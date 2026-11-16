@@ -28,9 +28,9 @@ VERSION := $(shell cat $(REPO)/3ds/VERSION)
 UPSTREAM := $(shell cat $(REPO)/VERSION)
 BUILD   := build$(if $(TEST),-test)
 
-# CORE=mgba (default): src/emu.c on libmgba, as every other GBA DS build (../mgba/build-libmgba.sh makes
-# it; MGBA_BUILD is its build folder). CORE=armgba: armGBA and its recompiler (../emu).
-CORE ?= mgba
+# CORE=armgba (default): armGBA and its recompiler (../emu). CORE=mgba: src/emu.c on libmgba, as every other
+# GBA DS build (../mgba/build-libmgba.sh makes it; MGBA_BUILD is its build folder).
+CORE ?= armgba
 ARMGBA := $(REPO)/third_party/armgba
 ifeq ($(CORE),armgba)
 ARMGBA_BACKEND := a32
