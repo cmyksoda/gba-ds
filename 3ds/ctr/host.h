@@ -19,6 +19,9 @@ uint8_t* host_top_alloc(size_t size);
 bool host_top_free(void* p); /* false: not one of those */
 bool host_top_owns(const void* p);
 void host_rom_free(void* p); /* either kind */
+/* Memory the GPU can read (the game's picture), 128-byte aligned. */
+void* host_linear_alloc(size_t size);
+void host_linear_free(void* p);
 /* The core the app's side work runs on (the hidden copy of the game that
  * draws the second screen, a logo's extraction, files): the New 3DS's
  * fourth (side_core in gba-ds.cfg), else whichever the system gives. */

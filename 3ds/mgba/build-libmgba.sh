@@ -2,7 +2,8 @@
 # libmgba for the 3DS: the commit and options every GBA DS build uses (scripts/mgba-options.sh), with
 # mGBA's own 3DS port's toolchain. Run inside the devkitpro/devkitarm image (../Makefile's `libmgba`).
 #
-#   build-libmgba.sh [DEPS]    DEPS/mgba-3ds/build/libmgba.a (DEPS: the repo's deps/ by default)
+#   build-libmgba.sh [DEPS] [color16]    DEPS/mgba-3ds/build/libmgba.a (DEPS: the repo's deps/ by default)
+# color16: mGBA's own 3DS port's 16-bit pixels (RGB565) in place of 32-bit ones (GBA DS builds with COLOR_16_BIT then)
 # MGBA_BUILD_NAME=NAME builds in DEPS/mgba-3ds/NAME instead of build/ (the sources are shared); MGBA_CFLAGS adds C flags
 # after the release flags; MGBA_LTO=1 builds libmgba with -flto (the app's own link then optimizes across the library).
 # MGBA_PGO=use builds with the profile in pgo/ (made from a run of -fprofile-generate code: MGBA_PGO=gen, whose app
@@ -34,11 +35,15 @@ if [ ! -d "$SRC/.git" ]; then
 	git clone -q https://github.com/mgba-emu/mgba.git "$SRC"
 fi
 git -C "$SRC" checkout -q -f "$MGBA_COMMIT"
-# GBA DS works on 32-bit pixels and runs several copies of a game at once: not mGBA's 16-bit colour
-# or its one fixed ROM buffer, nor the 32 MiB that buffer's start-up code takes.
-sed -i -e 's/ COLOR_16_BIT COLOR_5_6_5 FIXED_ROM_BUFFER / /' \
-	-e '/ctru-heap.c/d' "$SRC/src/platform/3ds/CMakeLists.txt"
-grep -q 'COLOR_16_BIT' "$SRC/src/platform/3ds/CMakeLists.txt" && { echo "mGBA's 3DS defines not removed"; exit 1; }
+# GBA DS runs several copies of a game at once: not mGBA's one fixed ROM buffer, nor the 32 MiB that buffer's
+# start-up code takes. Its pixels are 32-bit, unless color16 asks for mGBA's own 16-bit ones.
+if [ "${2:-}" = color16 ]; then
+	sed -i -e 's/ FIXED_ROM_BUFFER / /' -e '/ctru-heap.c/d' "$SRC/src/platform/3ds/CMakeLists.txt"
+	grep -q 'COLOR_5_6_5' "$SRC/src/platform/3ds/CMakeLists.txt" || { echo "mGBA's 16-bit defines are gone"; exit 1; }
+else
+	sed -i -e 's/ COLOR_16_BIT COLOR_5_6_5 FIXED_ROM_BUFFER / /' -e '/ctru-heap.c/d' "$SRC/src/platform/3ds/CMakeLists.txt"
+	grep -q 'COLOR_16_BIT' "$SRC/src/platform/3ds/CMakeLists.txt" && { echo "mGBA's 3DS defines not removed"; exit 1; }
+fi
 git -C "$SRC" apply "$ROOT/3ds/mgba/rom-copy-size.patch" "$ROOT/3ds/mgba/memory-map-hook.patch" \
 	"$ROOT/3ds/mgba/video-thread-core.patch" "$ROOT/3ds/mgba/gba-fast-memory.patch" \
 	"$ROOT/3ds/mgba/gba-ldm-stm.patch" "$ROOT/3ds/mgba/gba-dma-batch.patch" "$ROOT/3ds/mgba/color-mix.patch" \

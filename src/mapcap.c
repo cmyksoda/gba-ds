@@ -435,7 +435,7 @@ static void grab_under(MapCapture* mc, Emu* s) {
 	emu_layers(s, p->underLayers);
 	emu_state_load(s, mc->underState);
 	emu_frame(s, 0);
-	memcpy(mc->under, s->fb, GBA_W * GBA_H * sizeof(uint32_t));
+	memcpy(mc->under, emu_fb(s), GBA_W * GBA_H * sizeof(uint32_t));
 	emu_layers(s, 0x1F);
 	if (n > base) emu_hide_sprites(s, rules, base);
 	emu_state_load(s, mc->underState);
@@ -484,7 +484,7 @@ static void frame_if(Emu* s, uint32_t keys, bool drawn) {
 }
 
 static bool map_up(const MapProfile* p, Emu* s) {
-	return memprobes_match(p->mem, 4, s) && screen_matches(p, s->fb);
+	return memprobes_match(p->mem, 4, s) && screen_matches(p, emu_fb(s));
 }
 
 /* Runs the shadow core from `state`; returns NULL on success or a reason.
@@ -620,7 +620,7 @@ static const char* do_capture_(MapCapture* mc, const void* state) {
 			continue;
 		}
 		everUp = true;
-		crop(mc, s->fb, mc->work[0]);
+		crop(mc, emu_fb(s), mc->work[0]);
 		if (havePrev && count_diff(mc->prev, mc->work[0], n, p->maxDiff) <= p->maxDiff) {
 			if (++stable >= p->stableFrames) {
 				break;
@@ -654,7 +654,7 @@ static const char* do_capture_(MapCapture* mc, const void* state) {
 		if (!map_up(p, s)) {
 			break;
 		}
-		crop(mc, s->fb, mc->work[i]);
+		crop(mc, emu_fb(s), mc->work[i]);
 		if (memcmp(mc->work[i], mc->work[0], n * sizeof(uint32_t))) {
 			animated = true;
 		}
@@ -718,7 +718,7 @@ static bool grab_rate(MapCapture* mc, const void* state) {
 	for (int y = 0; y < h; ++y) {
 		for (int x = 0; x < w; ++x) {
 			mc->rateMask[y * w + x] = false;
-			if ((s->fb[(p->rate.y + y) * GBA_W + p->rate.x + x] & 0xFFFFFF) == text) ++count;
+			if ((emu_fb(s)[(p->rate.y + y) * GBA_W + p->rate.x + x] & 0xFFFFFF) == text) ++count;
 		}
 	}
 	if (count < 12) return false; /* the pause screen didn't come up */
@@ -731,7 +731,7 @@ static bool grab_rate(MapCapture* mc, const void* state) {
 				for (int dx = -1; dx <= 1; ++dx) {
 					int u = x - 1 + dx, v = y - 1 + dy;
 					if (u < 0 || v < 0 || u >= w || v >= h) continue;
-					bool t = (s->fb[(p->rate.y + v) * GBA_W + p->rate.x + u] & 0xFFFFFF) == text;
+					bool t = (emu_fb(s)[(p->rate.y + v) * GBA_W + p->rate.x + u] & 0xFFFFFF) == text;
 					if (t && !dx && !dy) isText = true;
 					if (t) nearText = true;
 				}

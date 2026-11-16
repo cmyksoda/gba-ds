@@ -694,7 +694,7 @@ static bool texture_alloc(SDL_Texture* t, int access) {
 			}
 		}
 	} else {
-		ok = C3D_TexInit(&t->tex, (u16) pow2(t->tw), (u16) pow2(t->th), GPU_RGBA8);
+		ok = C3D_TexInit(&t->tex, (u16) pow2(t->tw), (u16) pow2(t->th), t->format == SDL_PIXELFORMAT_RGB565 ? GPU_RGB565 : GPU_RGBA8);
 		if (ok) {
 			memset(t->tex.data, 0, t->tex.size);
 			cache_flush(t->tex.data, t->tex.size);
@@ -903,10 +903,53 @@ static bool update_by_gpu(SDL_Texture* t, const void* pixels, int pitch, int y0,
 static u64 upTicks;
 static unsigned upCount;
 
+/* A whole RGB565 picture: the GPU reads it where it is (linear memory, a texture-wide row), else from a copy in the stage. */
+static int update_565(SDL_Texture* t, const void* pixels, int pitch) {
+	int w = t->w, h = t->h;
+	u32 texW = t->tex.width;
+	if (!gpu_tiling() || !t->streaming || t->tw != w || t->th != h || (w & 7) || (h & 7) || texW < 64) {
+		u16* out = t->tex.data;
+		for (int y = 0; y < h && y < t->th; ++y) {
+			const u16* src = (const u16*) ((const u8*) pixels + (size_t) y * pitch);
+			for (int x = 0; x < w && x < t->tw; ++x) out[tiled((u32) x, (u32) y, texW)] = src[x];
+		}
+		cache_flush(t->tex.data, t->tex.size);
+		return 0;
+	}
+	const void* from = pixels;
+	if (pitch != (int) (texW * 2) || !osConvertVirtToPhys(pixels) || ((u32) pixels & 0x7F)) {
+		if (!t->stage) {
+			t->stage = linearAlloc((size_t) texW * h * 2);
+			if (!t->stage) return -1;
+			memset(t->stage, 0, (size_t) texW * h * 2);
+		}
+		for (int y = 0; y < h; ++y) memcpy((u16*) t->stage + (size_t) y * texW, (const u8*) pixels + (size_t) y * pitch, (size_t) w * 2);
+		from = t->stage;
+	}
+	cache_flush(from, (size_t) texW * h * 2);
+	GPU_WAIT(C3D_SyncDisplayTransfer((u32*) from, GX_BUFFER_DIM(texW, h), (u32*) t->tex.data, GX_BUFFER_DIM(texW, h),
+	                                 GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGB565) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB565) |
+	                                     GX_TRANSFER_OUT_TILED(1)));
+	return 0;
+}
+
 int SDL_UpdateTexture(SDL_Texture* t, const SDL_Rect* rect, const void* pixels, int pitch) {
 	if (!t || t->target || !pixels) return -1;
 	SDL_Rect whole = { 0, 0, t->w, t->h };
 	if (!rect) rect = &whole;
+	if (t->format == SDL_PIXELFORMAT_RGB565) {
+		if (rect != &whole && (rect->x || rect->y || rect->w != t->w || rect->h != t->h)) return -1;
+		u64 t0 = svcGetSystemTick();
+		int r = update_565(t, pixels, pitch);
+		if (t->w == 240 && t->h == 160) {
+			upTicks += svcGetSystemTick() - t0;
+			if (++upCount == 600) {
+				logLine("textures: a 240x160 picture's upload %.3f ms on average", (double) upTicks / upCount / CPU_TICKS_PER_MSEC);
+				upTicks = 0, upCount = 0;
+			}
+		}
+		return r;
+	}
 	if (rect == &whole || (!rect->x && !rect->y && rect->w == t->w && rect->h == t->h)) {
 		u64 t0 = svcGetSystemTick();
 		bool done = update_by_gpu(t, pixels, pitch, 0, t->h);

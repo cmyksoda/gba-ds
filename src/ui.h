@@ -154,6 +154,8 @@ void ui_color_correction(bool on);
 void ui_shader(int sh);
 /* One colour through it (for tests and the second screen's own grey) */
 uint32_t ui_color_correct(uint32_t abgr);
+/* whether pictures are going through that table (a picture handed over as RGB565 can't) */
+bool ui_color_correct_on(void);
 /* Filled box with rounded corners (radius in pixels). */
 void ui_fill_round(int screen, SDL_Rect local, SDL_Color c, int radius);
 /* Text in Jost (textfont.h: TF_BOLD for labels and headings, TF_BODY for

@@ -44,7 +44,14 @@ typedef struct SpriteRule {
 
 typedef struct Emu {
 	struct mCore* core;
-	uint32_t* fb; /* GBA_W * GBA_H, mGBA native 32-bit color (XBGR8888, i.e. bytes R,G,B,X) */
+	uint32_t* fb; /* GBA_W * GBA_H, mGBA native 32-bit color (XBGR8888, i.e. bytes R,G,B,X); read it with emu_fb() */
+#ifdef COLOR_16_BIT
+	/* libmgba with 16-bit pixels (RGB565): mGBA draws into fb16; fb is made from it by emu_fb() */
+	uint16_t* fb16;
+	bool fb16Linear; /* in linear memory: the GPU can read it */
+	bool fbStale;    /* fb16 has a newer picture than fb */
+	bool fbWritten;  /* fb was written over (emu_fb_rw): it is what's shown, and goes back into fb16 before the next frame */
+#endif
 	char gameCode[5];
 	uint32_t romCrc; /* the ROM's CRC32, as loaded, patched if it was (profile_dump) */
 	int patch; /* PatchResult (patch.h): a patch file beside the ROM, and whether it was applied (GEN-9) */
@@ -59,6 +66,43 @@ typedef struct Emu {
 	 * once; emu_cancelled says so, so it keeps nothing of that run */
 	volatile bool* cancel;
 } Emu;
+
+#ifdef COLOR_16_BIT
+#define EMU_FB16_STRIDE 256 /* a GPU texture's width: the picture goes to the GPU as it is */
+/* fb made from fb16: the 8-bit values mGBA's 32-bit pixels have for the same colors (except blends, which land between steps there) */
+void emu_fb_sync(Emu* e);
+/* n pixels of RGB565 as XBGR8888 (the same colors as emu_fb's) */
+void emu_expand565_row(uint32_t* dst, const uint16_t* src, int n);
+uint32_t emu_expand565_one(uint16_t c);
+static inline uint32_t* emu_fb(Emu* e) {
+	if (e->fbStale) emu_fb_sync(e);
+	return e->fb;
+}
+/* For writing: mGBA redraws only changed lines, so fb goes back into fb16 before the next frame. */
+static inline uint32_t* emu_fb_rw(Emu* e) {
+	e->fbWritten = true;
+	return emu_fb(e);
+}
+/* One pixel of the picture as XBGR8888, without making all of fb. */
+static inline uint32_t emu_pixel(Emu* e, int x, int y) {
+	return e->fbStale ? emu_expand565_one(e->fb16[y * EMU_FB16_STRIDE + x]) : e->fb[y * GBA_W + x];
+}
+/* true when fb was written over since the last frame (what is shown is fb, not fb16) */
+static inline bool emu_fb_written(const Emu* e) {
+	return e->fbWritten;
+}
+/* The next core opened has fb16 in linear memory, for the GPU's transfer. */
+void emu_picture_linear(bool on);
+
+#else
+static inline uint32_t* emu_fb(Emu* e) {
+	return e->fb;
+}
+static inline uint32_t emu_pixel(Emu* e, int x, int y) {
+	return e->fb[y * GBA_W + x];
+}
+#define emu_fb_rw emu_fb
+#endif
 
 /* savePath may be NULL (no battery save attached). */
 bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio);

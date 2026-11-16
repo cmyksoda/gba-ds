@@ -1319,6 +1319,9 @@ void ui_shader(int sh) {
 	ccGain = uiShader >= SH_SUB_LIGHT ? subPresets[uiShader - SH_SUB_LIGHT].gain : 100;
 	cc_refresh();
 }
+bool ui_color_correct_on(void) {
+	return ccOn;
+}
 uint32_t ui_color_correct(uint32_t p) {
 	if (!ccOn) return p;
 	unsigned key = (p >> 3 & 31) | (p >> 11 & 31) << 5 | (p >> 19 & 31) << 10;
