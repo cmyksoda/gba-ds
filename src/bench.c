@@ -82,7 +82,7 @@ static void write_line(const char* line) {
 /* The lines are written by a thread of their own: the SD card can make a write wait for seconds, and
  * the console's first bench run lost 6.6 s to one every minute or so, in the game's frame. The
  * longest write of each window is in the next line (sd). */
-enum { QUEUE = 64, LINE_MAX_LEN = 1280 };
+enum { QUEUE = 16, LINE_MAX_LEN = 640 };
 static struct {
 	pthread_mutex_t lock;
 	/* (one thread to a condition variable: libctru's remembers a single wake, and a second waiter loses it) */
@@ -121,7 +121,13 @@ static void* writer_main(void* arg) {
 static void put(const char* line) {
 	if (!q.started) {
 		host_next_thread_name("bench lines");
-		q.started = pthread_create(&q.thread, NULL, writer_main, NULL) == 0;
+		/* (a small stack and queue: armGBA with a 32 MiB game has under a MiB of heap, and this thread's 256 KiB
+		 * stack made it flush its code memory over and over) */
+		pthread_attr_t small;
+		pthread_attr_init(&small);
+		pthread_attr_setstacksize(&small, 32 * 1024);
+		q.started = pthread_create(&q.thread, &small, writer_main, NULL) == 0;
+		pthread_attr_destroy(&small);
 	}
 	if (!q.started) {
 		write_line(line);
