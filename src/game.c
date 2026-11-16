@@ -960,6 +960,30 @@ static bool hudOn; /* the frame being emulated is split */
 #define HUD_CH (GBA_H * 2)
 static uint32_t hudCanvas[HUD_CW * HUD_CH], hudBack[HUD_CW * HUD_CH], hudGrab[GBA_W * GBA_H];
 static bool hudBackValid;
+/* hud_layers: hudCanvas is the backdrop alone, made again only when it
+ * changes; the HUD's pieces (hudOver, a pixel to a GBA pixel) and the big
+ * map (hudMapPx) are laid over it by the GPU as the picture is drawn
+ * (hud_draw), so a frame sends only what moved, not the whole picture */
+static bool hudLayered;
+static SDL_Texture* hudOverTex[2];
+static SDL_Texture* hudMapTex[2];
+static SDL_Texture* hudFlatTex[2]; /* the layers flattened, where they can't be drawn as layers (Smooth) */
+static uint32_t hudOver[GBA_W * GBA_H];      /* the pieces as the textures have them: alpha 0 where nothing */
+static uint32_t hudOverBuild[GBA_W * GBA_H]; /* this frame's */
+static bool hudOverRow[GBA_H], hudOverUse[GBA_H]; /* rows of hudOver, of hudOverBuild with a piece in them */
+static uint32_t hudMapPx[GBA_W * GBA_H], hudMapBuild[GBA_W * GBA_H]; /* the big map's box, rows hudMapTexW apart */
+static int hudMapTexW, hudMapTexH;
+static SDL_Rect hudMapSrc, hudMapDst; /* the map's part of hudMapTex, and its place on the canvas (w 0: no big map) */
+static uint32_t* hudFlat;
+static uint64_t hudBaseKey; /* which backdrop hudCanvas holds as it is (0: none, or changed since) */
+static unsigned hudLayerGen = 1, hudFlatGen; /* a count of changes to the layers, and as of the flattened picture */
+static unsigned hudBackGen, hudLogoBackGen, hudLogoBelowGen, cardLogoGen; /* a count of each backdrop's remakes */
+/* what each view's textures don't have yet */
+static struct {
+	bool base, map, flat;
+	unsigned overStrips; /* bit i: rows 8i to 8i + 7 of hudOver */
+} hudOld[2];
+#define HUD_KEY(kind, gen) ((uint64_t) (kind) << 32 | (uint32_t) (gen))
 static int hudFrames; /* split frames since the race (re)started */
 static int mapX0, mapY0, mapX1, mapY1; /* the map's box on the HUD, measured over the first frames */
 static bool mapFound;
@@ -3683,6 +3707,7 @@ static void hud_make_backdrop(void) {
 		fprintf(stderr, "frame %llu: backdrop from %d rows (%s)\n", (unsigned long long) frameCount, h, path);
 	}
 	if (!hudBackValid) return;
+	++hudBackGen;
 	/* where the layers drew nothing: black, not the 'nothing here' colour */
 	uint32_t clear = emu_hud_clear();
 	for (int i = 0; i < GBA_W * GBA_H; ++i) {
@@ -3725,6 +3750,7 @@ static void hud_make_backdrop(void) {
  * and the cup table, and they can't be read over it.) */
 static void hud_make_logo_back(void) {
 	hudLogoDone = true;
+	++hudLogoBackGen;
 	for (int i = 0; i < HUD_CW * HUD_CH; ++i) hudLogoBack[i] = SCREEN_LIVE;
 }
 
@@ -3739,6 +3765,7 @@ static uint32_t heldNum[GBA_W * GBA_H];
 static int heldNumW, heldNumH;
 static void hud_make_logo_below(void) {
 	hudLogoBelowDone = true;
+	++hudLogoBelowGen;
 	for (int i = 0; i < HUD_CW * HUD_CH; ++i) hudLogoBelow[i] = SCREEN_LIVE; /* (under the HUD: GEN-1) */
 	const typeof(hudProf->hud.held)* hp = &hudProf->hud.held;
 	if (hp->y1 && heldN > 0) {
@@ -3881,6 +3908,7 @@ static void card_backdrop(void) {
 			o[0] = o[1] = o[HUD_CW] = o[HUD_CW + 1] = c;
 		}
 	}
+	++hudBackGen;
 	hudBackValid = true;
 	hudFadeIn = 0;
 	bg_pal_levels(hudPalRef);
@@ -3893,6 +3921,7 @@ static void card_backdrop(void) {
 static const uint32_t* card_logo(void) {
 	static uint32_t cardLogo[HUD_CW * HUD_CH];
 	if (!cardLogoMade) {
+		++cardLogoGen;
 		for (int i = 0; i < HUD_CW * HUD_CH; ++i) cardLogo[i] = SCREEN_LIVE; /* (under the HUD: GEN-1) */
 		cardLogoMade = logo_draw(cardLogo, HUD_CW, HUD_CH, HUD_CW / GBA_W, hudProf->hud.card.whole ? 0 : 48 * 2, 255);
 	}
@@ -3988,9 +4017,189 @@ static void map_hold_update(const typeof(hudProf->hud)* h, uint32_t clear) {
 	}
 }
 
+/* The first pixel of a row from x to x1 that isn't the clear colour (x1 + 1: none), over the empty stretches eight at a time */
+static inline int next_lit(const uint32_t* row, int x, int x1, uint32_t clear) {
+	if (x > x1 || (row[x] & 0xFFFFFF) != clear) return x;
+	for (++x; x + 7 <= x1; x += 8) {
+		uint32_t d = (row[x] ^ clear) | (row[x + 1] ^ clear) | (row[x + 2] ^ clear) | (row[x + 3] ^ clear) | (row[x + 4] ^ clear) |
+		             (row[x + 5] ^ clear) | (row[x + 6] ^ clear) | (row[x + 7] ^ clear);
+		if (d & 0xFFFFFF) break;
+	}
+	while (x <= x1 && (row[x] & 0xFFFFFF) == clear) ++x;
+	return x;
+}
+
+/* ---- hud_layers (see hudLayered) */
+
+static void hud_stale_all(void) {
+	for (int v = 0; v < 2; ++v) hudOld[v].base = hudOld[v].map = hudOld[v].flat = true, hudOld[v].overStrips = (1u << (GBA_H / 8)) - 1;
+	++hudLayerGen;
+}
+
+/* hudCanvas has changed: held as the backdrop `key` (0: edited in place, so made again next time) */
+static void hud_base_changed(uint64_t key) {
+	hudBaseKey = key;
+	for (int v = 0; v < 2; ++v) hudOld[v].base = true;
+	++hudLayerGen;
+}
+
+/* hudCanvas is made from src, unless it already is that backdrop */
+static void hud_backdrop_from(const uint32_t* src, uint64_t key) {
+	if (hudLayered && hudBaseKey == key) return;
+	memcpy(hudCanvas, src, sizeof(hudCanvas));
+	hud_base_changed(key);
+}
+
+/* A frame's pieces are made in hudOverBuild, from a clean sheet */
+static void hud_over_begin(void) {
+	for (int y = 0; y < GBA_H; ++y) {
+		if (!hudOverUse[y]) continue;
+		memset(&hudOverBuild[y * GBA_W], 0, GBA_W * 4);
+		hudOverUse[y] = false;
+	}
+}
+
+/* ... and the rows that differ from the textures' go into hudOver, to be sent */
+static void hud_over_end(void) {
+	for (int y = 0; y < GBA_H; ++y) {
+		if (!hudOverUse[y] && !hudOverRow[y]) continue;
+		hudOverRow[y] = hudOverUse[y];
+		if (!memcmp(&hudOver[y * GBA_W], &hudOverBuild[y * GBA_W], GBA_W * 4)) continue;
+		memcpy(&hudOver[y * GBA_W], &hudOverBuild[y * GBA_W], GBA_W * 4);
+		for (int v = 0; v < 2; ++v) hudOld[v].overStrips |= 1u << (y / 8);
+		++hudLayerGen;
+	}
+}
+
+/* hudCanvas holds the whole picture (no pieces or map over it) and has to be sent: the layers off */
+static void hud_canvas_whole(void) {
+	if (!hudLayered) {
+		for (int i = 0; i < nViews; ++i) ui_update_texture(hudTex[i], hudCanvas, HUD_CW * 4);
+		return;
+	}
+	hud_base_changed(0);
+	hud_over_begin();
+	hud_over_end();
+	if (hudMapSrc.w) hudMapSrc.w = 0, ++hudLayerGen;
+}
+
+/* A view's textures, made when it first shows the HUD (not for the screen that never does) */
+static void hud_view_textures(int v) {
+	static Uint32 tried[2];
+	if (hudTex[v] && hudOverTex[v] && (hudMapTex[v] || !hudMapTexW)) return;
+	if (tried[v] && SDL_GetTicks() - tried[v] < 1000) return; /* (no room: not tried again every frame) */
+	tried[v] = SDL_GetTicks() | 1;
+	if (!hudTex[v]) {
+		hudTex[v] = SDL_CreateTexture(views[v].ren, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, HUD_CW, HUD_CH);
+		if (hudTex[v]) SDL_SetTextureBlendMode(hudTex[v], SDL_BLENDMODE_NONE), hudOld[v].base = true;
+	}
+	if (!hudOverTex[v]) {
+		hudOverTex[v] = SDL_CreateTexture(views[v].ren, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, GBA_W, GBA_H);
+		if (hudOverTex[v]) SDL_SetTextureBlendMode(hudOverTex[v], SDL_BLENDMODE_BLEND), hudOld[v].overStrips = (1u << (GBA_H / 8)) - 1;
+	}
+	if (!hudMapTex[v] && hudMapTexW) {
+		hudMapTex[v] = SDL_CreateTexture(views[v].ren, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, hudMapTexW, hudMapTexH);
+		if (hudMapTex[v]) SDL_SetTextureBlendMode(hudMapTex[v], SDL_BLENDMODE_BLEND), hudOld[v].map = true;
+	}
+}
+
+/* The picture's layers on one view's textures, what they lack sent */
+static void hud_sync(int v) {
+	hud_view_textures(v);
+	if (hudOld[v].base && hudTex[v]) {
+		ui_update_texture(hudTex[v], hudCanvas, HUD_CW * 4);
+		hudOld[v].base = false;
+	}
+	while (hudOld[v].overStrips && hudOverTex[v]) {
+		unsigned m = hudOld[v].overStrips;
+		int a = __builtin_ctz(m), b = a;
+		/* (a run of strips, over gaps of one: a send has its own cost) */
+		while (b + 1 < GBA_H / 8 && (m >> (b + 1) & 1 || (b + 2 < GBA_H / 8 && m >> (b + 2) & 1))) ++b;
+		for (int i = a; i <= b; ++i) hudOld[v].overStrips &= ~(1u << i);
+		ui_update_texture_rows(hudOverTex[v], hudOver, GBA_W * 4, a * 8, SDL_min(b * 8 + 8, GBA_H));
+	}
+	if (hudOld[v].map && hudMapTex[v]) {
+		ui_update_texture(hudMapTex[v], hudMapPx, hudMapTexW * 4);
+		hudOld[v].map = false;
+	}
+}
+
+/* The layers as one picture, as hudCanvas would have been without them (for a view that can't draw them) */
+static const uint32_t* hud_flatten(void) {
+	if (!hudFlat) hudFlat = malloc(sizeof(hudCanvas));
+	if (!hudFlat) return hudCanvas;
+	if (hudFlatGen != hudLayerGen) {
+		memcpy(hudFlat, hudCanvas, sizeof(hudCanvas));
+		for (int y = 0; y < GBA_H; ++y) {
+			if (!hudOverRow[y]) continue;
+			for (int x = 0; x < GBA_W; ++x) {
+				uint32_t c = hudOver[y * GBA_W + x];
+				if (!c) continue;
+				uint32_t* o = &hudFlat[y * 2 * HUD_CW + x * 2];
+				o[0] = o[1] = o[HUD_CW] = o[HUD_CW + 1] = c;
+			}
+		}
+		if (hudMapSrc.w) {
+			int q = hudMapDst.w / hudMapSrc.w;
+			for (int y = 0; y < hudMapSrc.h; ++y) {
+				for (int x = 0; x < hudMapSrc.w; ++x) {
+					uint32_t c = hudMapPx[(hudMapSrc.y + y) * hudMapTexW + hudMapSrc.x + x];
+					if (!c) continue;
+					for (int j = 0; j < q; ++j) {
+						uint32_t* o = &hudFlat[(hudMapDst.y + y * q + j) * HUD_CW + hudMapDst.x + x * q];
+						for (int i = 0; i < q; ++i) o[i] = c;
+					}
+				}
+			}
+		}
+		hudFlatGen = hudLayerGen;
+		for (int v = 0; v < 2; ++v) hudOld[v].flat = true;
+	}
+	return hudFlat;
+}
+
+
+/* The HUD's second screen on screen s */
+static void hud_draw(int s) {
+	int lcd = SHADER_ON ? 2 : 0, v = screens[s].view;
+	if (!hudLayered) {
+		ui_image_pixels(s, hudTex, HUD_CW, HUD_CH, cfg->mapScale, lcd);
+		return;
+	}
+	if (!ui_pixels_over_ok(s, HUD_CW, HUD_CH, cfg->mapScale, lcd)) {
+		const uint32_t* flat = hud_flatten();
+		if (!hudFlatTex[v]) {
+			hudFlatTex[v] = SDL_CreateTexture(views[v].ren, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, HUD_CW, HUD_CH);
+			if (hudFlatTex[v]) SDL_SetTextureBlendMode(hudFlatTex[v], SDL_BLENDMODE_NONE);
+			hudOld[v].flat = true;
+		}
+		if (hudOld[v].flat) ui_update_texture(hudFlatTex[v], flat, HUD_CW * 4), hudOld[v].flat = false;
+		ui_image_pixels(s, hudFlatTex, HUD_CW, HUD_CH, cfg->mapScale, lcd);
+		return;
+	}
+	hud_sync(v);
+	/* the pieces' rows, a layer for each stretch of them (the GPU draws no more than there is) */
+	UiLayer layers[8];
+	int n = 0;
+	int last = -1;
+	for (int y = 0; y < GBA_H; ++y) last = hudOverRow[y] ? y : last;
+	for (int y = 0; y <= last; ++y) {
+		if (!hudOverRow[y]) continue;
+		int y1 = y;
+		for (int k = y + 1; k <= last && k <= y1 + 8; ++k) y1 = hudOverRow[k] ? k : y1;
+		if (n == 6) y1 = last;
+		layers[n++] = (UiLayer) { hudOverTex, { 0, y, GBA_W, y1 - y + 1 }, { 0, y * 2, HUD_CW, (y1 - y + 1) * 2 } };
+		y = y1;
+	}
+	if (hudMapSrc.w) layers[n++] = (UiLayer) { hudMapTex, hudMapSrc, hudMapDst };
+	ui_image_pixels_over(s, hudTex, HUD_CW, HUD_CH, cfg->mapScale, lcd, layers, n);
+}
+
 static void hud_compose(void) {
 	const typeof(hudProf->hud)* h = &hudProf->hud;
 	uint32_t clear = emu_hud_clear();
+	const bool lay = hudLayered;
+	if (lay) hud_over_begin();
 	bool racing = !hudScene && memprobes_match(h->layout, 4, &emu);
 	{
 		static int lastRacing = -1;
@@ -4000,8 +4209,7 @@ static void hud_compose(void) {
 	/* the map's box: grown over the race's first frames, then kept */
 	if (racing && h->map.x1 && (hudFrames <= 8 || h->mapAt.scale)) {
 		for (int y = h->map.y0; y <= h->map.y1; ++y) {
-			for (int x = h->map.x0; x <= h->map.x1; ++x) {
-				if ((hudPx[y * GBA_W + x] & 0xFFFFFF) == clear) continue;
+			for (int x = h->map.x0; (x = next_lit(&hudPx[y * GBA_W], x, h->map.x1, clear)) <= h->map.x1; ++x) {
 				if (!mapFound) mapX0 = mapX1 = x, mapY0 = mapY1 = y, mapFound = true;
 				mapX0 = SDL_min(mapX0, x), mapX1 = SDL_max(mapX1, x);
 				mapY0 = SDL_min(mapY0, y), mapY1 = SDL_max(mapY1, y);
@@ -4044,7 +4252,7 @@ static void hud_compose(void) {
 	}
 	if (hudScene) {
 		if (!hudLogoDone) hud_make_logo_back();
-		memcpy(hudCanvas, hudLogoBack, sizeof(hudCanvas));
+		hud_backdrop_from(hudLogoBack, HUD_KEY(1, hudLogoBackGen));
 	} else if ((hudAlt ? h->alt.mapBelow : h->mapBelow) && mapShownIdx >= 0 && mapW == GBA_W && mapH == GBA_H && map_px(mapShownIdx)) {
 		/* (hud.mapBelow, hud.alt.mapBelow: the map picture behind, at the game's size) */
 		const uint32_t* mp = map_px(mapShownIdx);
@@ -4054,11 +4262,11 @@ static void hud_compose(void) {
 				o[0] = o[1] = o[HUD_CW] = o[HUD_CW + 1] = mp[y * GBA_W + x] | 0xFF000000;
 			}
 		}
+		hud_base_changed(0);
 	} else if (h->logoBelow || h->logoBehind) {
 		if (!hudLogoBelowDone) hud_make_logo_below();
-		memcpy(hudCanvas, hudLogoBelow, sizeof(hudCanvas));
+		hud_backdrop_from(hudLogoBelow, HUD_KEY(2, hudLogoBelowGen));
 	} else if (hudBackValid) {
-		memcpy(hudCanvas, hudBack, sizeof(hudCanvas));
 		/* the game fading the whole screen to black or white: the
 		 * backdrop too. By BLDCNT (every BG layer, darken or brighten, by
 		 * BLDY, in 16ths) */
@@ -4082,29 +4290,39 @@ static void hud_compose(void) {
 			hudBackValid = false;
 			hudFadeEff = eff;
 			for (int i = 0; i < HUD_CW * HUD_CH; ++i) hudCanvas[i] = eff == 2 ? 0xFFFFFFFF : 0xFF000000;
+			hud_base_changed(0);
 			fade = 0;
-		} else if (hudFadeIn > 0) {
-			/* a new backdrop, faded in over 16 frames from how the last
-			 * scene faded out, or less if the game's own fade is less */
-			int in = hudFadeIn-- * 4;
-			if (in > fade || eff != hudFadeEff) eff = hudFadeEff, fade = in;
-		}
-		if (fade) {
-			for (int i = 0; i < HUD_CW * HUD_CH; ++i) {
-				uint32_t c = hudCanvas[i], o = 0xFF000000;
-				for (int k = 0; k < 24; k += 8) {
-					int v = (c >> k) & 0xFF;
-					v = eff == 3 ? v - v * fade / 64 : v + (255 - v) * fade / 64;
-					o |= (uint32_t) v << k;
+		} else {
+			if (hudFadeIn > 0) {
+				/* a new backdrop, faded in over 16 frames from how the last
+				 * scene faded out, or less if the game's own fade is less */
+				int in = hudFadeIn-- * 4;
+				if (in > fade || eff != hudFadeEff) eff = hudFadeEff, fade = in;
+			}
+			/* (the backdrop as faded by this much: kept while it stays so, not faded again each frame) */
+			uint64_t key = HUD_KEY(3, hudBackGen) | (fade ? ((uint64_t) ((eff & 3) << 7 | fade) + 1) << 48 : 0);
+			if (!lay || hudBaseKey != key) {
+				memcpy(hudCanvas, hudBack, sizeof(hudCanvas));
+				if (fade) {
+					uint8_t lut[256];
+					for (int v = 0; v < 256; ++v) lut[v] = (uint8_t) (eff == 3 ? v - v * fade / 64 : v + (255 - v) * fade / 64);
+					for (int i = 0; i < HUD_CW * HUD_CH; ++i) {
+						uint32_t c = hudCanvas[i];
+						hudCanvas[i] = 0xFF000000 | lut[c & 0xFF] | (uint32_t) lut[(c >> 8) & 0xFF] << 8 | (uint32_t) lut[(c >> 16) & 0xFF] << 16;
+					}
 				}
-				hudCanvas[i] = o;
+				hud_base_changed(key);
 			}
 		}
 	} else if (h->card.tile) {
-		memcpy(hudCanvas, card_logo(), sizeof(hudCanvas));
+		const uint32_t* cl = card_logo();
+		hud_backdrop_from(cl, HUD_KEY(4, cardLogoGen));
 	} else {
 		uint32_t plain = h->mapCnt ? (hudFadeEff == 2 ? 0xFFFFFFFF : 0xFF000000) : h->black ? SCREEN_LIVE : 0xFF1A1010;
-		for (int i = 0; i < HUD_CW * HUD_CH; ++i) hudCanvas[i] = plain;
+		if (!lay || hudBaseKey != HUD_KEY(5, plain)) {
+			for (int i = 0; i < HUD_CW * HUD_CH; ++i) hudCanvas[i] = plain;
+			hud_base_changed(HUD_KEY(5, plain));
+		}
 	}
 	/* moved pieces (the scene's, or racing's): how far each goes this frame */
 	const HudMove* movesIn = hudScene ? h->scene.moves : racing ? h->moves : NULL;
@@ -4133,6 +4351,7 @@ static void hud_compose(void) {
 			o[0] = o[1] = o[HUD_CW] = o[HUD_CW + 1] = mapTitle[y * GBA_W + x];
 		}
 	}
+	if (titleDy) hud_base_changed(0);
 	int moveDx[HUD_MOVES] = { 0 }, moveDy[HUD_MOVES] = { 0 };
 	bool moving[HUD_MOVES] = { false };
 	int pieceLo[HUD_MOVES] = { 0 }, pieceTop[HUD_MOVES] = { 0 };
@@ -4142,8 +4361,8 @@ static void hud_compose(void) {
 		if (mv->ifTile && !oam_has_tile(mv->ifTile)) continue;
 		int lo = GBA_W, hi = -1, top = GBA_H, bot = -1;
 		for (int y = SDL_max(mv->y0, 0); y <= SDL_min(mv->y1, GBA_H - 1); ++y) {
-			for (int x = SDL_max(mv->x0, 0); x <= SDL_min(mv->x1, GBA_W - 1); ++x) {
-				if ((hudPx[y * GBA_W + x] & 0xFFFFFF) == clear) continue;
+			int x1 = SDL_min(mv->x1, GBA_W - 1);
+			for (int x = SDL_max(mv->x0, 0); (x = next_lit(&hudPx[y * GBA_W], x, x1, clear)) <= x1; ++x) {
 				lo = SDL_min(lo, x), hi = SDL_max(hi, x), top = SDL_min(top, y), bot = SDL_max(bot, y);
 			}
 		}
@@ -4172,15 +4391,19 @@ static void hud_compose(void) {
 		}
 		if (ubot >= 0) moveDx[m] = ulo - pieceLo[m], moveDy[m] = ubot + 1 + mv->under - pieceTop[m];
 	}
+	int movingIdx[HUD_MOVES], nMoving = 0; /* (the pieces that move, to look through for each pixel) */
+	for (int m = 0; m < HUD_MOVES; ++m) {
+		if (moving[m]) movingIdx[nMoving++] = m;
+	}
 	for (int y = 0; y < GBA_H; ++y) {
-		for (int x = 0; x < GBA_W; ++x) {
+		for (int x = 0; (x = next_lit(&hudPx[y * GBA_W], x, GBA_W - 1, clear)) < GBA_W; ++x) {
 			uint32_t c = hudPx[y * GBA_W + x];
-			if ((c & 0xFFFFFF) == clear) continue;
 			int nx = x, ny = y;
 			bool toGame = false;
-			for (int m = 0; m < HUD_MOVES; ++m) {
+			for (int k = 0; k < nMoving; ++k) {
+				int m = movingIdx[k];
 				const HudMove* mv = &moves[m];
-				if (moving[m] && x >= mv->x0 && x <= mv->x1 && y >= mv->y0 && y <= mv->y1) {
+				if (x >= mv->x0 && x <= mv->x1 && y >= mv->y0 && y <= mv->y1) {
 					nx = x + moveDx[m], ny = y + moveDy[m];
 					toGame = mv->toGame;
 					break;
@@ -4196,10 +4419,16 @@ static void hud_compose(void) {
 			if (bigMap && x >= bx0 && x <= bx1 && y >= by0 && y <= by1) continue;
 			ny += titleDy;
 			if (ny >= GBA_H) continue;
+			if (lay) {
+				hudOverBuild[ny * GBA_W + nx] = c | 0xFF000000;
+				hudOverUse[ny] = true;
+				continue;
+			}
 			uint32_t* o = &hudCanvas[ny * 2 * HUD_CW + nx * 2];
 			o[0] = o[1] = o[HUD_CW] = o[HUD_CW + 1] = c;
 		}
 	}
+	if (lay) hud_over_end();
 	if (bigMap) {
 		/* 2x if it fits comfortably right of the faces and below the top
 		 * row (about 200 x 128 HUD pixels), else 1.5x; centred there */
@@ -4208,6 +4437,30 @@ static void hud_compose(void) {
 		int cx = 139 * 2, cy = 94 * 2;
 		if (h->mapAt.scale) q = h->mapAt.scale * 2, cx = h->mapAt.cx * 2, cy = h->mapAt.bottom * 2 + 2 - hh * q / 2;
 		int tx = SDL_clamp(cx - w * q / 2, 0, HUD_CW - w * q), ty = SDL_clamp(cy - hh * q / 2, 0, HUD_CH - hh * q);
+		if (lay) {
+			/* (the map's own picture, put on by the GPU at q to a pixel) */
+			if (w > hudMapTexW || hh > hudMapTexH) {
+				if (hudMapSrc.w) hudMapSrc.w = 0, ++hudLayerGen;
+				return;
+			}
+			for (int y = by0; y <= by1; ++y) {
+				for (int x = bx0; x <= bx1; ++x) {
+					uint32_t c = hudPx[y * GBA_W + x];
+					if (hold && mapUndrawn <= 3 && (c & 0xFFFFFF) == clear) c = mapHeld[y * GBA_W + x];
+					hudMapBuild[(y - by0) * hudMapTexW + x - bx0] = (c & 0xFFFFFF) == clear ? 0 : c | 0xFF000000;
+				}
+			}
+			SDL_Rect src = { 0, 0, w, hh }, dst = { tx, ty, w * q, hh * q };
+			bool same = hudMapSrc.w == w && hudMapSrc.h == hh && !memcmp(&hudMapDst, &dst, sizeof(dst));
+			for (int y = 0; y < hh && same; ++y) same = !memcmp(&hudMapPx[y * hudMapTexW], &hudMapBuild[y * hudMapTexW], (size_t) w * 4);
+			if (!same) {
+				for (int y = 0; y < hh; ++y) memcpy(&hudMapPx[y * hudMapTexW], &hudMapBuild[y * hudMapTexW], (size_t) w * 4);
+				hudMapSrc = src, hudMapDst = dst;
+				for (int v = 0; v < 2; ++v) hudOld[v].map = true;
+				++hudLayerGen;
+			}
+			return;
+		}
 		for (int y = by0; y <= by1; ++y) {
 			for (int x = bx0; x <= bx1; ++x) {
 				uint32_t c = hudPx[y * GBA_W + x];
@@ -4222,6 +4475,7 @@ static void hud_compose(void) {
 			}
 		}
 	}
+	if (lay && hudMapSrc.w) hudMapSrc.w = 0, ++hudLayerGen; /* (no big map this frame) */
 }
 
 /* The BG layers whose tile maps mostly use palettes below pal (shown or
@@ -4369,7 +4623,7 @@ static void update_hud(void) {
 					} else {
 						for (int i = 0; i < HUD_CW * HUD_CH; ++i) hudCanvas[i] = 0xFF000000;
 					}
-					for (int i = 0; i < nViews; ++i) ui_update_texture(hudTex[i], hudCanvas, HUD_CW * 4);
+					hud_canvas_whole();
 				}
 			} else {
 				/* the whole screen over there */
@@ -4379,7 +4633,7 @@ static void update_hud(void) {
 						o[0] = o[1] = o[HUD_CW] = o[HUD_CW + 1] = emu.fb[y * GBA_W + x] | 0xFF000000;
 					}
 				}
-				for (int i = 0; i < nViews; ++i) ui_update_texture(hudTex[i], hudCanvas, HUD_CW * 4);
+				hud_canvas_whole();
 				/* (and the split off, if it was on) */
 				if (hudOn) emu_hud_split(&emu, false, 0, NULL, 0, hudPx), hudOn = false;
 				return;
@@ -4480,14 +4734,14 @@ static void update_hud(void) {
 		}
 		if (hudBackValid) {
 			memcpy(hudCanvas, hudBack, sizeof(hudCanvas));
-			for (int i = 0; i < nViews; ++i) ui_update_texture(hudTex[i], hudCanvas, HUD_CW * 4);
+			hud_canvas_whole();
 			hudShown = true;
 		} else if (h->card.drop[0].addr && hudFrames == 1) {
 			/* (hud.card.drop, Sonic Advance 3, no take yet: its HUD stays
 			 * on the game screen over the card, so not on the second
 			 * screen too till the take: the logo alone) */
 			memcpy(hudCanvas, card_logo(), sizeof(hudCanvas));
-			for (int i = 0; i < nViews; ++i) ui_update_texture(hudTex[i], hudCanvas, HUD_CW * 4);
+			hud_canvas_whole();
 			hudShown = true;
 		}
 	} else if (hudOn && race) {
@@ -4509,7 +4763,7 @@ static void update_hud(void) {
 		} else if (!(empty && !hudShown)) {
 			if (emu_hud_grabbed()) hud_make_backdrop(); /* (that frame drew no HUD: the last one is reused) */
 			hud_compose();
-			for (int i = 0; i < nViews; ++i) ui_update_texture(hudTex[i], hudCanvas, HUD_CW * 4);
+			if (!hudLayered) for (int i = 0; i < nViews; ++i) ui_update_texture(hudTex[i], hudCanvas, HUD_CW * 4);
 			if (logoForced && !(hudProf->logoIf[0].addr && memprobes_match(hudProf->logoIf, 2, &emu)) &&
 			    !(hudProf->logoIfOr[0].addr && memprobes_match(hudProf->logoIfOr, 2, &emu))) {
 				/* (a new HUD picture: the logo's hold is over) */
@@ -6675,7 +6929,7 @@ static void draw_game(void) {
 		} else if (hudShown && !logoForced) {
 			/* the HUD picture is at 2x: a grid cell per GBA pixel */
 			ui_fill(s, (SDL_Rect) { 0, 0, r.w, r.h }, borderColor);
-			ui_image_pixels(s, hudTex, HUD_CW, HUD_CH, cfg->mapScale, SHADER_ON ? 2 : 0);
+			hud_draw(s);
 		} else if (mapShownIdx >= 0 && !logoForced) {
 			ui_fill(s, (SDL_Rect) { 0, 0, r.w, r.h }, borderColor);
 			ui_image_pixels(s, mapTex, mapW, mapH, cfg->mapScale, SHADER_ON);
@@ -7061,8 +7315,34 @@ static void ss_setup(const char* rom, const char* code) {
 	}
 }
 
+/* hud_layers' state for the HUD profile (its textures are made as each view shows it: hud_view_textures) */
+static void hud_layers_textures(void) {
+	for (int i = 0; i < 2; ++i) {
+		if (hudOverTex[i]) SDL_DestroyTexture(hudOverTex[i]);
+		if (hudMapTex[i]) SDL_DestroyTexture(hudMapTex[i]);
+		if (hudFlatTex[i]) SDL_DestroyTexture(hudFlatTex[i]);
+		hudOverTex[i] = hudMapTex[i] = hudFlatTex[i] = NULL;
+	}
+	memset(hudOver, 0, sizeof(hudOver));
+	memset(hudOverBuild, 0, sizeof(hudOverBuild));
+	memset(hudOverRow, 0, sizeof(hudOverRow));
+	memset(hudOverUse, 0, sizeof(hudOverUse));
+	memset(hudMapPx, 0, sizeof(hudMapPx));
+	hudMapSrc.w = 0;
+	hudBaseKey = 0;
+	hud_stale_all();
+	hudMapTexW = hudMapTexH = 0;
+	if (!hudLayered) return;
+	const typeof(hudProf->hud.map)* m = &hudProf->hud.map;
+	if (m->x1) hudMapTexW = (SDL_clamp(m->x1, 0, GBA_W - 1) - SDL_max(m->x0, 0) + 8) & ~7, hudMapTexH = (SDL_clamp(m->y1, 0, GBA_H - 1) - SDL_max(m->y0, 0) + 8) & ~7;
+}
+
 /* the textures the second screen's set-up needs (again after a switch) */
 static void ss_textures(void) {
+	hudLayered = hudProf && cfg->hudLayers;
+#ifdef __ANDROID__
+	hudLayered = false; /* (its screens are drawn from recorded calls: see ui.c) */
+#endif
 	for (int i = 0; i < nViews; ++i) {
 		if (mapTex[i]) SDL_DestroyTexture(mapTex[i]);
 		if (combatTex[i]) SDL_DestroyTexture(combatTex[i]);
@@ -7070,10 +7350,11 @@ static void ss_textures(void) {
 		mapTex[i] = SDL_CreateTexture(views[i].ren, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, mapW, mapH);
 		combatTex[i] = combatProf ? SDL_CreateTexture(views[i].ren, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, mapW, mapH) : NULL;
 		if (combatTex[i]) SDL_SetTextureBlendMode(combatTex[i], SDL_BLENDMODE_NONE);
-		hudTex[i] = hudProf ? SDL_CreateTexture(views[i].ren, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, HUD_CW, HUD_CH) : NULL;
+		hudTex[i] = hudProf && !hudLayered ? SDL_CreateTexture(views[i].ren, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, HUD_CW, HUD_CH) : NULL;
 		if (hudTex[i]) SDL_SetTextureBlendMode(hudTex[i], SDL_BLENDMODE_NONE);
 		SDL_SetTextureBlendMode(mapTex[i], SDL_BLENDMODE_NONE);
 	}
+	hud_layers_textures();
 }
 
 /* After the device sleeps (or the renderer is reset), the GPU's copies of
@@ -7095,7 +7376,8 @@ static void rebuild_textures(void) {
 		upload_map_frame(idx);
 	}
 	if (combatMade) make_combat_canvas();
-	if (hudProf) for (int i = 0; i < nViews; ++i) ui_update_texture(hudTex[i], hudCanvas, HUD_CW * 4);
+	if (hudProf && hudLayered) hud_stale_all();
+	else if (hudProf) for (int i = 0; i < nViews; ++i) ui_update_texture(hudTex[i], hudCanvas, HUD_CW * 4);
 	ui_free_image(logoTex);
 	if (romPath && ui_load_logo(cfg, romPath, emu.gameCode, logoTex, &logoW, &logoH, &logoPixel)) make_logo_canvas();
 	else make_logo_canvas();
@@ -8503,6 +8785,10 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 		SDL_DestroyTexture(mapTex[i]);
 		if (hudTex[i]) SDL_DestroyTexture(hudTex[i]);
 		gameTex[i] = mapTex[i] = hudTex[i] = NULL;
+		if (hudOverTex[i]) SDL_DestroyTexture(hudOverTex[i]);
+		if (hudMapTex[i]) SDL_DestroyTexture(hudMapTex[i]);
+		if (hudFlatTex[i]) SDL_DestroyTexture(hudFlatTex[i]);
+		hudOverTex[i] = hudMapTex[i] = hudFlatTex[i] = NULL;
 	}
 	ui_free_image(logoTex);
 	ui_free_image(combatTex);

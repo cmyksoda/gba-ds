@@ -821,7 +821,7 @@ static bool gpu_tiling(void) {
 	return gpuTiling;
 }
 
-static bool update_by_gpu(SDL_Texture* t, const void* pixels, int pitch);
+static bool update_by_gpu(SDL_Texture* t, const void* pixels, int pitch, int y0, int rows);
 
 /* (TEST: the GPU's tiling against the CPU's, word for word, once) */
 static void tiling_selftest(void) {
@@ -832,7 +832,7 @@ static void tiling_selftest(void) {
 	for (int y = 0; y < 160; ++y) {
 		for (int x = 0; x < 240; ++x) px[y * 240 + x] = (u32) x | (u32) y << 8 | 0x5A0000u | (u32) ((x * 7 + y) & 0xFF) << 24;
 	}
-	update_by_gpu(t, px, 240 * 4);
+	update_by_gpu(t, px, 240 * 4, 0, 160);
 	svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32) t->tex.data, t->tex.size);
 	const u32* got = t->tex.data;
 	int bad = 0, first = -1;
@@ -864,7 +864,8 @@ static void tiling_selftest(void) {
 	texture_free(t);
 }
 
-static bool update_by_gpu(SDL_Texture* t, const void* pixels, int pitch) {
+/* Rows y0 to y0 + rows - 1 (whole tile rows: multiples of 8) of the picture, from pixels, which starts at row y0. */
+static bool update_by_gpu(SDL_Texture* t, const void* pixels, int pitch, int y0, int rows) {
 	int w = t->w, h = t->h;
 	u32 texW = t->tex.width;
 	if (!gpu_tiling() || !t->streaming || t->tw != w || t->th != h || (w & 7) || (h & 7) || texW < 64) return false;
@@ -877,17 +878,19 @@ static bool update_by_gpu(SDL_Texture* t, const void* pixels, int pitch) {
 	u32* stage = t->stage;
 	bool argb = t->format == SDL_PIXELFORMAT_ARGB8888;
 	u32 alpha = t->format == SDL_PIXELFORMAT_XBGR8888 ? 0xFF000000u : 0;
-	for (int y = 0; y < h; ++y) {
+	for (int y = 0; y < rows; ++y) {
 		const Uint32* src = (const Uint32*) ((const Uint8*) pixels + (size_t) y * pitch);
-		u32* dst = stage + (size_t) y * texW;
+		u32* dst = stage + (size_t) (y0 + y) * texW;
 		if (argb) {
 			for (int x = 0; x < w; ++x) dst[x] = src[x] << 8 | src[x] >> 24;
 		} else {
 			for (int x = 0; x < w; ++x) dst[x] = __builtin_bswap32(src[x] | alpha);
 		}
 	}
-	cache_flush(stage, need * 4);
-	GPU_WAIT(C3D_SyncDisplayTransfer(stage, GX_BUFFER_DIM(texW, h), (u32*) t->tex.data, GX_BUFFER_DIM(texW, h),
+	cache_flush(stage + (size_t) y0 * texW, (size_t) rows * texW * 4);
+	/* (a strip of tile rows is a stretch of the texture's memory of its own) */
+	GPU_WAIT(C3D_SyncDisplayTransfer(stage + (size_t) y0 * texW, GX_BUFFER_DIM(texW, rows), (u32*) t->tex.data + (size_t) y0 * texW,
+	                                 GX_BUFFER_DIM(texW, rows),
 	                                 GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
 	                                     GX_TRANSFER_OUT_TILED(1)));
 	return true;
@@ -903,7 +906,7 @@ int SDL_UpdateTexture(SDL_Texture* t, const SDL_Rect* rect, const void* pixels, 
 	if (!rect) rect = &whole;
 	if (rect == &whole || (!rect->x && !rect->y && rect->w == t->w && rect->h == t->h)) {
 		u64 t0 = svcGetSystemTick();
-		bool done = update_by_gpu(t, pixels, pitch);
+		bool done = update_by_gpu(t, pixels, pitch, 0, t->h);
 		if (!done) done = update_by_cpu(t, rect, pixels, pitch) == 0;
 		if (t->w == 240 && t->h == 160) {
 			upTicks += svcGetSystemTick() - t0;
@@ -913,6 +916,10 @@ int SDL_UpdateTexture(SDL_Texture* t, const SDL_Rect* rect, const void* pixels, 
 			}
 		}
 		return done ? 0 : -1;
+	}
+	if (!rect->x && rect->w == t->w && !(rect->y & 7) && !(rect->h & 7) && rect->y + rect->h <= t->h &&
+	    update_by_gpu(t, pixels, pitch, rect->y, rect->h)) {
+		return 0;
 	}
 	return update_by_cpu(t, rect, pixels, pitch);
 }

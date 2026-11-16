@@ -125,6 +125,15 @@ void ui_image(int screen, SDL_Texture* const* texPerView, int w, int h, const ch
  * lcd: 0 no grid, 1 a cell per pixel, n a cell per n x n pixels (a picture
  * made at n times the GBA's resolution, like Mario Kart's HUD screen). */
 void ui_image_pixels(int screen, SDL_Texture* const* texPerView, int w, int h, const char* mode, int lcd);
+/* A part (src, in its pixels) of a per-view texture laid over a picture at dst (the picture's pixels), nearest and
+ * alpha blended: ui_image_pixels_over's pictures made of a backdrop and pieces the GPU puts on it. */
+typedef struct {
+	SDL_Texture* const* tex;
+	SDL_Rect src, dst;
+} UiLayer;
+bool ui_pixels_over_ok(int screen, int w, int h, const char* mode, int lcd);
+void ui_image_pixels_over(int screen, SDL_Texture* const* texPerView, int w, int h, const char* mode, int lcd, const UiLayer* layers,
+                          int nLayers);
 /* Where ui_image_pixels puts a w x h image on a screen (screen-local coords). */
 SDL_Rect ui_image_rect(int screen, int w, int h, const char* mode);
 void ui_fill(int screen, SDL_Rect local, SDL_Color c);
@@ -133,6 +142,8 @@ void ui_clip(int screen, const SDL_Rect* clip);
 /* SDL_UpdateTexture (whole texture) that ui.c notices: use it for anything
  * drawn on the screens, so the second screen on Android redraws. */
 void ui_update_texture(SDL_Texture* t, const void* px, int pitch);
+/* The same for rows y0 to y1 - 1 (px starts at the texture's first row). */
+void ui_update_texture_rows(SDL_Texture* t, const void* px, int pitch, int y0, int y1);
 /* Colour correction for everything given to ui_update_texture (the game's
  * pictures, ABGR8888): the GBA's own screen, as mGBA's GBA Color shader
  * (sRGB profile, Darken Screen 0.5) draws it. */

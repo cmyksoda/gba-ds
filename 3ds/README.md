@@ -54,6 +54,9 @@ The CIA takes armGBA-3DS's `.rsf` (the 80 MB mode, among others), so `make cia` 
   `sdmc:/3ds/gba-ds/gba-ds.cfg`, which is written with the 3DS's defaults the first time the app runs.
 - Only games GBA DS has second-screen support for are listed, as everywhere; `show_all = 1` in
   `gba-ds.cfg` lists every game.
+- The HUD pictures on the bottom screen (Mario Kart, Crash Nitro Kart, Sonic Advance, V-Rally 3 and the
+  like) are a backdrop with the HUD's pieces laid over it by the GPU, so a frame sends only the rows
+  that changed. `hud_layers = 0` in `gba-ds.cfg` makes the whole picture each frame instead.
 - Sound needs the DSP firmware dump (`sdmc:/3ds/dspfirm.cdc`), as all 3DS homebrew does.
 - Saves are beside the ROMs (`.sav`), save states and settings in `sdmc:/3ds/gba-ds/states/`, the log
   in `sdmc:/3ds/gba-ds/log.txt` (the run before it: `log-prev.txt`). Save states are mGBA's, as on
