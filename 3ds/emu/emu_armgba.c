@@ -47,9 +47,11 @@ typedef struct ArmCore {
 #ifdef __3DS__
 	int codeCore; /* the core that last wrote this machine's code: its shared routines are written where it is opened */
 #endif
-	/* armgba_stats: the lines' interval (0: none) and the counters at the last one (3DS, the game's core) */
+	/* armgba_stats: the lines' interval (0: none) and the counters at the last one (3DS) */
 	unsigned statsEvery;
 	struct JitSeen* seen;
+	bool game; /* the machine with the sound: not a copy */
+	unsigned ran, loads; /* frames run and states loaded here (a copy's frame counter is the game's, from the state it loaded) */
 	/* sound not yet read (emu_audio_read): stereo frames in a ring */
 	int16_t* ring;
 	size_t ringCap, ringHead, ringCount;
@@ -618,8 +620,8 @@ static void save_tick(ArmCore* c) {
 
 /* ---------------------------------------------- open, close, frames */
 
-/* gba-ds.cfg armgba_stats = N: every N frames of the game, a line in the log of what the recompiler did (blocks
- * compiled, flushes, time in compiling and in the cache calls, code memory in use). */
+/* gba-ds.cfg armgba_stats = N: every N frames of the game (of a copy: of those it ran) and as a machine closes, a log
+ * line of what the recompiler did. The ms compiling and in cache calls are the whole program's: a copy's include the game's. */
 #ifdef __3DS__
 extern uint64_t jitCompileTicks, jitFlushTicks;
 extern uint32_t jitFlushCalls;
@@ -627,15 +629,16 @@ extern bool jitStatsOn;
 
 struct JitSeen {
 	uint64_t compiled, deferred, flushes0, flushes1, compileTicks, flushTicks, invalidations, codeWrites, stepped, revived;
-	uint32_t flushCalls;
+	uint32_t flushCalls, loads;
 	unsigned last;
 };
 
 /* (the game's core, once its machine is made: the key is read here, so a bench job's options can switch it) */
-static void jit_stats_open(ArmCore* c) {
+static void jit_stats_open(ArmCore* c, bool game) {
 	const char* v = getenv("GBADS_ARMGBA_STATS");
 	int every = v ? atoi(v) : 0;
-	jitStatsOn = every > 0;
+	if (game) jitStatsOn = every > 0;
+	else if (!jitStatsOn) every = 0; /* (a copy counts when the game's machine did: opened after it) */
 	c->seen = every > 0 ? calloc(1, sizeof(*c->seen)) : NULL;
 	if (!c->seen) return;
 	c->statsEvery = (unsigned) every;
@@ -644,21 +647,22 @@ static void jit_stats_open(ArmCore* c) {
 	c->seen->flushCalls = jitFlushCalls;
 }
 
-static void jit_stats(ArmCore* c, unsigned frame) {
+static void jit_stats(ArmCore* c, unsigned frame, bool game, bool closing) {
 	struct JitSeen* seen = c->seen;
 	struct Jit* jit = c->gba->jit;
-	if (!seen || !jit || frame % c->statsEvery) return;
+	if (!seen || !jit || (!closing && frame % c->statsEvery)) return;
 	double const perMs = 268111.856, frames = frame - seen->last ? frame - seen->last : 1;
 	fprintf(stderr,
-	        "jit: frames %u-%u: compiled +%u, first visits stepped +%u, flushes +%u by writes or waits +%u by full memory, compiling %.2f ms and cache calls %.2f ms (%u) a frame, code %u of %u KiB (hot %u, cold %u, careful copies %u, unused %u), heap %u KiB free; invalidated +%u, writes to code +%u, instructions stepped +%u, revived +%u\n",
-	        seen->last, frame, (unsigned) (jit->compiled - seen->compiled), (unsigned) (jit->deferred - seen->deferred),
+	        "jit%s%s: frames %u-%u: compiled +%u, first visits stepped +%u, flushes +%u by writes or waits +%u by full memory, compiling %.2f ms and cache calls %.2f ms (%u) a frame, code %u of %u KiB (hot %u, cold %u, careful copies %u, unused %u), heap %u KiB free; invalidated +%u, writes to code +%u, instructions stepped +%u, revived +%u, states loaded +%u\n",
+	        game ? "" : " copy", closing ? " (closing)" : "", seen->last, frame, (unsigned) (jit->compiled - seen->compiled), (unsigned) (jit->deferred - seen->deferred),
 	        (unsigned) (jit->flushReasons[0] - seen->flushes0), (unsigned) (jit->flushReasons[1] - seen->flushes1),
 	        (jitCompileTicks - seen->compileTicks) / perMs / frames, (jitFlushTicks - seen->flushTicks) / perMs / frames,
 	        (unsigned) (jitFlushCalls - seen->flushCalls), (unsigned) ((jit->codeNext - jit->codeStart) >> 10),
 	        (unsigned) (jit->codeSize >> 10), (unsigned) (jit->hotBytes >> 10), (unsigned) (jit->coldBytes >> 10),
 	        (unsigned) (jit->carefulBytes >> 10), (unsigned) (jit->wastedBytes >> 10), (unsigned) (host_heap_free() >> 10),
 	        (unsigned) (jit->invalidations - seen->invalidations), (unsigned) (jit->codeWrites - seen->codeWrites),
-	        (unsigned) (jit->stepped - seen->stepped), (unsigned) (jit->revived - seen->revived));
+	        (unsigned) (jit->stepped - seen->stepped), (unsigned) (jit->revived - seen->revived), (unsigned) (c->loads - seen->loads));
+	seen->loads = c->loads;
 	seen->invalidations = jit->invalidations;
 	seen->codeWrites = jit->codeWrites;
 	seen->stepped = jit->stepped;
@@ -676,6 +680,9 @@ static void jit_stats(ArmCore* c, unsigned frame) {
 
 static void close_core(ArmCore* c) {
 	if (!c) return;
+#ifdef __3DS__
+	if (c->gba && c->seen) jit_stats(c, c->game ? c->gba->video.frameCounter : c->ran, c->game, true);
+#endif
 	if (c->gba) {
 		if (c->savePath) saver_stop(); /* (what it has in hand lands before the last write) */
 		if (c->savePath && (c->savePending || c->gba->savedata.dirty)) save_write(c);
@@ -880,7 +887,8 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 	e->fb = calloc(GBA_W * GBA_H, sizeof(uint32_t));
 	e->audio = audio;
 #ifdef __3DS__
-	if (audio) jit_stats_open(c);
+	c->game = audio;
+	jit_stats_open(c, audio);
 #endif
 	if (audio) {
 		c->ringCap = 8192;
@@ -955,7 +963,8 @@ static void run_frame(Emu* e, uint32_t keys, bool draw) {
 	if (draw) split_frame(c);
 	audioThreadTake(gba);
 #ifdef __3DS__
-	if (e->audio) jit_stats(c, gba->video.frameCounter);
+	++c->ran;
+	jit_stats(c, c->game ? gba->video.frameCounter : c->ran, c->game, false);
 #endif
 	if (c->ring) {
 		const int16_t* in = (const int16_t*) gba->audio.out;
@@ -1038,6 +1047,9 @@ bool emu_state_load(Emu* e, const void* buf) {
 	ArmCore* c = AC(e);
 	/* (the borrowed cartridge is this core's own business, not the state's) */
 	bool ok = gbaLoadState(c->gba, buf, gbaStateSize());
+#ifdef __3DS__
+	++c->loads;
+#endif
 	layers_apply(c);
 	return ok;
 }
