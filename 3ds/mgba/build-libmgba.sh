@@ -13,6 +13,7 @@
 # gba-ldm-stm.patch: LDM and STM (and so PUSH and POP) go through the set bits of the register list, not all sixteen.
 # color-mix.patch: mColorMix5Bit (the renderer's alpha blend, per pixel) with two multiplies fewer: the same value for every
 # input (checked on all channel pairs and weights up to 16).
+# video-wake.patch: how often the drawing thread is woken (every 16 lines as before; video_wake in gba-ds.cfg).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 ROOT="$PWD"
@@ -31,7 +32,7 @@ sed -i -e 's/ COLOR_16_BIT COLOR_5_6_5 FIXED_ROM_BUFFER / /' \
 grep -q 'COLOR_16_BIT' "$SRC/src/platform/3ds/CMakeLists.txt" && { echo "mGBA's 3DS defines not removed"; exit 1; }
 git -C "$SRC" apply "$ROOT/3ds/mgba/rom-copy-size.patch" "$ROOT/3ds/mgba/memory-map-hook.patch" \
 	"$ROOT/3ds/mgba/video-thread-core.patch" "$ROOT/3ds/mgba/gba-fast-memory.patch" \
-	"$ROOT/3ds/mgba/gba-ldm-stm.patch" "$ROOT/3ds/mgba/color-mix.patch"
+	"$ROOT/3ds/mgba/gba-ldm-stm.patch" "$ROOT/3ds/mgba/color-mix.patch" "$ROOT/3ds/mgba/video-wake.patch"
 
 cmake -S "$SRC" -B "$SRC/build" -DCMAKE_TOOLCHAIN_FILE="$SRC/src/platform/3ds/CMakeToolchain.txt" \
 	"${MGBA_OPTS[@]}" -DUSE_LZMA=OFF -DUSE_DEBUGGERS=OFF > "$SRC/build.log"

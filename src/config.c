@@ -46,6 +46,7 @@ void config_defaults(Config* c) {
 	c->mapInterval = 60;
 	c->captureCore = c->aheadCore = c->sideCore = c->videoCore = -1;
 	c->core1Limit = 50;
+	c->videoWake = 15;
 	c->sway = true;
 	c->audioLatency = 64;
 	c->ffSpeed = 3;
@@ -210,6 +211,8 @@ static bool set_option(Config* c, const char* key, const char* val) {
 	CORE("side_core", sideCore)
 	CORE("video_core", videoCore)
 	INT("core1_limit", core1Limit)
+	INT("video_wake", videoWake)
+	INT("bench_check", benchCheck)
 	BOOL("core_probe", coreProbe)
 	BOOL("ab_swap", abSwap)
 	STR("hotkey", hotkey)

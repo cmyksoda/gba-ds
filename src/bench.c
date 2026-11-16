@@ -30,6 +30,7 @@
 enum { WINDOW = 60 };
 
 static bool active;
+static int checkEvery;
 static FILE* results;
 static FILE* jobResults; /* this job's lines alone (job-ID.txt): what a bench build posts after the job */
 static char jobId[64];
@@ -169,6 +170,26 @@ void bench_frame(uint64_t frame, double emuMs, double drawMs, double screenMs, b
 		memset(&w, 0, sizeof(w));
 		if (!threadsShown[0]) threads_line();
 	}
+}
+
+static uint32_t fnv_words(uint32_t h, const uint32_t* w, size_t n) {
+	for (size_t i = 0; i < n; ++i) h = (h ^ w[i]) * 16777619u;
+	return h;
+}
+
+static uint32_t fnv_memory(Emu* e, uint32_t h, uint32_t base, uint32_t size) {
+	for (uint32_t a = base; a < base + size; a += 4) h = (h ^ emu_read32(e, a)) * 16777619u;
+	return h;
+}
+
+void bench_check(Emu* e, uint64_t frame) {
+	if (!active || checkEvery <= 0 || frame % (uint64_t) checkEvery) return;
+	uint32_t pic = fnv_words(2166136261u, e->fb, 240 * 160);
+	uint32_t ram = fnv_memory(e, fnv_memory(e, 2166136261u, 0x02000000, 0x40000), 0x03000000, 0x8000);
+	uint32_t vid = fnv_memory(e, fnv_memory(e, fnv_memory(e, 2166136261u, 0x05000000, 0x400), 0x06000000, 0x18000), 0x07000000, 0x400);
+	char line[160];
+	snprintf(line, sizeof(line), "bench %s check at frame %llu: picture %08x, ram %08x, video %08x", jobId, (unsigned long long) frame, pic, ram, vid);
+	put(line);
 }
 
 static char* trim(char* s) {
@@ -343,7 +364,9 @@ bool bench_run(Config* cfg) {
 #ifdef GBADS_SLOW_SD
 		host_slow_sd(true);
 #endif
+		checkEvery = cfg->benchCheck;
 		game_run(cfg, cfg->rom, false);
+		checkEvery = 0;
 #ifdef GBADS_SLOW_SD
 		host_slow_sd(false);
 #endif

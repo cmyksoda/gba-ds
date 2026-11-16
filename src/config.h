@@ -64,6 +64,7 @@ typedef struct Config {
 	int aheadCore;     /* ahead_core: frame_buffer's thread */
 	int sideCore;      /* side_core: the pad thread, logos, files and the rest */
 	int videoCore;     /* video_core: mGBA's drawing thread (needs the patched libmgba) */
+	int videoWake;     /* video_wake: mGBA's drawing thread is woken every N+1 lines, N = 0, 1, 3, 7, 15, 31 or 63 (the patched libmgba) */
 	int core1Limit;    /* core1_limit: the percent of the system core given to a thread on core 1 */
 	bool coreProbe;    /* core_probe: how much CPU each core gives a thread, in the log at start */
 	bool abSwap;       /* GBA A on the bottom face button instead of the right one */
@@ -123,6 +124,7 @@ typedef struct Config {
 	int quitAfter;     /* UI ticks */
 	char inputScript[512];
 	char bench[512];     /* bench: a test bench's jobs file (bench.c) */
+	int benchCheck;      /* bench_check: a bench job logs checksums of the picture and memory every N frames (0: off) */
 	/* the armGBA core's own switches (armgba_save, armgba_stats...): config_apply_core_env hands them to the core */
 	char armgba[5][12];
 } Config;
