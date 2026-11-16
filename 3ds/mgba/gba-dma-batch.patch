@@ -27,17 +27,15 @@ index cebd61995..4e04e2e19 100644
  			return nextWhen;
  		}
 diff --git a/src/gba/dma.c b/src/gba/dma.c
-index da2a800ba..7f91c2276 100644
+index da2a800ba..0a3536521 100644
 --- a/src/gba/dma.c
 +++ b/src/gba/dma.c
-@@ -196,43 +196,94 @@ void GBADMARunDisplayStart(struct GBA* gba, int32_t cycles) {
+@@ -196,43 +196,92 @@ void GBADMARunDisplayStart(struct GBA* gba, int32_t cycles) {
  	}
  }
  
-+/* One transfer unit a call. While nothing but this DMA is due next, the next unit runs straight away: the same steps as the
-+ * loop that called (the timing advanced to this event, then the event run) without putting the event in the list and
-+ * taking it out again. _dmaEvent is not in the list while it runs, so GBADMAUpdate's deschedule is skipped unless
-+ * something inside the unit called GBADMAUpdate (dmaUpdates changed). */
++/* While nothing else is due first, the next unit runs from here, as the event loop would, minus the list work. If
++ * something in a unit called GBADMAUpdate (dmaUpdates changed), the event is rescheduled the usual way. */
  void _dmaEvent(struct mTiming* timing, void* context, uint32_t cyclesLate) {
 -	UNUSED(timing);
 -	UNUSED(cyclesLate);
@@ -149,7 +147,7 @@ index da2a800ba..7f91c2276 100644
  	uint32_t currentTime = mTimingCurrentTime(&gba->timing);
  	int32_t leastTime = INT_MAX;
  	memory->activeDMA = -1;
-@@ -354,7 +405,6 @@ void GBADMAService(struct GBA* gba, int number, struct GBADMA* info) {
+@@ -354,7 +403,6 @@ void GBADMAService(struct GBA* gba, int number, struct GBADMA* info) {
  			info->when += 2;
  		}
  	}
