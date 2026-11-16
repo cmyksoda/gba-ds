@@ -43,6 +43,11 @@ file and these changes (`mgba/build-libmgba.sh`):
   instructions for the same result (short paths for loads, stores and jumps, LDM/STM over the set
   bits, a DMA's units without the event list, a cheaper alpha blend). Pictures, RAM and states are
   bit-identical to unpatched mGBA's.
+- `mgba/gba-stall-closed-form.patch`, `gba-jump-inline.patch`, `gba-audio-fast.patch`,
+  `gba-audio-silent.patch`: the same kind of change again (the ROM prefetch model's loop as arithmetic,
+  the usual jump checked inside the jumping instruction, no memcpy, memset or division per sound
+  sample or event, the PSG's output made once per run of equal samples). Same pictures, RAM, states
+  and sound samples as before.
 - `mgba/video-wake.patch`: `video_wake` in `gba-ds.cfg` (0, 1, 3, 7, 15, 31 or 63; 15 as before)
   is how often mGBA's drawing thread is woken, once per N+1 lines.
 - `MINIMAL_CORE` taken out of the `flags.h` it writes: the library is built without it, and the

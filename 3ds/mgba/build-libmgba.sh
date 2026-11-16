@@ -24,6 +24,13 @@
 # color-mix.patch: mColorMix5Bit (the renderer's alpha blend, per pixel) with two multiplies fewer: the same value for every
 # input (checked on all channel pairs and weights up to 16).
 # video-wake.patch: how often the drawing thread is woken (every 16 lines as before; video_wake in gba-ds.cfg).
+# gba-stall-closed-form.patch: the ROM prefetch model's loop (GBAMemoryStall) as arithmetic and a small table, with the
+# result unchanged.
+# gba-jump-inline.patch: the usual jump (same region, no idle loop) is checked inside the instruction that jumps, no call.
+# gba-audio-fast.patch: the sound path without library calls per sample or per event (the noise channel's tables were
+# copied onto the stack on every call, a memset and a division per event on a CPU with no divide); the same samples.
+# gba-audio-silent.patch: the sampling loop makes the PSG's output once per run of equal channel samples and skips the PSG's
+# run when no channel is playing.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 ROOT="$PWD"
@@ -47,7 +54,7 @@ fi
 git -C "$SRC" apply "$ROOT/3ds/mgba/rom-copy-size.patch" "$ROOT/3ds/mgba/memory-map-hook.patch" \
 	"$ROOT/3ds/mgba/video-thread-core.patch" "$ROOT/3ds/mgba/gba-fast-memory.patch" \
 	"$ROOT/3ds/mgba/gba-ldm-stm.patch" "$ROOT/3ds/mgba/gba-dma-batch.patch" "$ROOT/3ds/mgba/color-mix.patch" \
-	"$ROOT/3ds/mgba/video-wake.patch"
+	"$ROOT/3ds/mgba/video-wake.patch" "$ROOT/3ds/mgba/gba-stall-closed-form.patch" "$ROOT/3ds/mgba/gba-jump-inline.patch" "$ROOT/3ds/mgba/gba-audio-fast.patch" "$ROOT/3ds/mgba/gba-audio-silent.patch"
 
 OUT="$SRC/${MGBA_BUILD_NAME:-build}"
 PGO_FLAGS=
