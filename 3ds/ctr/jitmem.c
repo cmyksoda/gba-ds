@@ -160,6 +160,9 @@ void* jitHostAllocCode(size_t* size) {
 		/* (gba-ds.cfg armgba_code_mib: the game's code memory up to this many MiB, 4 to 24: armGBA's own frontend takes up to 24) */
 		const char* wanted = getenv("GBADS_ARMGBA_CODE_MIB");
 		if (main && wanted && atoi(wanted) >= 4 && atoi(wanted) <= 24) most = (size_t) atoi(wanted) << 20;
+		/* (armgba_copy_code_mib: the same for the hidden copy and the other machines, 1 to 16) */
+		const char* copyWanted = getenv("GBADS_ARMGBA_COPY_CODE_MIB");
+		if (!main && copyWanted && atoi(copyWanted) >= 1 && atoi(copyWanted) <= 16) most = (size_t) atoi(copyWanted) << 20;
 		size_t const least = main ? MAIN_MIN : OTHER_MIN;
 		if (spare > *size) {
 			spare = *size;

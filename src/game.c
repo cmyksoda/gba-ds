@@ -7441,6 +7441,7 @@ static void ss_switch(const char* rom, const char* code) {
 	hideWhenProf = NULL;
 	mapcap_destroy(mc);
 	mc = NULL;
+	profile_live_end();
 	for (int i = 0; i < MAP_MAX_FRAMES; ++i) {
 		free(mapRes.frames[i]);
 		mapRes.frames[i] = NULL;
@@ -8831,6 +8832,7 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 	if (audioConv) SDL_FreeAudioStream(audioConv);
 	mapcap_destroy(mc);
 	mc = NULL;
+	profile_live_end();
 	emu_rewind_deinit();
 #ifdef __wasi__
 	webPlaying = false;
