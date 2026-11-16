@@ -38,6 +38,8 @@ uint32_t host_gpu_wait_ticks(void);
 /* gba-ds.cfg's side_core, capture_core, ahead_core, video_core (-1: as built in), core1_limit (a thread on
  * core 1 needs the app's share of it set) and core_probe; at the start, and again for each game. */
 void host_set_cores(int side, int capture, int ahead, int video, int core1Percent, bool probe);
+/* gba-ds.cfg's video_wake: mGBA's drawing thread is woken when a line number's low bits (this mask: 0, 1, 3, 7, 15, 31, 63) are all set. */
+void host_set_video_wake(int mask);
 /* What to give host_next_thread_core for the map capture's thread, and for the Frame Buffer's (mGBA's
  * drawing thread on or not). */
 int host_capture_core(void);

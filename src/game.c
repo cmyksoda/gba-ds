@@ -7474,6 +7474,7 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 #ifdef __3DS__
 	/* (again for each game: the bench's per-job options) */
 	host_set_cores(cfg->sideCore, cfg->captureCore, cfg->aheadCore, cfg->videoCore, cfg->core1Limit, false);
+	host_set_video_wake(cfg->videoWake);
 	emu_threaded_video(cfg->threadedVideo && isNew3ds()); /* (mGBA's drawing thread on the New 3DS's third core) */
 #else
 	emu_threaded_video(cfg->threadedVideo);
@@ -8678,6 +8679,7 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 		bench_frame(frameCount, benchEmuMs, (drawT1 - drawT0) * 1000.0 / SDL_GetPerformanceFrequency(),
 		            (drawT0 - emuT1) * 1000.0 / SDL_GetPerformanceFrequency(), mc && mapcap_busy(mc),
 		            (emuT0 - workT0) * 1000.0 / SDL_GetPerformanceFrequency(), (drawT1 - workT0) * 1000.0 / SDL_GetPerformanceFrequency());
+		bench_check(&emu, frameCount);
 		if (cfg->captureThrottle > 0 && !ff) {
 			double over = (double) (drawT1 - loopT0) / SDL_GetPerformanceFrequency() / frameSec;
 			lateness += (SDL_max(over, 1.0) - lateness) / 32;

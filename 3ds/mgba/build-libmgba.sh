@@ -8,6 +8,14 @@
 # (3ds/ctr/emu_ctr.c), so those copies come from the top of the heap's range, as the ROMs do.
 # video-thread-core.patch: the core of mGBA's drawing thread is gbadsVideoCore (3ds/ctr/host.c), core 2 unless
 # video_core in gba-ds.cfg says another.
+# gba-fast-memory.patch: short paths for the usual loads, stores and jumps (RAM and ROM, no idle loop to check) in
+# front of mGBA's own code, which stays as the slow path: same results, fewer instructions.
+# gba-ldm-stm.patch: LDM and STM (and so PUSH and POP) go through the set bits of the register list, not all sixteen.
+# gba-dma-batch.patch: a DMA transfer's next unit runs straight from the one before it when nothing else is due first (the
+# steps the event loop took, without the list work); mTimingTick reads the master clock again after each callback.
+# color-mix.patch: mColorMix5Bit (the renderer's alpha blend, per pixel) with two multiplies fewer: the same value for every
+# input (checked on all channel pairs and weights up to 16).
+# video-wake.patch: how often the drawing thread is woken (every 16 lines as before; video_wake in gba-ds.cfg).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 ROOT="$PWD"
@@ -25,7 +33,9 @@ sed -i -e 's/ COLOR_16_BIT COLOR_5_6_5 FIXED_ROM_BUFFER / /' \
 	-e '/ctru-heap.c/d' "$SRC/src/platform/3ds/CMakeLists.txt"
 grep -q 'COLOR_16_BIT' "$SRC/src/platform/3ds/CMakeLists.txt" && { echo "mGBA's 3DS defines not removed"; exit 1; }
 git -C "$SRC" apply "$ROOT/3ds/mgba/rom-copy-size.patch" "$ROOT/3ds/mgba/memory-map-hook.patch" \
-	"$ROOT/3ds/mgba/video-thread-core.patch"
+	"$ROOT/3ds/mgba/video-thread-core.patch" "$ROOT/3ds/mgba/gba-fast-memory.patch" \
+	"$ROOT/3ds/mgba/gba-ldm-stm.patch" "$ROOT/3ds/mgba/gba-dma-batch.patch" "$ROOT/3ds/mgba/color-mix.patch" \
+	"$ROOT/3ds/mgba/video-wake.patch"
 
 cmake -S "$SRC" -B "$SRC/build" -DCMAKE_TOOLCHAIN_FILE="$SRC/src/platform/3ds/CMakeToolchain.txt" \
 	"${MGBA_OPTS[@]}" -DUSE_LZMA=OFF -DUSE_DEBUGGERS=OFF > "$SRC/build.log"

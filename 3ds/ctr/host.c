@@ -470,6 +470,7 @@ void host_mem_note(const char* what) {
 
 static int sideCore = -1, captureCore = -1, aheadCore = -1;
 int gbadsVideoCore = 2; /* (the patched libmgba's threading.h reads it: mGBA's drawing thread) */
+int gbadsVideoWake = 15; /* (and thread-proxy.c reads this one) */
 static int core1Percent = 50;
 static int core1Applied; /* (0: not yet: once set it can't go back, but another value can be asked for) */
 
@@ -554,6 +555,10 @@ static void core_probe(void) {
 		if (together) snprintf(line + n, sizeof(line) - n, " (core 0 %.2f)", (double) s[0].loops / ref.loops);
 		logLine("%s", line);
 	}
+}
+
+void host_set_video_wake(int mask) {
+	gbadsVideoWake = mask == 0 || mask == 1 || mask == 3 || mask == 7 || mask == 15 || mask == 31 || mask == 63 ? mask : 15;
 }
 
 void host_set_cores(int side, int capture, int ahead, int video, int core1, bool probe) {

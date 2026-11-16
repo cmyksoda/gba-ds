@@ -17,5 +17,9 @@ bool bench_active(void);
  * (the second screen's map, HUD and snapshot pictures); the loop's work before emulating, and the whole of its
  * body (what the frame took outside it is the lines written, the loop's start and its end). */
 void bench_frame(uint64_t frame, double emuMs, double drawMs, double screenMs, bool captureBusy, double preMs, double loopMs);
+/* After bench_frame: with bench_check = N, every N frames a "check" line with checksums of the picture, RAM and video
+ * memory (two builds that print the same lines ran the same game the same way). */
+struct Emu;
+void bench_check(struct Emu* e, uint64_t frame);
 
 #endif
