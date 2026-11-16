@@ -188,7 +188,7 @@ void bench_check(Emu* e, uint64_t frame) {
 	uint32_t ram = fnv_memory(e, fnv_memory(e, 2166136261u, 0x02000000, 0x40000), 0x03000000, 0x8000);
 	uint32_t vid = fnv_memory(e, fnv_memory(e, fnv_memory(e, 2166136261u, 0x05000000, 0x400), 0x06000000, 0x18000), 0x07000000, 0x400);
 	char line[160];
-	snprintf(line, sizeof(line), "bench %s check at frame %llu: picture %08x, ram %08x, video %08x", jobId, (unsigned long long) frame, pic, ram, vid);
+	snprintf(line, sizeof(line), "bench %s check at frame %llu: picture %08x, ram %08x, video %08x", jobId, (unsigned long long) frame, (unsigned) pic, (unsigned) ram, (unsigned) vid);
 	put(line);
 }
 
