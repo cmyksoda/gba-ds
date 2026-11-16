@@ -141,7 +141,7 @@ void emu_threaded_video(bool on);
 void emu_idle_loops(const char* mode);
 /* this core's picture is drawn on mGBA's thread */
 bool emu_threaded(const Emu* e);
-/* mGBA's core only: the time emu_frame has waited for that thread's last lines, in microseconds (a sum that wraps). */
+/* The time emu_frame has waited for the thread that draws (mGBA's threaded video, armGBA's render worker), in microseconds (a sum that wraps). */
 uint32_t emu_video_wait_us(void);
 /* true while this core's capture has been called off (Emu.cancel) */
 bool emu_cancelled(const Emu* e);
