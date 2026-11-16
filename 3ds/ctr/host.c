@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/iosupport.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -79,8 +80,8 @@ void logLine(const char* format, ...) {
 }
 
 #ifdef GBADS_SLOW_SD
-/* TEST ONLY (make SLOWSD=1): sdmc:/3ds/gba-ds/slow-sd.txt "PERIOD STALL" (ms) freezes the SD card for the first STALL ms
- * of every PERIOD while a bench job plays: writes, opens and small reads wait it out, as a real card's do. */
+/* TEST ONLY (make SLOWSD=1): slow-sd.txt in the app's folder, "PERIOD STALL" in ms, freezes the card for the first STALL
+ * ms of every PERIOD while a bench job plays (writes, opens and small reads wait). */
 #include <reent.h>
 static struct {
 	u64 start;
@@ -97,14 +98,14 @@ static u32 thread_id(void) {
 static __thread bool inSlowHook;
 static int slowSdSkipFd = -1; /* (a file that isn't on the card: the log's ring, once it is one) */
 
-static void slow_sd_wait(const char* op, int fd) {
+static void slow_sd_wait(const char* op, int fd, size_t n) {
 	if (!slowSd.armed || inSlowHook || fd < 0 || fd == slowSdSkipFd) return;
 	u64 into = (osGetTime() - slowSd.start) % slowSd.period;
 	if (into >= slowSd.stall) return;
 	inSlowHook = true;
 	u64 t0 = osGetTime();
 	svcSleepThread((s64) (slowSd.stall - into) * 1000000);
-	logLine("slow sd: %s waited %u ms (%s thread)", op, (unsigned) (osGetTime() - t0),
+	logLine("slow sd: %s of %u bytes (fd %d) waited %u ms (%s thread)", op, (unsigned) n, fd, (unsigned) (osGetTime() - t0),
 	        thread_id() == slowSd.gameThread ? "game" : "other");
 	inSlowHook = false;
 }
@@ -124,20 +125,211 @@ void host_slow_sd(bool on) {
 
 _ssize_t __real__write_r(struct _reent* r, int fd, const void* buf, size_t n);
 _ssize_t __wrap__write_r(struct _reent* r, int fd, const void* buf, size_t n) {
-	slow_sd_wait("write", fd);
+	slow_sd_wait("write", fd, n);
 	return __real__write_r(r, fd, buf, n);
 }
 _ssize_t __real__read_r(struct _reent* r, int fd, void* buf, size_t n);
 _ssize_t __wrap__read_r(struct _reent* r, int fd, void* buf, size_t n) {
-	if (n < 64 * 1024) slow_sd_wait("read", fd);
+	if (n < 64 * 1024) slow_sd_wait("read", fd, n);
 	return __real__read_r(r, fd, buf, n);
 }
 int __real__open_r(struct _reent* r, const char* path, int flags, int mode);
 int __wrap__open_r(struct _reent* r, const char* path, int flags, int mode) {
-	slow_sd_wait("open", 0);
+	slow_sd_wait("open", 0, strlen(path));
 	return __real__open_r(r, path, flags, mode);
 }
 #endif
+
+/* The card's writer: the log (stderr, a device of its own, "logbuf:") and the bench's lines go through one ring in memory
+ * to one thread, so a card that stops for seconds holds up neither. A full ring drops log writes and says how many; a bench
+ * line waits for room (the ring holds about 25). Before the thread starts they are written straight out. */
+enum { RING = 10 * 1024, REC_MAX = 1023, LINE_BYTES = 640, LINE_SPARE = 1300, REC_LINE = 0x8000 };
+static struct {
+	LightLock lock;
+	LightEvent wake, room;
+	char ring[RING];
+	u32 head, used, dropped;
+	volatile bool threaded;
+	bool quit;
+	double worstMs;
+	FILE* file;
+	void (*writeLine)(const char* line);
+	pthread_t thread;
+} lg;
+
+int host_pthread_create(pthread_t* thread, const pthread_attr_t* attr, void* (*fn)(void*), void* arg);
+
+static void ring_add(u32 flag, const char* data, u32 n) {
+	u32 at = (lg.head + lg.used) % RING;
+	u32 header = flag | n;
+	char bytes[2] = { (char) (header & 0xFF), (char) (header >> 8) };
+	for (u32 i = 0; i < 2; ++i) lg.ring[(at + i) % RING] = bytes[i];
+	for (u32 i = 0; i < n; ++i) lg.ring[(at + 2 + i) % RING] = data[i];
+	lg.used += 2 + n;
+}
+
+static int logdev_open(struct _reent* r, void* file, const char* path, int flags, int mode) {
+	(void) r, (void) file, (void) path, (void) flags, (void) mode;
+	return 0;
+}
+
+static int logdev_close(struct _reent* r, void* file) {
+	(void) r, (void) file;
+	return 0;
+}
+
+static ssize_t logdev_write(struct _reent* r, void* file, const char* buf, size_t n) {
+	(void) r, (void) file;
+	if (!lg.threaded) {
+		if (lg.file && fwrite(buf, 1, n, lg.file) == n) fflush(lg.file);
+		return (ssize_t) n;
+	}
+	for (size_t done = 0; done < n;) {
+		u32 part = n - done < REC_MAX ? (u32) (n - done) : REC_MAX;
+		LightLock_Lock(&lg.lock);
+		if (lg.used + 2 + part + LINE_SPARE > RING) ++lg.dropped;
+		else ring_add(0, buf + done, part);
+		LightLock_Unlock(&lg.lock);
+		done += part;
+	}
+	LightEvent_Signal(&lg.wake);
+	return (ssize_t) n;
+}
+
+static const devoptab_t logDevice = {
+	.name = "logbuf",
+	.structSize = 4,
+	.open_r = logdev_open,
+	.close_r = logdev_close,
+	.write_r = logdev_write,
+};
+
+static void* writer_main(void* arg) {
+	(void) arg;
+	static char rec[REC_MAX + 1];
+	for (;;) {
+		LightLock_Lock(&lg.lock);
+		if (!lg.used) {
+			bool quit = lg.quit;
+			LightLock_Unlock(&lg.lock);
+			if (quit) break;
+			LightEvent_Wait(&lg.wake);
+			continue;
+		}
+		u32 header = (unsigned char) lg.ring[lg.head] | (unsigned char) lg.ring[(lg.head + 1) % RING] << 8;
+		u32 n = header & ~REC_LINE;
+		for (u32 i = 0; i < n; ++i) rec[i] = lg.ring[(lg.head + 2 + i) % RING];
+		rec[n] = 0;
+		u32 dropped = lg.dropped;
+		lg.dropped = 0;
+		LightLock_Unlock(&lg.lock);
+		if (dropped) fprintf(lg.file, "\n[log: %u write(s) dropped, the SD card was busy]\n", (unsigned) dropped);
+		if (header & REC_LINE) {
+			u64 t0 = svcGetSystemTick();
+			lg.writeLine(rec);
+			double ms = (double) (svcGetSystemTick() - t0) * 1000.0 / SYSCLOCK_ARM11;
+			LightLock_Lock(&lg.lock);
+			if (ms > lg.worstMs) lg.worstMs = ms;
+			LightLock_Unlock(&lg.lock);
+		} else if (fwrite(rec, 1, n, lg.file) == n) {
+			fflush(lg.file);
+		}
+		LightLock_Lock(&lg.lock);
+		lg.head = (lg.head + 2 + n) % RING;
+		lg.used -= 2 + n;
+		LightLock_Unlock(&lg.lock);
+		LightEvent_Signal(&lg.room);
+	}
+	return NULL;
+}
+
+static bool writer_start(const char* name, size_t stack) {
+	if (lg.threaded) return true;
+	pthread_attr_t attr;
+	pthread_attr_init(&attr);
+	pthread_attr_setstacksize(&attr, stack);
+	host_next_thread_name(name);
+	lg.threaded = host_pthread_create(&lg.thread, &attr, writer_main, NULL) == 0;
+	pthread_attr_destroy(&attr);
+	return lg.threaded;
+}
+
+static void ring_drain(void) {
+	while (lg.threaded && lg.used) {
+		LightEvent_Signal(&lg.wake);
+		svcSleepThread(1000000);
+	}
+}
+
+static void writer_stop(void) {
+	if (!lg.threaded) return;
+	ring_drain();
+	lg.quit = true;
+	LightEvent_Signal(&lg.wake);
+	pthread_join(lg.thread, NULL);
+	lg.threaded = lg.quit = false;
+}
+
+/* Everything logged so far is in log.txt (the log is read, sent or ended after this). */
+void host_log_flush(void) {
+	fflush(stderr);
+	ring_drain();
+}
+
+void host_line_put(const char* line, void (*write)(const char* line)) {
+	lg.writeLine = write;
+	if (!writer_start("bench lines", 32 * 1024)) {
+		write(line);
+		return;
+	}
+	u32 n = (u32) strnlen(line, LINE_BYTES - 1);
+	for (;;) {
+		LightLock_Lock(&lg.lock);
+		bool fits = lg.used + 2 + n <= RING;
+		if (fits) ring_add(REC_LINE, line, n);
+		LightLock_Unlock(&lg.lock);
+		if (fits) break;
+		LightEvent_Wait(&lg.room);
+	}
+	LightEvent_Signal(&lg.wake);
+}
+
+void host_line_drain(void) {
+	ring_drain();
+}
+
+void host_line_stop(void) {
+	writer_stop();
+}
+
+double host_line_worst_ms(void) {
+	LightLock_Lock(&lg.lock);
+	double ms = lg.worstMs;
+	lg.worstMs = 0;
+	LightLock_Unlock(&lg.lock);
+	return ms;
+}
+
+static void log_start(void) {
+	LightLock_Init(&lg.lock);
+	LightEvent_Init(&lg.wake, RESET_ONESHOT);
+	LightEvent_Init(&lg.room, RESET_ONESHOT);
+	lg.file = fopen(APP_DIR "/log.txt", "w");
+	if (!lg.file) return;
+	if (AddDevice(&logDevice) < 0 || !freopen("logbuf:/log", "w", stderr)) {
+		fclose(lg.file);
+		lg.file = NULL;
+		if (freopen(APP_DIR "/log.txt", "w", stderr)) setvbuf(stderr, NULL, _IOLBF, 1024);
+		return;
+	}
+	setvbuf(stderr, NULL, _IOLBF, 1024);
+#ifdef GBADS_SLOW_SD
+	slowSdSkipFd = fileno(stderr);
+#endif
+#ifndef GBADS_BENCH_TAG
+	writer_start("log lines", 16 * 1024);
+#endif
+}
 
 bool isEmulator(void) {
 	static int known = -1;
@@ -726,7 +918,7 @@ void host_bench_report(const char* path, const char* what) {
  * here without the app having to end well. */
 void host_log_checkpoint(void) {
 #ifdef GBADS_LOG_URL
-	fflush(stderr);
+	host_log_flush();
 	log_upload(APP_DIR "/log.txt", "gba-ds-now");
 #endif
 }
@@ -742,7 +934,7 @@ int main(void) {
 	/* the last run's log kept: what to attach to a bug report */
 	remove(APP_DIR "/log-prev.txt");
 	rename(APP_DIR "/log.txt", APP_DIR "/log-prev.txt");
-	if (freopen(APP_DIR "/log.txt", "w", stderr)) setvbuf(stderr, NULL, _IOLBF, 1024);
+	log_start();
 	/* the 3DS's own defaults, in a file to change them in: where the games
 	 * are; each picture as large as its screen takes; no rewind (the memory
 	 * is the game's and the recompiler's) */
@@ -787,11 +979,11 @@ int main(void) {
 #ifdef GBADS_ARMGBA
 	jitHostRestoreMemory();
 #endif
-	fflush(stderr);
+	host_log_flush();
 #ifdef GBADS_LOG_URL
 	log_upload(APP_DIR "/log.txt", "gba-ds");
-	fflush(stderr);
 #endif
+	writer_stop();
 	return rc;
 }
 

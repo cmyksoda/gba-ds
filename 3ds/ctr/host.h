@@ -45,6 +45,14 @@ int host_ahead_core(bool threadedVideo);
 /* The next machine made is the game itself (the large share of the
  * recompiler's memory), or a copy. */
 void host_log_checkpoint(void);
+/* The log (stderr) is written to log.txt on a thread of its own; this waits until it all is (not for play). */
+void host_log_flush(void);
+/* The bench's lines go through the same thread: put one (write is called with it, on the thread), wait for all that
+ * were put, stop the thread, and the longest write in ms since the last call. */
+void host_line_put(const char* line, void (*write)(const char* line));
+void host_line_drain(void);
+void host_line_stop(void);
+double host_line_worst_ms(void);
 void host_ui_busy(void);
 void host_fs_yield(void);
 void host_mem_note(const char* what);

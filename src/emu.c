@@ -42,7 +42,7 @@ static void quiet_log(struct mLogger* l, int cat, enum mLogLevel level, const ch
 }
 static struct mLogger quietLogger = { .log = quiet_log };
 
-#if defined(__ANDROID__) || defined(GBADS_ASYNC_SAVE)
+#if defined(__ANDROID__) || defined(__3DS__) || defined(GBADS_ASYNC_SAVE)
 /* ------------------------------------------------- battery saves, async
  * When a game writes its save, mGBA flushes it from the emulation thread a
  * few frames later: futimens + msync + fsync. On Android's shared storage
@@ -54,6 +54,10 @@ static struct mLogger quietLogger = { .log = quiet_log };
 #ifdef __ANDROID__
 #include "android.h"
 #endif
+#ifdef __3DS__
+#include "host.h"
+enum { SAVE_MAX = 128 * 1024 }; /* (flash 1M, the largest) */
+#endif
 
 typedef struct {
 	struct VFile d;
@@ -63,8 +67,37 @@ typedef struct {
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
 	bool started, pending, quit;
+#ifdef __3DS__
+	/* (no mmap: the save is a copy in memory that sync writes out whole, so the thread writes a copy of its own; io keeps
+	 * a write in flight apart from the other calls on the file) */
+	pthread_mutex_t io;
+	char *queued, *writing;
+	size_t queuedSize;
+#endif
 } AsyncSave;
 
+#ifdef __3DS__
+static void* async_save_worker(void* arg) {
+	AsyncSave* a = arg;
+	pthread_mutex_lock(&a->lock);
+	for (;;) {
+		while (!a->pending && !a->quit) pthread_cond_wait(&a->cond, &a->lock);
+		if (!a->pending) break;
+		a->pending = false;
+		char* copy = a->queued;
+		a->queued = a->writing;
+		a->writing = copy;
+		size_t size = a->queuedSize;
+		pthread_mutex_unlock(&a->lock);
+		pthread_mutex_lock(&a->io);
+		if (!a->inner->sync(a->inner, a->writing, size)) fprintf(stderr, "save: couldn't write %s\n", a->path);
+		pthread_mutex_unlock(&a->io);
+		pthread_mutex_lock(&a->lock);
+	}
+	pthread_mutex_unlock(&a->lock);
+	return NULL;
+}
+#else
 static void* async_save_worker(void* arg) {
 	AsyncSave* a = arg;
 #ifdef __ANDROID__
@@ -88,14 +121,31 @@ static void* async_save_worker(void* arg) {
 	pthread_mutex_unlock(&a->lock);
 	return NULL;
 }
+#endif
 
 static bool as_sync(struct VFile* vf, void* buffer, size_t size) {
+#ifndef __3DS__
 	(void) buffer;
 	(void) size;
+#endif
 	AsyncSave* a = (AsyncSave*) vf;
 	pthread_mutex_lock(&a->lock);
+#ifdef __3DS__
+	if (!a->started) host_next_thread_name("save writer");
+#endif
 	if (!a->started) a->started = pthread_create(&a->thread, NULL, async_save_worker, a) == 0;
 	bool ok = a->started;
+#ifdef __3DS__
+	if (ok && !a->queued) {
+		a->queued = malloc(SAVE_MAX);
+		a->writing = malloc(SAVE_MAX);
+	}
+	ok = ok && a->writing && size <= SAVE_MAX;
+	if (ok) {
+		memcpy(a->queued, buffer, size);
+		a->queuedSize = size;
+	}
+#endif
 	if (ok) {
 		a->pending = true;
 		pthread_cond_signal(&a->cond);
@@ -117,6 +167,11 @@ static bool as_close(struct VFile* vf) {
 	bool ok = a->inner->close(a->inner);
 	pthread_mutex_destroy(&a->lock);
 	pthread_cond_destroy(&a->cond);
+#ifdef __3DS__
+	pthread_mutex_destroy(&a->io);
+	free(a->queued);
+	free(a->writing);
+#endif
 	free(a);
 	return ok;
 }
@@ -125,9 +180,29 @@ static off_t as_seek(struct VFile* vf, off_t o, int w) { return ((AsyncSave*) vf
 static ssize_t as_read(struct VFile* vf, void* b, size_t n) { return ((AsyncSave*) vf)->inner->read(((AsyncSave*) vf)->inner, b, n); }
 static ssize_t as_readline(struct VFile* vf, char* b, size_t n) { return ((AsyncSave*) vf)->inner->readline(((AsyncSave*) vf)->inner, b, n); }
 static ssize_t as_write(struct VFile* vf, const void* b, size_t n) { return ((AsyncSave*) vf)->inner->write(((AsyncSave*) vf)->inner, b, n); }
-static void* as_map(struct VFile* vf, size_t n, int f) { return ((AsyncSave*) vf)->inner->map(((AsyncSave*) vf)->inner, n, f); }
-static void as_unmap(struct VFile* vf, void* m, size_t n) { ((AsyncSave*) vf)->inner->unmap(((AsyncSave*) vf)->inner, m, n); }
-static void as_truncate(struct VFile* vf, size_t n) { ((AsyncSave*) vf)->inner->truncate(((AsyncSave*) vf)->inner, n); }
+#ifdef __3DS__
+#define IO_LOCK(vf) pthread_mutex_lock(&((AsyncSave*) (vf))->io)
+#define IO_UNLOCK(vf) pthread_mutex_unlock(&((AsyncSave*) (vf))->io)
+#else
+#define IO_LOCK(vf) ((void) 0)
+#define IO_UNLOCK(vf) ((void) 0)
+#endif
+static void* as_map(struct VFile* vf, size_t n, int f) {
+	IO_LOCK(vf);
+	void* m = ((AsyncSave*) vf)->inner->map(((AsyncSave*) vf)->inner, n, f);
+	IO_UNLOCK(vf);
+	return m;
+}
+static void as_unmap(struct VFile* vf, void* m, size_t n) {
+	IO_LOCK(vf);
+	((AsyncSave*) vf)->inner->unmap(((AsyncSave*) vf)->inner, m, n);
+	IO_UNLOCK(vf);
+}
+static void as_truncate(struct VFile* vf, size_t n) {
+	IO_LOCK(vf);
+	((AsyncSave*) vf)->inner->truncate(((AsyncSave*) vf)->inner, n);
+	IO_UNLOCK(vf);
+}
 static ssize_t as_size(struct VFile* vf) { return ((AsyncSave*) vf)->inner->size(((AsyncSave*) vf)->inner); }
 
 static struct VFile* async_save_open(const char* path) {
@@ -139,6 +214,9 @@ static struct VFile* async_save_open(const char* path) {
 	snprintf(a->path, sizeof(a->path), "%s", path);
 	pthread_mutex_init(&a->lock, NULL);
 	pthread_cond_init(&a->cond, NULL);
+#ifdef __3DS__
+	pthread_mutex_init(&a->io, NULL);
+#endif
 	a->d = (struct VFile) { as_close, as_seek, as_read, as_readline, as_write, as_map, as_unmap, as_truncate, as_size, as_sync };
 	return &a->d;
 }
@@ -377,7 +455,7 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 		return false;
 	}
 	if (savePath) {
-#if defined(__ANDROID__) || defined(GBADS_ASYNC_SAVE)
+#if defined(__ANDROID__) || defined(__3DS__) || defined(GBADS_ASYNC_SAVE)
 		struct VFile* vf = async_save_open(savePath);
 #else
 		struct VFile* vf = VFileOpen(savePath, O_CREAT | O_RDWR);
