@@ -69,10 +69,11 @@ typedef struct {
 	bool started, pending, quit;
 #ifdef __3DS__
 	/* (no mmap: the save is a copy in memory that sync writes out whole, so the thread writes a copy of its own; io keeps
-	 * a write in flight apart from the other calls on the file) */
+	 * a write in flight apart from every other call on the file, which all share its FILE position) */
 	pthread_mutex_t io;
 	char *queued, *writing;
 	size_t queuedSize;
+	unsigned epoch; /* (counts unmaps: a copy older than one is out of date, the unmap wrote the newer memory) */
 #endif
 } AsyncSave;
 
@@ -88,9 +89,13 @@ static void* async_save_worker(void* arg) {
 		a->queued = a->writing;
 		a->writing = copy;
 		size_t size = a->queuedSize;
+		unsigned epoch = a->epoch;
 		pthread_mutex_unlock(&a->lock);
 		pthread_mutex_lock(&a->io);
-		if (!a->inner->sync(a->inner, a->writing, size)) fprintf(stderr, "save: couldn't write %s\n", a->path);
+		pthread_mutex_lock(&a->lock);
+		bool stale = epoch != a->epoch;
+		pthread_mutex_unlock(&a->lock);
+		if (!stale && !a->inner->sync(a->inner, a->writing, size)) fprintf(stderr, "save: couldn't write %s\n", a->path);
 		pthread_mutex_unlock(&a->io);
 		pthread_mutex_lock(&a->lock);
 	}
@@ -140,7 +145,7 @@ static bool as_sync(struct VFile* vf, void* buffer, size_t size) {
 		a->queued = malloc(SAVE_MAX);
 		a->writing = malloc(SAVE_MAX);
 	}
-	ok = ok && a->writing && size <= SAVE_MAX;
+	ok = ok && a->queued && a->writing && size <= SAVE_MAX;
 	if (ok) {
 		memcpy(a->queued, buffer, size);
 		a->queuedSize = size;
@@ -176,10 +181,6 @@ static bool as_close(struct VFile* vf) {
 	return ok;
 }
 
-static off_t as_seek(struct VFile* vf, off_t o, int w) { return ((AsyncSave*) vf)->inner->seek(((AsyncSave*) vf)->inner, o, w); }
-static ssize_t as_read(struct VFile* vf, void* b, size_t n) { return ((AsyncSave*) vf)->inner->read(((AsyncSave*) vf)->inner, b, n); }
-static ssize_t as_readline(struct VFile* vf, char* b, size_t n) { return ((AsyncSave*) vf)->inner->readline(((AsyncSave*) vf)->inner, b, n); }
-static ssize_t as_write(struct VFile* vf, const void* b, size_t n) { return ((AsyncSave*) vf)->inner->write(((AsyncSave*) vf)->inner, b, n); }
 #ifdef __3DS__
 #define IO_LOCK(vf) pthread_mutex_lock(&((AsyncSave*) (vf))->io)
 #define IO_UNLOCK(vf) pthread_mutex_unlock(&((AsyncSave*) (vf))->io)
@@ -187,6 +188,35 @@ static ssize_t as_write(struct VFile* vf, const void* b, size_t n) { return ((As
 #define IO_LOCK(vf) ((void) 0)
 #define IO_UNLOCK(vf) ((void) 0)
 #endif
+/* (mGBA seeks and writes the clock's bytes after a save's end right after each sync, and a write in flight moves the FILE position) */
+static off_t as_seek(struct VFile* vf, off_t o, int w) {
+	AsyncSave* a = (AsyncSave*) vf;
+	IO_LOCK(vf);
+	off_t r = a->inner->seek(a->inner, o, w);
+	IO_UNLOCK(vf);
+	return r;
+}
+static ssize_t as_read(struct VFile* vf, void* buf, size_t n) {
+	AsyncSave* a = (AsyncSave*) vf;
+	IO_LOCK(vf);
+	ssize_t r = a->inner->read(a->inner, buf, n);
+	IO_UNLOCK(vf);
+	return r;
+}
+static ssize_t as_readline(struct VFile* vf, char* buf, size_t n) {
+	AsyncSave* a = (AsyncSave*) vf;
+	IO_LOCK(vf);
+	ssize_t r = a->inner->readline(a->inner, buf, n);
+	IO_UNLOCK(vf);
+	return r;
+}
+static ssize_t as_write(struct VFile* vf, const void* buf, size_t n) {
+	AsyncSave* a = (AsyncSave*) vf;
+	IO_LOCK(vf);
+	ssize_t r = a->inner->write(a->inner, buf, n);
+	IO_UNLOCK(vf);
+	return r;
+}
 static void* as_map(struct VFile* vf, size_t n, int f) {
 	IO_LOCK(vf);
 	void* m = ((AsyncSave*) vf)->inner->map(((AsyncSave*) vf)->inner, n, f);
@@ -194,8 +224,15 @@ static void* as_map(struct VFile* vf, size_t n, int f) {
 	return m;
 }
 static void as_unmap(struct VFile* vf, void* m, size_t n) {
+	AsyncSave* a = (AsyncSave*) vf;
 	IO_LOCK(vf);
-	((AsyncSave*) vf)->inner->unmap(((AsyncSave*) vf)->inner, m, n);
+#ifdef __3DS__
+	pthread_mutex_lock(&a->lock);
+	a->pending = false;
+	++a->epoch;
+	pthread_mutex_unlock(&a->lock);
+#endif
+	a->inner->unmap(a->inner, m, n);
 	IO_UNLOCK(vf);
 }
 static void as_truncate(struct VFile* vf, size_t n) {
@@ -203,7 +240,13 @@ static void as_truncate(struct VFile* vf, size_t n) {
 	((AsyncSave*) vf)->inner->truncate(((AsyncSave*) vf)->inner, n);
 	IO_UNLOCK(vf);
 }
-static ssize_t as_size(struct VFile* vf) { return ((AsyncSave*) vf)->inner->size(((AsyncSave*) vf)->inner); }
+static ssize_t as_size(struct VFile* vf) {
+	AsyncSave* a = (AsyncSave*) vf;
+	IO_LOCK(vf);
+	ssize_t r = a->inner->size(a->inner);
+	IO_UNLOCK(vf);
+	return r;
+}
 
 static struct VFile* async_save_open(const char* path) {
 	struct VFile* inner = VFileOpen(path, O_CREAT | O_RDWR);
