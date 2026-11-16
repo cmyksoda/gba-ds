@@ -3605,7 +3605,7 @@ static void snapshot_hiding_sprites_poke(const SpriteRule* hide, int n, const Sp
 	emu_state_load(&emu, st);
 	int16_t drop[2048];
 	while (emu_audio_read(&emu, drop, 1024) > 0) {}
-	memcpy(emu_fb_rw(&emu), raw, sizeof(raw));
+	emu_fb_set(&emu, raw);
 }
 
 /* Logo-only games: copy a recognised screen (THPS2 goal sheet) to the second
@@ -3614,11 +3614,12 @@ static void snapshot_hiding_sprites_poke(const SpriteRule* hide, int n, const Sp
  * cover the canvas (centred), and dimmed well back. */
 static bool frame_is_dark(Emu* e);
 /* One colour all over, nearly: a fade to black or to white, a blank screen. */
-static bool frame_is_flat(const uint32_t* fb) {
+static bool frame_is_flat(Emu* e, const uint32_t* fb) { /* (fb: a picture of its own; else the game's) */
 	long sum = 0, n = 0;
 	static int l[GBA_W * GBA_H / 7 + 1];
-	for (int i = 0; i < GBA_W * GBA_H; i += 7) {
-		uint32_t c = fb[i];
+	for (int i = 0, x = 0, y = 0; i < GBA_W * GBA_H; i += 7, x += 7) {
+		while (x >= GBA_W) x -= GBA_W, ++y;
+		uint32_t c = fb ? fb[i] : emu_pixel(e, x, y);
 		l[n] = (int) ((c & 0xFF) + ((c >> 8) & 0xFF) + ((c >> 16) & 0xFF));
 		sum += l[n++];
 	}
@@ -3690,7 +3691,7 @@ static void hud_make_backdrop(void) {
 			luma += (c & 0xFF) + ((c >> 8) & 0xFF) + ((c >> 16) & 0xFF);
 		}
 		long level = luma / SDL_max(drawn, 1) / 3;
-		bool good = drawn > GBA_W * GBA_H / 2 && level > 60 && !frame_is_flat(hudGrab);
+		bool good = drawn > GBA_W * GBA_H / 2 && level > 60 && !frame_is_flat(NULL, hudGrab);
 		/* after a fade, only once the brightness has stopped rising */
 		static long lastLevel;
 		if (hudSettle && good && labs(level - lastLevel) > 3) good = false;
@@ -4251,7 +4252,7 @@ static void hud_compose(void) {
 		for (int y = h->sign.y0; y <= h->sign.y1; ++y) {
 			for (int x = h->sign.x0; x <= h->sign.x1; ++x) {
 				uint32_t c = hudPx[y * GBA_W + x];
-				if ((c & 0xFFFFFF) != clear) emu_fb_rw(&emu)[y * GBA_W + x] = c;
+				if ((c & 0xFFFFFF) != clear) emu_fb_put(&emu, x, y, c);
 			}
 		}
 	}
@@ -4416,7 +4417,7 @@ static void hud_compose(void) {
 			}
 			if (nx < 0 || nx >= GBA_W || ny < 0 || ny >= GBA_H) continue;
 			if (toGame) {
-				emu_fb_rw(&emu)[ny * GBA_W + nx] = c; /* back onto the game picture */
+				emu_fb_put(&emu, nx, ny, c); /* back onto the game picture */
 				continue;
 			}
 			if (h->rows && y >= h->rows) continue; /* (hud.rows: the game draws the rest) */
@@ -4809,7 +4810,7 @@ static void update_hud(void) {
 			 * SA3-3) */
 			static uint32_t noHud[GBA_W * GBA_H];
 			snapshot_hiding_sprites(hudObjs, rule_count(hudObjs, 12), NULL, 0, noHud);
-			memcpy(emu_fb_rw(&emu), noHud, sizeof(noHud));
+			emu_fb_set(&emu, noHud);
 		}
 		else if (cardScore >= 0 && !hudBackValid) card_backdrop();
 		if (debug) fprintf(stderr, "frame %llu: title card %s\n", (unsigned long long) frameCount, card ? "up" : "gone");
@@ -4893,7 +4894,7 @@ static void update_hud(void) {
 	 * take the scene again (retried until its brightness settles) */
 	static int darkRun;
 	if (h->mapCnt) {
-		bool dark = frame_is_flat(emu_fb(&emu));
+		bool dark = frame_is_flat(&emu, NULL);
 		if (dark) {
 			++darkRun;
 		} else {
@@ -4912,7 +4913,7 @@ static void update_hud(void) {
 	/* (not while the game screen is blank between scenes: the second
 	 * screen stays as dark, or as white, as the fade left it) */
 	bool gone = !race && hudShown && !(h->keep[0].addr && memprobes_match(h->keep, 4, &emu)) &&
-	            !(h->mapCnt && frame_is_flat(emu_fb(&emu)));
+	            !(h->mapCnt && frame_is_flat(&emu, NULL));
 	goneFor = gone ? goneFor + 1 : 0;
 	if (goneFor >= 20) {
 		hudShown = false;
@@ -6541,8 +6542,9 @@ static bool liveOn;
 
 static bool frame_is_dark(Emu* e) {
 	int bright = 0, total = 0;
-	for (int i = 0; i < GBA_W * GBA_H; i += 7) {
-		uint32_t c = emu_pixel(e, i % GBA_W, i / GBA_W);
+	for (int i = 0, x = 0, y = 0; i < GBA_W * GBA_H; i += 7, x += 7) {
+		while (x >= GBA_W) x -= GBA_W, ++y;
+		uint32_t c = emu_pixel(e, x, y);
 		int lum = ((c & 0xFF) + ((c >> 8) & 0xFF) * 2 + ((c >> 16) & 0xFF)) >> 2;
 		bright += lum > 40;
 		++total;
@@ -6619,7 +6621,7 @@ static bool gameTexAll = true; /* upload the game's frame to every view next tim
 /* The game's picture to view i's texture: `shown`, XBGR8888, or (NULL) what mGBA drew. */
 static void game_upload(int i, const uint32_t* shown) {
 #ifdef COLOR_16_BIT
-	if (!shown && !emu_fb_written(&emu) && gameTex16[i] && !ui_color_correct_on()) {
+	if (!shown && gameTex16[i] && !ui_color_correct_on()) {
 		ui_update_texture(gameTex16[i], emu.fb16, EMU_FB16_STRIDE * 2);
 		gameIs16[i] = true;
 		return;

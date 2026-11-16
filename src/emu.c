@@ -440,7 +440,7 @@ void emu_ctr_unload(const struct mCore* core);
 
 #ifdef COLOR_16_BIT
 /* RGB565 as mGBA's 32-bit XBGR8888; every bit makes the same bits, so one table per byte is enough. */
-static uint32_t expandLo[256], expandHi[256];
+uint32_t emuExpandLo[256], emuExpandHi[256];
 
 static uint32_t expand_one(unsigned c) {
 	unsigned r = c >> 11, g = (c >> 6) & 0x1F, b = c & 0x1F;
@@ -450,7 +450,7 @@ static uint32_t expand_one(unsigned c) {
 static void expand_tables(void) {
 	static bool made;
 	if (made) return;
-	for (unsigned i = 0; i < 256; ++i) expandLo[i] = expand_one(i), expandHi[i] = expand_one(i << 8);
+	for (unsigned i = 0; i < 256; ++i) emuExpandLo[i] = expand_one(i), emuExpandHi[i] = expand_one(i << 8);
 	made = true;
 }
 
@@ -458,18 +458,25 @@ void emu_expand565_row(uint32_t* dst, const uint16_t* src, int n) {
 	const uint32_t* pairs = (const uint32_t*) src; /* (rows start on a word, n is even) */
 	for (int x = 0; x < n; x += 2) {
 		uint32_t w = pairs[x >> 1];
-		dst[x] = expandHi[w >> 8 & 0xFF] | expandLo[w & 0xFF];
-		dst[x + 1] = expandHi[w >> 24] | expandLo[w >> 16 & 0xFF];
+		dst[x] = emuExpandHi[w >> 8 & 0xFF] | emuExpandLo[w & 0xFF];
+		dst[x + 1] = emuExpandHi[w >> 24] | emuExpandLo[w >> 16 & 0xFF];
 	}
 }
 
-uint32_t emu_expand565_one(uint16_t c) {
-	expand_tables();
-	return expandHi[c >> 8] | expandLo[c & 0xFF];
-}
 
 void emu_fb_sync(Emu* e) {
 	for (int y = 0; y < GBA_H; ++y) emu_expand565_row(&e->fb[y * GBA_W], &e->fb16[y * EMU_FB16_STRIDE], GBA_W);
+	e->fbStale = false;
+}
+
+void emu_fb_set(Emu* e, const uint32_t* px) {
+	memcpy(e->fb, px, GBA_W * GBA_H * sizeof(uint32_t));
+	for (int y = 0; y < GBA_H; ++y) {
+		for (int x = 0; x < GBA_W; ++x) {
+			uint32_t c = px[y * GBA_W + x];
+			e->fb16[y * EMU_FB16_STRIDE + x] = (c & 0xF8) << 8 | (c >> 5 & 0x7C0) | (c >> 19 & 0x1F);
+		}
+	}
 	e->fbStale = false;
 }
 
@@ -624,22 +631,14 @@ uint32_t emu_video_wait_us(void) {
 
 #ifdef GBADS_PICDUMP
 /* TEST: every 100th frame's picture (and the HUD's) at 5 bits a channel into /3ds/gba-ds/pd/; bit 15: a color between 5-bit steps (32-bit builds) */
-static void pic_put(const char* code, unsigned long frame, const char* tag, const uint32_t* p32, const uint16_t* p16) {
+static void pic_put(const char* code, unsigned long frame, const char* tag, const uint32_t* p32) {
 	static uint16_t out[GBA_W * GBA_H];
 	for (int y = 0; y < GBA_H; ++y) {
 		for (int x = 0; x < GBA_W; ++x) {
-#ifdef COLOR_16_BIT
-			if (p16) {
-				unsigned c = p16[y * EMU_FB16_STRIDE + x];
-				out[y * GBA_W + x] = (c >> 11) | (c >> 6 & 0x1F) << 5 | (c & 0x1F) << 10;
-			} else
-#endif
-			{
-				uint32_t p = p32[y * GBA_W + x];
-				unsigned r = p >> 3 & 0x1F, g = p >> 11 & 0x1F, b = p >> 19 & 0x1F;
-				bool between = (p & 0xFFFFFF) != ((r << 3 | r >> 2) | (g << 3 | g >> 2) << 8 | (b << 3 | b >> 2) << 16);
-				out[y * GBA_W + x] = r | g << 5 | b << 10 | (between ? 0x8000 : 0);
-			}
+			uint32_t p = p32[y * GBA_W + x];
+			unsigned r = p >> 3 & 0x1F, g = p >> 11 & 0x1F, b = p >> 19 & 0x1F;
+			bool between = (p & 0xFFFFFF) != ((r << 3 | r >> 2) | (g << 3 | g >> 2) << 8 | (b << 3 | b >> 2) << 16);
+			out[y * GBA_W + x] = r | g << 5 | b << 10 | (between ? 0x8000 : 0);
 		}
 	}
 	char name[96];
@@ -651,30 +650,15 @@ static void pic_put(const char* code, unsigned long frame, const char* tag, cons
 static const uint32_t* pic_hud(void);
 static void pic_dump(Emu* e) {
 	if (!e->audio || e->frames % 100) return;
-#ifdef COLOR_16_BIT
-	pic_put(e->gameCode, e->frames, "", NULL, e->fb16);
-#else
-	pic_put(e->gameCode, e->frames, "", e->fb, NULL);
-#endif
+	pic_put(e->gameCode, e->frames, "", emu_fb(e));
 	const uint32_t* h = pic_hud();
-	if (h) pic_put(e->gameCode, e->frames, "-h", h, NULL);
+	if (h) pic_put(e->gameCode, e->frames, "-h", h);
 }
 #endif
 
 static void run_frame(Emu* e, uint32_t keys, bool draws) {
 	if (emu_cancelled(e)) return;
 	++e->frames;
-#ifdef COLOR_16_BIT
-	if (e->fbWritten) {
-		for (int y = 0; y < GBA_H; ++y) {
-			for (int x = 0; x < GBA_W; ++x) {
-				uint32_t p = e->fb[y * GBA_W + x];
-				e->fb16[y * EMU_FB16_STRIDE + x] = (p & 0xF8) << 8 | (p >> 5 & 0x7C0) | (p >> 19 & 0x1F);
-			}
-		}
-		e->fbWritten = false;
-	}
-#endif
 	e->core->setKeys(e->core, keys);
 	e->core->runFrame(e->core);
 	if (e->core->videoLogger) {
