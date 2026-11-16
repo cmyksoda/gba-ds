@@ -322,6 +322,18 @@ static void flush_code(void* start, void* end) {
 	}
 }
 
+int host_core_now(void) {
+	return isEmulator() ? 0 : (int) svcGetProcessorID(); /* (Azahar answers with a pointer) */
+}
+
+void host_icache_invalidate(void) {
+	const char* on = getenv("GBADS_ARMGBA_ICACHE");
+	if (isEmulator() || (on && atoi(on) == 0)) {
+		return;
+	}
+	ctrInvalidateICacheKernel();
+}
+
 uint64_t renderThreadHostTicks(void) {
 	return svcGetSystemTick();
 }
