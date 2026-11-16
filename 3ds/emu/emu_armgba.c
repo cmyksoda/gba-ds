@@ -948,8 +948,7 @@ bool emu_cancelled(const Emu* e) {
 	return e->cancel && *e->cancel;
 }
 
-
-/* Each bit of a colour widens on its own, so a colour is its low byte's entry ORed with its high byte's. */
+/* Each bit of a color widens on its own, so a color is its low byte's entry ORed with its high byte's. */
 static uint32_t widenLow[256], widenHigh[256];
 static bool widenReady;
 static void widen_tables(void) {
