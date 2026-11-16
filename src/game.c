@@ -6630,6 +6630,10 @@ static void game_upload(int i, const uint32_t* shown) {
 		return;
 	}
 	gameIs16[i] = false;
+	if (!shown && ui_color_correct_on()) {
+		ui_update_texture_565_cc(gameTex[i], emu.fb16, EMU_FB16_STRIDE);
+		return;
+	}
 #endif
 	ui_update_texture(gameTex[i], shown ? shown : emu_fb(&emu), GBA_W * 4);
 }

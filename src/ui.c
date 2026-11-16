@@ -1329,13 +1329,13 @@ uint32_t ui_color_correct(uint32_t p) {
 }
 
 /* The texture's rows y0 to y1 - 1, or all of it (y1 <= y0), from px, which starts at its first row. */
-static void update_texture_rows(SDL_Texture* t, const void* px, int pitch, int y0, int y1) {
+static void update_texture_rows(SDL_Texture* t, const void* px, int pitch, int y0, int y1, bool cc) {
 	if (!t) return;
 	int w, h;
 	bool whole = y1 <= y0;
 	if (SDL_QueryTexture(t, NULL, NULL, &w, &h) != 0) return;
 	if (whole) y0 = 0, y1 = h;
-	if (ccOn && pitch >= w * 4) {
+	if (cc && ccOn && pitch >= w * 4) {
 		/* (through the colour correction's table, alpha kept) */
 		static uint32_t* buf;
 		static size_t bufN;
@@ -1372,12 +1372,25 @@ static void update_texture_rows(SDL_Texture* t, const void* px, int pitch, int y
 }
 
 void ui_update_texture(SDL_Texture* t, const void* px, int pitch) {
-	update_texture_rows(t, px, pitch, 0, 0);
+	update_texture_rows(t, px, pitch, 0, 0, true);
 }
 
 void ui_update_texture_rows(SDL_Texture* t, const void* px, int pitch, int y0, int y1) {
-	update_texture_rows(t, px, pitch, y0, y1);
+	update_texture_rows(t, px, pitch, y0, y1, true);
 }
+
+#ifdef COLOR_16_BIT
+void ui_update_texture_565_cc(SDL_Texture* t, const uint16_t* px, int stride) {
+	static uint32_t buf[240 * 160];
+	for (int y = 0; y < 160; ++y) {
+		for (int x = 0; x < 240; ++x) {
+			unsigned c = px[y * stride + x];
+			buf[y * 240 + x] = ccLut[(c >> 11) | (c >> 6 & 31) << 5 | (c & 31) << 10];
+		}
+	}
+	update_texture_rows(t, buf, 240 * 4, 0, 0, false);
+}
+#endif
 
 /* Retained views (Android: both screens). A view's draw calls are recorded
  * instead of drawn, and at ui_present they're replayed only if they differ
