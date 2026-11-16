@@ -27,6 +27,10 @@ int host_side_core(void);
  * frames), once; the side core after. */
 #define HOST_CORE_AUTO (-100)
 void host_next_thread_core(int core);
+/* The calling thread's core, and the instruction cache of that core emptied (each core has its own, and code another core
+ * wrote is what it may still hold from before: armgba_icache=0 turns the emptying off, to compare; false then). */
+int host_core_now(void);
+bool host_icache_invalidate(void);
 /* The name the next thread made is listed under (host_threads_describe), once. */
 void host_next_thread_name(const char* name);
 /* The bench: a job begins (ended threads are forgotten) / one line with the core each thread found itself on and

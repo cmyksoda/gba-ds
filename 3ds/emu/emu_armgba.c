@@ -44,6 +44,9 @@ typedef struct ArmCore {
 	char* savePath;
 	int saveQuiet;
 	bool savePending;
+#ifdef __3DS__
+	int codeCore; /* the core that last wrote this machine's code: its shared routines are written where it is opened */
+#endif
 	/* armgba_stats: the lines' interval (0: none) and the counters at the last one (3DS, the game's core) */
 	unsigned statsEvery;
 	struct JitSeen* seen;
@@ -859,6 +862,9 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 		if (c->savePath) save_read(c);
 		if (c->savePath && (save_mode() & 1)) saver_start(); /* (its log lines here, not in a frame) */
 	}
+#ifdef __3DS__
+	c->codeCore = host_core_now();
+#endif
 	gbaReset(gba, true);
 	gba->savedata.dirty = false;
 #ifdef __3DS__
@@ -925,6 +931,16 @@ static void run_frame(Emu* e, uint32_t keys, bool draw) {
 	if (emu_cancelled(e)) return;
 	ArmCore* c = AC(e);
 	struct GBA* gba = c->gba;
+#ifdef __3DS__
+	/* The copy's thread runs the routines the game's thread wrote at open; its core's instruction cache may still hold the
+	 * last game's code at those addresses. */
+	int const core = host_core_now();
+	if (core != c->codeCore) {
+		bool const emptied = host_icache_invalidate();
+		logLine("instruction cache of core %d %s (the code was written on core %d)", core, emptied ? "emptied" : "left alone", c->codeCore);
+		c->codeCore = core;
+	}
+#endif
 	++e->frames;
 	gbaSetKeys(gba, (uint16_t) keys);
 	videoDrawSkipped = !draw;
