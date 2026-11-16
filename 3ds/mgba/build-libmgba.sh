@@ -27,8 +27,8 @@
 # gba-stall-closed-form.patch: the ROM prefetch model's loop (GBAMemoryStall) as arithmetic and a small table, with the
 # result unchanged.
 # gba-jump-inline.patch: the usual jump (same region, no idle loop) is checked inside the instruction that jumps, no call.
-# gba-audio-fast.patch: the sound path without library calls per sample or per event (the noise channel's tables were
-# copied onto the stack on every call, a memset and a division per event on a CPU with no divide); the same samples.
+# gba-audio-fast.patch: the sound path without the noise channel's tables copied onto the stack on every call, or a
+# memset and a division per event (the 3DS's CPU has no divide); the same samples.
 # gba-audio-silent.patch: the sampling loop makes the PSG's output once per run of equal channel samples and skips the PSG's
 # run when no channel is playing.
 set -euo pipefail

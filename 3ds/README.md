@@ -45,8 +45,8 @@ file and these changes (`mgba/build-libmgba.sh`):
   bit-identical to unpatched mGBA's.
 - `mgba/gba-stall-closed-form.patch`, `gba-jump-inline.patch`, `gba-audio-fast.patch`,
   `gba-audio-silent.patch`: the same kind of change again (the ROM prefetch model's loop as arithmetic,
-  the usual jump checked inside the jumping instruction, no memcpy, memset or division per sound
-  sample or event, the PSG's output made once per run of equal samples). Same pictures, RAM, states
+  the usual jump checked inside the jumping instruction, no memset, division or table copy per sound
+  event, the PSG's output made once per run of equal samples). Same pictures, RAM, states
   and sound samples as before.
 - `mgba/video-wake.patch`: `video_wake` in `gba-ds.cfg` (0, 1, 3, 7, 15, 31 or 63; 15 as before)
   is how often mGBA's drawing thread is woken, once per N+1 lines.
