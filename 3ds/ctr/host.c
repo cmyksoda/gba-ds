@@ -405,6 +405,14 @@ static uint8_t* top_alloc_room(size_t size, size_t room) {
 	return p;
 }
 
+void* host_linear_alloc(size_t size) {
+	return linearMemAlign(size, 0x80);
+}
+
+void host_linear_free(void* p) {
+	linearFree(p);
+}
+
 uint8_t* host_top_alloc(size_t size) {
 	size = (size + 0xFFF) & ~(size_t) 0xFFF;
 	uint8_t* p = top_alloc_room(size, HEAP_ROOM);

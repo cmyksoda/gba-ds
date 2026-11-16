@@ -429,12 +429,62 @@ uint8_t* emu_rom_read_played(const char* path, size_t* size, int* patch, char* p
 }
 
 #ifdef __3DS__
+#include "host.h"
 /* 3ds/ctr/emu_ctr.c: one copy of the ROM in memory for every copy of the game */
 bool emu_ctr_load(struct mCore* core, const char* path);
 void emu_ctr_unload(const struct mCore* core);
 #define load_rom_file emu_ctr_load
 #else
 #define load_rom_file mCoreLoadFile
+#endif
+
+#ifdef COLOR_16_BIT
+/* RGB565 as mGBA's 32-bit XBGR8888; every bit makes the same bits, so one table per byte is enough. */
+uint32_t emuExpandLo[256], emuExpandHi[256];
+
+static uint32_t expand_one(unsigned c) {
+	unsigned r = c >> 11, g = (c >> 6) & 0x1F, b = c & 0x1F;
+	return (r << 3 | r >> 2) | (g << 3 | g >> 2) << 8 | (b << 3 | b >> 2) << 16;
+}
+
+static void expand_tables(void) {
+	static bool made;
+	if (made) return;
+	for (unsigned i = 0; i < 256; ++i) emuExpandLo[i] = expand_one(i), emuExpandHi[i] = expand_one(i << 8);
+	made = true;
+}
+
+typedef uint32_t __attribute__((may_alias)) PixelPair; /* (-flto: the pixels are written as uint16_t elsewhere) */
+void emu_expand565_row(uint32_t* dst, const uint16_t* src, int n) {
+	const PixelPair* pairs = (const PixelPair*) src; /* (rows start on a word, n is even) */
+	for (int x = 0; x < n; x += 2) {
+		uint32_t w = pairs[x >> 1];
+		dst[x] = emuExpandHi[w >> 8 & 0xFF] | emuExpandLo[w & 0xFF];
+		dst[x + 1] = emuExpandHi[w >> 24] | emuExpandLo[w >> 16 & 0xFF];
+	}
+}
+
+
+void emu_fb_sync(Emu* e) {
+	for (int y = 0; y < GBA_H; ++y) emu_expand565_row(&e->fb[y * GBA_W], &e->fb16[y * EMU_FB16_STRIDE], GBA_W);
+	e->fbStale = false;
+}
+
+void emu_fb_set(Emu* e, const uint32_t* px) {
+	memcpy(e->fb, px, GBA_W * GBA_H * sizeof(uint32_t));
+	for (int y = 0; y < GBA_H; ++y) {
+		for (int x = 0; x < GBA_W; ++x) {
+			uint32_t c = px[y * GBA_W + x];
+			e->fb16[y * EMU_FB16_STRIDE + x] = (c & 0xF8) << 8 | (c >> 5 & 0x7C0) | (c >> 19 & 0x1F);
+		}
+	}
+	e->fbStale = false;
+}
+
+static bool pictureLinear;
+void emu_picture_linear(bool on) {
+	pictureLinear = on;
+}
 #endif
 
 static bool threadedVideo;
@@ -475,7 +525,19 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 	mCoreLoadConfig(e->core);
 
 	e->fb = calloc(GBA_W * GBA_H, sizeof(uint32_t));
+#ifdef COLOR_16_BIT
+	expand_tables();
+	size_t fb16Bytes = EMU_FB16_STRIDE * GBA_H * sizeof(uint16_t);
+#ifdef __3DS__
+	e->fb16Linear = pictureLinear;
+	e->fb16 = pictureLinear ? host_linear_alloc(fb16Bytes) : NULL;
+#endif
+	if (!e->fb16) e->fb16Linear = false, e->fb16 = malloc(fb16Bytes);
+	if (e->fb16) memset(e->fb16, 0, fb16Bytes);
+	e->core->setVideoBuffer(e->core, (mColor*) e->fb16, EMU_FB16_STRIDE);
+#else
 	e->core->setVideoBuffer(e->core, (mColor*) e->fb, GBA_W);
+#endif
 	e->audio = audio;
 	if (audio) {
 		e->core->setAudioBufferSize(e->core, 2048);
@@ -549,6 +611,14 @@ void emu_close(Emu* e) {
 	}
 	free(e->fb);
 	e->fb = NULL;
+#ifdef COLOR_16_BIT
+#ifdef __3DS__
+	if (e->fb16Linear) host_linear_free(e->fb16);
+	else
+#endif
+		free(e->fb16);
+	e->fb16 = NULL;
+#endif
 }
 
 bool emu_cancelled(const Emu* e) {
@@ -560,7 +630,48 @@ uint32_t emu_video_wait_us(void) {
 	return __atomic_load_n(&videoWaitUs, __ATOMIC_RELAXED);
 }
 
-void emu_frame(Emu* e, uint32_t keys) {
+#ifdef GBADS_PICDUMP
+/* TEST: every 100th frame's picture (and the HUD's) at 5 bits a channel into /3ds/gba-ds/pd/; bit 15: a color between 5-bit steps (32-bit builds) */
+static void pic_put(const char* code, unsigned long frame, const char* tag, const uint32_t* p32) {
+	static uint16_t out[GBA_W * GBA_H];
+	for (int y = 0; y < GBA_H; ++y) {
+		for (int x = 0; x < GBA_W; ++x) {
+			uint32_t p = p32[y * GBA_W + x];
+			unsigned r = p >> 3 & 0x1F, g = p >> 11 & 0x1F, b = p >> 19 & 0x1F;
+			bool between = (p & 0xFFFFFF) != ((r << 3 | r >> 2) | (g << 3 | g >> 2) << 8 | (b << 3 | b >> 2) << 16);
+			out[y * GBA_W + x] = r | g << 5 | b << 10 | (between ? 0x8000 : 0);
+		}
+	}
+	char name[96];
+	mkdir("/3ds/gba-ds/pd", 0777);
+	snprintf(name, sizeof(name), "/3ds/gba-ds/pd/%s-%06lu%s.bin", code, frame, tag);
+	FILE* f = fopen(name, "wb");
+	if (f) fwrite(out, sizeof(out), 1, f), fclose(f);
+}
+/* TEST: the picture as handed to the GPU, after the HUD painted over it (shown: XBGR8888, or NULL for what mGBA drew) */
+void emu_pic_dump_shown(Emu* e, const uint32_t* shown) {
+	if (!e->audio || e->frames % 100) return;
+#ifdef COLOR_16_BIT
+	static uint32_t px[GBA_W * GBA_H];
+	if (!shown) {
+		for (int y = 0; y < GBA_H; ++y) emu_expand565_row(&px[y * GBA_W], &e->fb16[y * EMU_FB16_STRIDE], GBA_W);
+		shown = px;
+	}
+#else
+	if (!shown) shown = e->fb;
+#endif
+	pic_put(e->gameCode, e->frames, "-s", shown);
+}
+static const uint32_t* pic_hud(void);
+static void pic_dump(Emu* e) {
+	if (!e->audio || e->frames % 100) return;
+	pic_put(e->gameCode, e->frames, "", emu_fb(e));
+	const uint32_t* h = pic_hud();
+	if (h) pic_put(e->gameCode, e->frames, "-h", h);
+}
+#endif
+
+static void run_frame(Emu* e, uint32_t keys, bool draws) {
 	if (emu_cancelled(e)) return;
 	++e->frames;
 	e->core->setKeys(e->core, keys);
@@ -575,12 +686,22 @@ void emu_frame(Emu* e, uint32_t keys) {
 		clock_gettime(CLOCK_MONOTONIC, &t1);
 		__atomic_fetch_add(&videoWaitUs, (uint32_t) ((t1.tv_sec - t0.tv_sec) * 1000000 + (t1.tv_nsec - t0.tv_nsec) / 1000), __ATOMIC_RELAXED);
 	}
+#ifdef COLOR_16_BIT
+	if (draws) e->fbStale = true;
+#endif
+#ifdef GBADS_PICDUMP
+	if (draws) pic_dump(e);
+#endif
 	if (!e->audio) {
 		struct mAudioBuffer* ab = e->core->getAudioBuffer(e->core);
 		if (ab) {
 			mAudioBufferClear(ab);
 		}
 	}
+}
+
+void emu_frame(Emu* e, uint32_t keys) {
+	run_frame(e, keys, true);
 }
 
 /* A frame run without drawing it (the renderer still gets every write to
@@ -591,7 +712,7 @@ void emu_frame_blind(Emu* e, uint32_t keys) {
 	struct GBA* gba = e->core->board;
 	gba->video.frameskipCounter = 1;
 	++e->blindFrames;
-	emu_frame(e, keys);
+	run_frame(e, keys, false);
 	gba->video.frameskipCounter = 0;
 }
 
@@ -979,6 +1100,9 @@ typedef struct {
 	struct GBA* gba;
 	bool grabbing, grabbed;
 	uint32_t* hudBuf;
+#ifdef COLOR_16_BIT
+	uint32_t* dst; /* where the lines the HUD renderer draws (into hud16) go as XBGR8888: hudBuf or the grab's */
+#endif
 	uint16_t (*writeVideoRegister)(struct GBAVideoRenderer*, uint32_t, uint16_t);
 	void (*writeVRAM)(struct GBAVideoRenderer*, uint32_t);
 	void (*writePalette)(struct GBAVideoRenderer*, uint32_t, uint16_t);
@@ -1084,6 +1208,13 @@ static bool bg_line_has_pal(int bg, int y, int pal) {
 	return false;
 }
 
+#ifdef COLOR_16_BIT
+/* the grab frame draws into a buffer of its own: mGBA leaves unchanged lines alone, so hud16 must keep the HUD's picture */
+static uint16_t hud16[GBA_W * GBA_H], grab16[GBA_W * GBA_H];
+#define HUD_OUT(p) (split.dst = (p), split.hud.outputBuffer = (p) == split.hudBuf ? hud16 : grab16)
+#else
+#define HUD_OUT(p) (split.hud.outputBuffer = (mColor*) (p))
+#endif
 static int copyAbove; /* emu_hud_copy_above */
 static int splitRows; /* emu_hud_rows */
 static bool splitCopying; /* emu_hud_copy: the HUD's layers left on the game too */
@@ -1149,7 +1280,7 @@ static void split_draw(struct GBAVideoRenderer* r, int y) {
 			if (split.grabCnt) split.grabMask = bgs_with_cnt(split.grabCnt);
 			/* this frame: the grab layers into grabBuf, no sprites */
 			split.grabbing = true;
-			split.hud.outputBuffer = (mColor*) split.grabBuf;
+			HUD_OUT(split.grabBuf);
 			split_layers(split.grabMask, false);
 		}
 		if (bandOn && !split.prioBelow) {
@@ -1187,6 +1318,9 @@ static void split_draw(struct GBAVideoRenderer* r, int y) {
 			}
 		}
 		filtered_draw_scanline(&split.hud.d, y);
+#ifdef COLOR_16_BIT
+		emu_expand565_row(&split.dst[y * GBA_W], &split.hud.outputBuffer[y * GBA_W], GBA_W);
+#endif
 	}
 	split.drawScanline(r, y);
 }
@@ -1198,7 +1332,7 @@ static void split_finish(struct GBAVideoRenderer* r) {
 		split.grabbing = false;
 		split.grabBuf = NULL;
 		split.grabbed = true;
-		split.hud.outputBuffer = (mColor*) split.hudBuf;
+		HUD_OUT(split.hudBuf);
 		split_layers(split.bgMask, split.nObjs > 0 || split.nKeep > 0);
 	}
 }
@@ -1238,8 +1372,13 @@ bool emu_hud_split(Emu* e, bool on, unsigned bgMask, const SpriteRule* objs, int
 		if (!on) return true;
 		memset(&split, 0, sizeof(split));
 		GBAVideoSoftwareRendererCreate(&split.hud);
+#ifdef COLOR_16_BIT
+		split.hud.outputBuffer = hud16;
+#else
 		split.hud.outputBuffer = (mColor*) hud;
+#endif
 		split.hudBuf = hud;
+		HUD_OUT(hud);
 		split.hud.outputBufferStride = GBA_W;
 		struct GBAVideoRenderer* h = &split.hud.d;
 		h->palette = gba->video.palette;
@@ -1351,7 +1490,11 @@ void emu_hud_game_reg(uint32_t addr, uint16_t bits) {
 
 uint32_t emu_hud_clear(void) {
 	/* exactly what the HUD renderer writes for its backdrop */
+#ifdef COLOR_16_BIT
+	return split.installed ? emu_expand565_one(split.hud.normalPalette[0]) : 0xFF00FF;
+#else
 	return split.installed ? (uint32_t) split.hud.normalPalette[0] & 0xFFFFFF : 0xFF00FF;
+#endif
 }
 
 void emu_hud_by_priority(int prioBelow) {
@@ -1399,6 +1542,12 @@ void emu_oam_write(Emu* e, const uint16_t* src) {
 const uint16_t* emu_vram(Emu* e) {
 	return ((struct GBA*) e->core->board)->video.vram;
 }
+
+#ifdef GBADS_PICDUMP
+static const uint32_t* pic_hud(void) {
+	return split.installed && split.active ? split.hudBuf : NULL;
+}
+#endif
 
 void emu_hud_grab(Emu* e, unsigned bgMask, uint32_t* buf) {
 	(void) e;

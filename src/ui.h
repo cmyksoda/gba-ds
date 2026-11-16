@@ -144,6 +144,10 @@ void ui_clip(int screen, const SDL_Rect* clip);
 void ui_update_texture(SDL_Texture* t, const void* px, int pitch);
 /* The same for rows y0 to y1 - 1 (px starts at the texture's first row). */
 void ui_update_texture_rows(SDL_Texture* t, const void* px, int pitch, int y0, int y1);
+#ifdef COLOR_16_BIT
+/* A whole 240x160 RGB565 picture (px, `stride` pixels a row) through the color correction into a 32-bit texture. */
+void ui_update_texture_565_cc(SDL_Texture* t, const uint16_t* px, int stride);
+#endif
 /* Colour correction for everything given to ui_update_texture (the game's
  * pictures, ABGR8888): the GBA's own screen, as mGBA's GBA Color shader
  * (sRGB profile, Darken Screen 0.5) draws it. */
@@ -154,6 +158,8 @@ void ui_color_correction(bool on);
 void ui_shader(int sh);
 /* One colour through it (for tests and the second screen's own grey) */
 uint32_t ui_color_correct(uint32_t abgr);
+/* whether pictures are going through that table (a picture handed over as RGB565 can't) */
+bool ui_color_correct_on(void);
 /* Filled box with rounded corners (radius in pixels). */
 void ui_fill_round(int screen, SDL_Rect local, SDL_Color c, int radius);
 /* Text in Jost (textfont.h: TF_BOLD for labels and headings, TF_BODY for

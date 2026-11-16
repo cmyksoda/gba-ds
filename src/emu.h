@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #define GBA_W 240
 #define GBA_H 160
@@ -44,7 +45,13 @@ typedef struct SpriteRule {
 
 typedef struct Emu {
 	struct mCore* core;
-	uint32_t* fb; /* GBA_W * GBA_H, mGBA native 32-bit color (XBGR8888, i.e. bytes R,G,B,X) */
+	uint32_t* fb; /* GBA_W * GBA_H, mGBA native 32-bit color (XBGR8888, i.e. bytes R,G,B,X); read it with emu_fb() */
+#ifdef COLOR_16_BIT
+	/* libmgba with 16-bit pixels (RGB565): mGBA draws into fb16; fb is made from it by emu_fb() */
+	uint16_t* fb16;
+	bool fb16Linear; /* in linear memory: the GPU can read it */
+	bool fbStale;    /* fb16 has a newer picture than fb */
+#endif
 	char gameCode[5];
 	uint32_t romCrc; /* the ROM's CRC32, as loaded, patched if it was (profile_dump) */
 	int patch; /* PatchResult (patch.h): a patch file beside the ROM, and whether it was applied (GEN-9) */
@@ -59,6 +66,60 @@ typedef struct Emu {
 	 * once; emu_cancelled says so, so it keeps nothing of that run */
 	volatile bool* cancel;
 } Emu;
+
+#ifdef COLOR_16_BIT
+#define EMU_FB16_STRIDE 256 /* a GPU texture's width: the picture goes to the GPU as it is */
+/* fb made from fb16: the 8-bit values mGBA's 32-bit pixels have for the same colors (except blends, which land between steps there) */
+void emu_fb_sync(Emu* e);
+/* n pixels of RGB565 as XBGR8888 (the same colors as emu_fb's) */
+void emu_expand565_row(uint32_t* dst, const uint16_t* src, int n);
+extern uint32_t emuExpandLo[256], emuExpandHi[256];
+static inline uint32_t emu_expand565_one(uint16_t c) {
+	return emuExpandHi[c >> 8] | emuExpandLo[c & 0xFF];
+}
+static inline uint32_t* emu_fb(Emu* e) {
+	if (e->fbStale) emu_fb_sync(e);
+	return e->fb;
+}
+/* Painting over the picture goes to fb16 too (mGBA redraws only changed lines, so it starts the next frame from this one). */
+static inline void emu_fb_put(Emu* e, int x, int y, uint32_t c) {
+	e->fb16[y * EMU_FB16_STRIDE + x] = (c & 0xF8) << 8 | (c >> 5 & 0x7C0) | (c >> 19 & 0x1F);
+	if (!e->fbStale) e->fb[y * GBA_W + x] = c;
+}
+/* The whole picture put back (GBA_W * GBA_H of XBGR8888). */
+void emu_fb_set(Emu* e, const uint32_t* px);
+/* One pixel of the picture as XBGR8888, without making all of fb. */
+static inline uint32_t emu_pixel(Emu* e, int x, int y) {
+	return e->fbStale ? emu_expand565_one(e->fb16[y * EMU_FB16_STRIDE + x]) : e->fb[y * GBA_W + x];
+}
+/* The same by pixel number (row after row, GBA_W to a row). */
+static inline uint32_t emu_pixel_n(Emu* e, int i) {
+	return e->fbStale ? emu_expand565_one(e->fb16[i / GBA_W * EMU_FB16_STRIDE + i % GBA_W]) : e->fb[i];
+}
+/* The next core opened has fb16 in linear memory, for the GPU's transfer. */
+void emu_picture_linear(bool on);
+
+#else
+static inline uint32_t* emu_fb(Emu* e) {
+	return e->fb;
+}
+static inline uint32_t emu_pixel(Emu* e, int x, int y) {
+	return e->fb[y * GBA_W + x];
+}
+static inline uint32_t emu_pixel_n(Emu* e, int i) {
+	return e->fb[i];
+}
+static inline void emu_fb_put(Emu* e, int x, int y, uint32_t c) {
+	e->fb[y * GBA_W + x] = c;
+}
+static inline void emu_fb_set(Emu* e, const uint32_t* px) {
+	memcpy(e->fb, px, GBA_W * GBA_H * sizeof(uint32_t));
+}
+#endif
+
+#ifdef GBADS_PICDUMP
+void emu_pic_dump_shown(Emu* e, const uint32_t* shown);
+#endif
 
 /* savePath may be NULL (no battery save attached). */
 bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio);
