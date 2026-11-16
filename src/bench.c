@@ -184,7 +184,7 @@ static uint32_t fnv_memory(Emu* e, uint32_t h, uint32_t base, uint32_t size) {
 
 void bench_check(Emu* e, uint64_t frame) {
 	if (!active || checkEvery <= 0 || frame % (uint64_t) checkEvery) return;
-	uint32_t pic = fnv_words(2166136261u, e->fb, 240 * 160);
+	uint32_t pic = fnv_words(2166136261u, emu_fb(e), 240 * 160);
 	uint32_t ram = fnv_memory(e, fnv_memory(e, 2166136261u, 0x02000000, 0x40000), 0x03000000, 0x8000);
 	uint32_t vid = fnv_memory(e, fnv_memory(e, fnv_memory(e, 2166136261u, 0x05000000, 0x400), 0x06000000, 0x18000), 0x07000000, 0x400);
 	char line[160];
