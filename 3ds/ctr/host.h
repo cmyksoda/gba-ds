@@ -63,6 +63,8 @@ int host_read_dir(const char* path, HostEntry** out);
 bool host_read_head(const char* path, void* out, size_t n);
 /* A bench build: a job's results to the PC (a LOG_URL build) as bench-TAG-WHAT. */
 void host_bench_report(const char* path, const char* what);
+/* TEST ONLY (a SLOWSD=1 build): the SD card freezes on a schedule (slow-sd.txt) while on. */
+void host_slow_sd(bool on);
 /* Before the app exits. */
 void jitHostRestoreMemory(void);
 

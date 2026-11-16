@@ -414,7 +414,13 @@ bool bench_run(Config* cfg) {
 #ifdef __3DS__
 		host_threads_job_start();
 #endif
+#ifdef GBADS_SLOW_SD
+		host_slow_sd(true);
+#endif
 		game_run(cfg, cfg->rom, false);
+#ifdef GBADS_SLOW_SD
+		host_slow_sd(false);
+#endif
 		/* (the script's end quits the game: the next job; a quit before it ends the bench) */
 		if (ui_ticks() >= (uint64_t) cfg->quitAfter) uiQuit = 0;
 		threads_line();

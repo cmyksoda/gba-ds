@@ -78,6 +78,67 @@ void logLine(const char* format, ...) {
 	fputc('\n', stderr);
 }
 
+#ifdef GBADS_SLOW_SD
+/* TEST ONLY (make SLOWSD=1): sdmc:/3ds/gba-ds/slow-sd.txt "PERIOD STALL" (ms) freezes the SD card for the first STALL ms
+ * of every PERIOD while a bench job plays: writes, opens and small reads wait it out, as a real card's do. */
+#include <reent.h>
+static struct {
+	u64 start;
+	u32 period, stall;
+	volatile bool armed;
+	u32 gameThread;
+} slowSd;
+static u32 thread_id(void) {
+	u32 id = 0;
+	svcGetThreadId(&id, CUR_THREAD_HANDLE);
+	return id;
+}
+
+static __thread bool inSlowHook;
+static int slowSdSkipFd = -1; /* (a file that isn't on the card: the log's ring, once it is one) */
+
+static void slow_sd_wait(const char* op, int fd) {
+	if (!slowSd.armed || inSlowHook || fd < 0 || fd == slowSdSkipFd) return;
+	u64 into = (osGetTime() - slowSd.start) % slowSd.period;
+	if (into >= slowSd.stall) return;
+	inSlowHook = true;
+	u64 t0 = osGetTime();
+	svcSleepThread((s64) (slowSd.stall - into) * 1000000);
+	logLine("slow sd: %s waited %u ms (%s thread)", op, (unsigned) (osGetTime() - t0),
+	        thread_id() == slowSd.gameThread ? "game" : "other");
+	inSlowHook = false;
+}
+
+void host_slow_sd(bool on) {
+	if (on && !slowSd.period) {
+		FILE* f = fopen(APP_DIR "/slow-sd.txt", "r");
+		unsigned period = 0, stall = 0;
+		if (f && fscanf(f, "%u %u", &period, &stall) == 2 && period && stall < period) slowSd.period = period, slowSd.stall = stall;
+		if (f) fclose(f);
+		logLine("slow sd: %s", slowSd.period ? "on" : "no slow-sd.txt");
+	}
+	slowSd.gameThread = thread_id();
+	slowSd.start = osGetTime();
+	slowSd.armed = on && slowSd.period;
+}
+
+_ssize_t __real__write_r(struct _reent* r, int fd, const void* buf, size_t n);
+_ssize_t __wrap__write_r(struct _reent* r, int fd, const void* buf, size_t n) {
+	slow_sd_wait("write", fd);
+	return __real__write_r(r, fd, buf, n);
+}
+_ssize_t __real__read_r(struct _reent* r, int fd, void* buf, size_t n);
+_ssize_t __wrap__read_r(struct _reent* r, int fd, void* buf, size_t n) {
+	if (n < 64 * 1024) slow_sd_wait("read", fd);
+	return __real__read_r(r, fd, buf, n);
+}
+int __real__open_r(struct _reent* r, const char* path, int flags, int mode);
+int __wrap__open_r(struct _reent* r, const char* path, int flags, int mode) {
+	slow_sd_wait("open", 0);
+	return __real__open_r(r, path, flags, mode);
+}
+#endif
+
 bool isEmulator(void) {
 	static int known = -1;
 	if (known < 0) {
