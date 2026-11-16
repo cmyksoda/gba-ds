@@ -936,8 +936,8 @@ static void run_frame(Emu* e, uint32_t keys, bool draw) {
 	 * last game's code at those addresses. */
 	int const core = host_core_now();
 	if (core != c->codeCore) {
-		logLine("instruction cache of core %d emptied (the code was written on core %d)", core, c->codeCore);
-		host_icache_invalidate();
+		bool const emptied = host_icache_invalidate();
+		logLine("instruction cache of core %d %s (the code was written on core %d)", core, emptied ? "emptied" : "left alone", c->codeCore);
 		c->codeCore = core;
 	}
 #endif
