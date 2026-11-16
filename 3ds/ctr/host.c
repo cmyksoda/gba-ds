@@ -447,7 +447,10 @@ static void start_main(void* p) {
 }
 
 int host_pthread_create(pthread_t* thread, const pthread_attr_t* attr, void* (*fn)(void*), void* arg) {
-	(void) attr;
+	/* (a thread that only writes lines asks for a small stack: armGBA with a 32 MiB game has under a MiB of heap) */
+	size_t stack = 256 * 1024;
+	if (attr && pthread_attr_getstacksize(attr, &stack) != 0) stack = 256 * 1024;
+	if (stack < 16 * 1024) stack = 16 * 1024;
 	struct start* s = malloc(sizeof(*s));
 	if (!s) return ENOMEM;
 	s->fn = fn;
@@ -459,14 +462,14 @@ int host_pthread_create(pthread_t* thread, const pthread_attr_t* attr, void* (*f
 	core_ready(core);
 	const char* name = nextName ? nextName : "thread";
 	nextName = name;
-	Thread t = threadCreate(start_main, s, 256 * 1024, priority + 1, core, false);
+	Thread t = threadCreate(start_main, s, stack, priority + 1, core, false);
 	if (!t && core != host_side_core()) {
 		nextName = name;
-		t = threadCreate(start_main, s, 256 * 1024, priority + 1, core = host_side_core(), false);
+		t = threadCreate(start_main, s, stack, priority + 1, core = host_side_core(), false);
 	}
 	if (!t && core != -2) {
 		nextName = name;
-		t = threadCreate(start_main, s, 256 * 1024, priority + 1, core = -2, false);
+		t = threadCreate(start_main, s, stack, priority + 1, core = -2, false);
 	}
 	logLine("thread %p: %s (core %d asked)", (void*) fn, t ? "made" : "not made", core);
 	host_mem_note("a thread");
