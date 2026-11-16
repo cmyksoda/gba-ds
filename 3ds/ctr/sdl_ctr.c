@@ -622,6 +622,9 @@ int SDL_RenderCopy(SDL_Renderer* r, SDL_Texture* t, const SDL_Rect* src, const S
 	sub.right = (src->x + src->w) * kx;
 	sub.top = 1.0f - src->y * ky;
 	sub.bottom = 1.0f - (src->y + src->h) * ky;
+	/* (smooth scaling blends the last texel with the one past it: past the picture, a texture holds whatever VRAM had) */
+	if (linear && src->x + src->w >= t->w && t->tw < t->tex.width) sub.right -= 0.5f / t->tex.width;
+	if (linear && src->y + src->h >= t->h && t->th < t->tex.height) sub.bottom += 0.5f / t->tex.height;
 	C2D_Image img = { &t->tex, &sub };
 	C2D_ImageTint tint;
 	bool tinted = t->a != 255 || t->r != 255 || t->g != 255 || t->b != 255;
