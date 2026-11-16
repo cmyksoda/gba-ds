@@ -5896,7 +5896,11 @@ static void bug_info(Text* t, const char* date, uint64_t back) {
 	char lp[1024];
 	log_path(lp, sizeof(lp));
 	text_add(t, "\n== The end of the log%s%s\n", lp[0] ? ", " : " (not found)", lp);
+#ifdef __3DS__
+	host_log_flush();
+#else
 	fflush(stderr);
+#endif
 	FILE* lf = lp[0] ? fopen(lp, "rb") : NULL;
 	if (!lf) return;
 	fseek(lf, 0, SEEK_END);

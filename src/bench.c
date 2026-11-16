@@ -16,8 +16,6 @@
 #include "ui.h"
 #ifdef __3DS__
 #include "host.h"
-#include <pthread.h>
-#include <time.h>
 #endif
 
 #include <SDL.h>
@@ -79,92 +77,20 @@ static void write_line(const char* line) {
 }
 
 #ifdef __3DS__
-/* The lines are written by a thread of their own: the SD card can make a write wait for seconds, and
- * the console's first bench run lost 6.6 s to one every minute or so, in the game's frame. The
- * longest write of each window is in the next line (sd). */
-enum { QUEUE = 16, LINE_MAX_LEN = 640 };
-static struct {
-	pthread_mutex_t lock;
-	/* (one thread to a condition variable: libctru's remembers a single wake, and a second waiter loses it) */
-	pthread_cond_t wake, idle;
-	pthread_t thread;
-	bool started, quit;
-	char lines[QUEUE][LINE_MAX_LEN];
-	int head, count;
-	double worstMs;
-} q = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, PTHREAD_COND_INITIALIZER };
-
-static void* writer_main(void* arg) {
-	(void) arg;
-	pthread_mutex_lock(&q.lock);
-	for (;;) {
-		while (!q.count && !q.quit) pthread_cond_wait(&q.wake, &q.lock);
-		if (!q.count) break;
-		static char line[LINE_MAX_LEN];
-		memcpy(line, q.lines[q.head], sizeof(line));
-		pthread_mutex_unlock(&q.lock);
-		struct timespec t0, t1;
-		clock_gettime(CLOCK_MONOTONIC, &t0);
-		write_line(line);
-		clock_gettime(CLOCK_MONOTONIC, &t1);
-		double ms = (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
-		pthread_mutex_lock(&q.lock);
-		if (ms > q.worstMs) q.worstMs = ms;
-		q.head = (q.head + 1) % QUEUE;
-		--q.count;
-		pthread_cond_broadcast(&q.idle);
-	}
-	pthread_mutex_unlock(&q.lock);
-	return NULL;
-}
-
+/* The lines are written by a thread of the host's: the SD card can make a write wait for seconds, and the console's
+ * first bench run lost 6.6 s to one every minute or so, in the game's frame. The longest write of each window is in
+ * the next line (sd). */
 static void put(const char* line) {
-	if (!q.started) {
-		host_next_thread_name("bench lines");
-		/* (a small stack and queue: armGBA with a 32 MiB game has under a MiB of heap, and this thread's 256 KiB
-		 * stack made it flush its code memory over and over) */
-		pthread_attr_t small;
-		pthread_attr_init(&small);
-		pthread_attr_setstacksize(&small, 32 * 1024);
-		q.started = pthread_create(&q.thread, &small, writer_main, NULL) == 0;
-		pthread_attr_destroy(&small);
-	}
-	if (!q.started) {
-		write_line(line);
-		return;
-	}
-	pthread_mutex_lock(&q.lock);
-	while (q.count == QUEUE) pthread_cond_wait(&q.idle, &q.lock);
-	snprintf(q.lines[(q.head + q.count) % QUEUE], LINE_MAX_LEN, "%s", line);
-	++q.count;
-	pthread_cond_broadcast(&q.wake);
-	pthread_mutex_unlock(&q.lock);
+	host_line_put(line, write_line);
 }
-
-/* Everything put so far is written (a job's file is closed, or sent, after this). */
 static void drain(void) {
-	if (!q.started) return;
-	pthread_mutex_lock(&q.lock);
-	while (q.count) pthread_cond_wait(&q.idle, &q.lock);
-	pthread_mutex_unlock(&q.lock);
+	host_line_drain();
 }
-
 static void stop_writer(void) {
-	if (!q.started) return;
-	pthread_mutex_lock(&q.lock);
-	q.quit = true;
-	pthread_cond_broadcast(&q.wake);
-	pthread_mutex_unlock(&q.lock);
-	pthread_join(q.thread, NULL);
-	q.started = q.quit = false;
+	host_line_stop();
 }
-
 static double take_worst_write(void) {
-	pthread_mutex_lock(&q.lock);
-	double ms = q.worstMs;
-	q.worstMs = 0;
-	pthread_mutex_unlock(&q.lock);
-	return ms;
+	return host_line_worst_ms();
 }
 #else
 static void put(const char* line) {
@@ -414,7 +340,13 @@ bool bench_run(Config* cfg) {
 #ifdef __3DS__
 		host_threads_job_start();
 #endif
+#ifdef GBADS_SLOW_SD
+		host_slow_sd(true);
+#endif
 		game_run(cfg, cfg->rom, false);
+#ifdef GBADS_SLOW_SD
+		host_slow_sd(false);
+#endif
 		/* (the script's end quits the game: the next job; a quit before it ends the bench) */
 		if (ui_ticks() >= (uint64_t) cfg->quitAfter) uiQuit = 0;
 		threads_line();
