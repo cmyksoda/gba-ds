@@ -50,11 +50,7 @@ static Sums base;
 static char threadsShown[512];
 
 static void sums_read(Sums* s) {
-#ifndef GBADS_ARMGBA
 	s->video = emu_video_wait_us();
-#else
-	s->video = 0;
-#endif
 	mapcap_work_totals(&s->hiddenUs, &s->hiddenFrames);
 #ifdef __3DS__
 	s->gpu = host_gpu_wait_ticks();

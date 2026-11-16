@@ -626,10 +626,12 @@ static void save_tick(ArmCore* c) {
 extern uint64_t jitCompileTicks, jitFlushTicks;
 extern uint32_t jitFlushCalls;
 extern bool jitStatsOn;
+extern uint64_t renderWaitTicks, renderWorkTicks, audioWaitTicks, audioWorkTicks;
 
 struct JitSeen {
 	uint64_t compiled, deferred, flushes0, flushes1, compileTicks, flushTicks, invalidations, codeWrites, stepped, revived;
 	uint32_t flushCalls, loads;
+	uint64_t renderWait, renderWork, audioWait, audioWork;
 	unsigned last;
 };
 
@@ -645,6 +647,10 @@ static void jit_stats_open(ArmCore* c, bool game) {
 	c->seen->compileTicks = jitCompileTicks; /* (these three are the whole program's, not this machine's) */
 	c->seen->flushTicks = jitFlushTicks;
 	c->seen->flushCalls = jitFlushCalls;
+	c->seen->renderWait = renderWaitTicks;
+	c->seen->renderWork = renderWorkTicks;
+	c->seen->audioWait = audioWaitTicks;
+	c->seen->audioWork = audioWorkTicks;
 }
 
 static void jit_stats(ArmCore* c, unsigned frame, bool game, bool closing) {
@@ -652,6 +658,9 @@ static void jit_stats(ArmCore* c, unsigned frame, bool game, bool closing) {
 	struct Jit* jit = c->gba->jit;
 	if (!seen || !jit || (!closing && frame % c->statsEvery)) return;
 	double const perMs = 268111.856, frames = frame - seen->last ? frame - seen->last : 1;
+	fprintf(stderr, "threads: frames %u-%u: game thread waits for the renderer %.2f ms and the mixer %.2f ms a frame; renderer works %.2f ms, mixer %.2f ms\n",
+	        seen->last, frame, (renderWaitTicks - seen->renderWait) / perMs / frames, (audioWaitTicks - seen->audioWait) / perMs / frames,
+	        (renderWorkTicks - seen->renderWork) / perMs / frames, (audioWorkTicks - seen->audioWork) / perMs / frames);
 	fprintf(stderr,
 	        "jit%s%s: frames %u-%u: compiled +%u, first visits stepped +%u, flushes +%u by writes or waits +%u by full memory, compiling %.2f ms and cache calls %.2f ms (%u) a frame, code %u of %u KiB (hot %u, cold %u, careful copies %u, unused %u), heap %u KiB free; invalidated +%u, writes to code +%u, instructions stepped +%u, revived +%u, states loaded +%u\n",
 	        game ? "" : " copy", closing ? " (closing)" : "", seen->last, frame, (unsigned) (jit->compiled - seen->compiled), (unsigned) (jit->deferred - seen->deferred),
@@ -674,6 +683,10 @@ static void jit_stats(ArmCore* c, unsigned frame, bool game, bool closing) {
 	seen->compileTicks = jitCompileTicks;
 	seen->flushTicks = jitFlushTicks;
 	seen->flushCalls = jitFlushCalls;
+	seen->renderWait = renderWaitTicks;
+	seen->renderWork = renderWorkTicks;
+	seen->audioWait = audioWaitTicks;
+	seen->audioWork = audioWorkTicks;
 	seen->last = frame;
 }
 #endif
@@ -882,6 +895,7 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 #else
 	/* (GBADS_RENDER_THREAD=1, tests: drawn on a thread as the console's game is) */
 	if (getenv("GBADS_RENDER_THREAD") && renderThreadStart(gba, false, false)) renderSetHooks(gba, &c->hooks);
+	if (getenv("GBADS_AUDIO_THREAD")) audioThreadStart(gba);
 #endif
 
 	e->fb = calloc(GBA_W * GBA_H, sizeof(uint32_t));
@@ -990,6 +1004,16 @@ void emu_frame(Emu* e, uint32_t keys) {
 /* (armGBA draws with its own threads, set up by its frontend options, not mGBA's proxy) */
 void emu_threaded_video(bool on) {
 	(void) on;
+}
+
+/* (the bench's "video wait": the game thread waiting for the renderer's worker, in microseconds) */
+uint32_t emu_video_wait_us(void) {
+#ifdef __3DS__
+	extern uint64_t renderWaitTicks;
+	return (uint32_t) (renderWaitTicks * 1000 / 268112);
+#else
+	return 0;
+#endif
 }
 
 void emu_idle_loops(const char* mode) {
