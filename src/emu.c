@@ -648,6 +648,20 @@ static void pic_put(const char* code, unsigned long frame, const char* tag, cons
 	FILE* f = fopen(name, "wb");
 	if (f) fwrite(out, sizeof(out), 1, f), fclose(f);
 }
+/* TEST: the picture as handed to the GPU, after the HUD painted over it (shown: XBGR8888, or NULL for what mGBA drew) */
+void emu_pic_dump_shown(Emu* e, const uint32_t* shown) {
+	if (!e->audio || e->frames % 100) return;
+#ifdef COLOR_16_BIT
+	static uint32_t px[GBA_W * GBA_H];
+	if (!shown) {
+		for (int y = 0; y < GBA_H; ++y) emu_expand565_row(&px[y * GBA_W], &e->fb16[y * EMU_FB16_STRIDE], GBA_W);
+		shown = px;
+	}
+#else
+	if (!shown) shown = e->fb;
+#endif
+	pic_put(e->gameCode, e->frames, "-s", shown);
+}
 static const uint32_t* pic_hud(void);
 static void pic_dump(Emu* e) {
 	if (!e->audio || e->frames % 100) return;

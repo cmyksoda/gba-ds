@@ -6620,6 +6620,9 @@ static bool gameTexAll = true; /* upload the game's frame to every view next tim
 
 /* The game's picture to view i's texture: `shown`, XBGR8888, or (NULL) what mGBA drew. */
 static void game_upload(int i, const uint32_t* shown) {
+#ifdef GBADS_PICDUMP
+	emu_pic_dump_shown(&emu, shown);
+#endif
 #ifdef COLOR_16_BIT
 	if (!shown && gameTex16[i] && !ui_color_correct_on()) {
 		ui_update_texture(gameTex16[i], emu.fb16, EMU_FB16_STRIDE * 2);

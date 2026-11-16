@@ -110,6 +110,10 @@ static inline void emu_fb_set(Emu* e, const uint32_t* px) {
 }
 #endif
 
+#ifdef GBADS_PICDUMP
+void emu_pic_dump_shown(Emu* e, const uint32_t* shown);
+#endif
+
 /* savePath may be NULL (no battery save attached). */
 bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio);
 /* ROMs may also be in a .zip or .7z (the first GBA ROM inside is used). */
