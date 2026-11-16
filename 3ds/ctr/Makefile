@@ -7,6 +7,9 @@
 #   make LOG_URL=http://<host>:<port>/log   a diagnosis build: its logs sent there (../tools/logserver.py) when the
 #                    app starts (the last run's) and closes. Never a release; rebuild host.c without it after.
 #   make SLOWSD=1    TEST ONLY: the SD card freezes on a schedule (host.c's host_slow_sd), to show what waits on it
+#   make HOTCOLD=1   links with ld/3dsx.ld, devkitARM's script with the profile's hot code kept together and its cold code
+#                    apart (-fprofile-use libmgba, ../mgba/build-libmgba.sh MGBA_PGO=use: GCC marks them .text.hot/.text.unlikely)
+#   XDEF, XLDFLAGS, XLIBS: more compiler defines, linker flags and libraries (empty by default; a profiling build's -lgcov)
 #   make cia-parts   what bannertool makes for the .cia (../Makefile's `cia` then runs makerom: cia.sh)
 
 ifeq ($(strip $(DEVKITARM)),)
@@ -49,8 +52,8 @@ COMMON   := -g -fwrapv -flto -fomit-frame-pointer -ffunction-sections -mword-rel
             -D__3DS__ -I$(CTRULIB)/include -I$(PORTLIBS)/include
 CFLAGS   := $(COMMON) -std=gnu11
 ASFLAGS  := -g $(ARCH)
-LDFLAGS  := -specs=3dsx.specs -g -O3 -fwrapv -flto=auto -mword-relocations $(ARCH) -Wl,-Map,$(BUILD)/$(TARGET).map -Wl,--gc-sections -Wl,--wrap=stat -Wl,--wrap=threadCreate$(if $(SLOWSD), -Wl$(comma)--wrap=_write_r -Wl$(comma)--wrap=_read_r -Wl$(comma)--wrap=_open_r)$(if $(TEST), -Wl$(comma)--wrap=malloc -Wl$(comma)--wrap=calloc)
-LIBS     := $(if $(filter armgba,$(CORE)),,$(MGBA_BUILD)/libmgba.a) -L$(CTRULIB)/lib -L$(PORTLIBS)/lib -lcitro2d -lcitro3d -lctru -lz -lm
+LDFLAGS  := -specs=3dsx.specs -g -O3 -fwrapv -flto=auto -mword-relocations $(ARCH) -Wl,-Map,$(BUILD)/$(TARGET).map -Wl,--gc-sections -Wl,--wrap=stat -Wl,--wrap=threadCreate$(if $(SLOWSD), -Wl$(comma)--wrap=_write_r -Wl$(comma)--wrap=_read_r -Wl$(comma)--wrap=_open_r)$(if $(TEST), -Wl$(comma)--wrap=malloc -Wl$(comma)--wrap=calloc) $(if $(HOTCOLD),-B$(CURDIR)/ld/) $(XLDFLAGS)
+LIBS     := $(if $(filter armgba,$(CORE)),,$(MGBA_BUILD)/libmgba.a) -L$(CTRULIB)/lib -L$(PORTLIBS)/lib -lcitro2d -lcitro3d -lctru -lz -lm $(XLIBS)
 
 D3 := $(REPO)/3ds
 S  := $(REPO)/src
@@ -79,7 +82,7 @@ OBJ := $(APP_OBJ) $(HOST_OBJ) $(CORE_OBJ) $(WEBP_OBJ)
 # host.c's.
 APP_INC := -I$(D3)/ctr/sdl -I$(D3)/ctr/compat -I$(D3)/ctr $(CORE_INC) -I$(S) -I$(REPO)/third_party/libwebp
 $(APP_OBJ):  EXTRA := -O2 -Wall -Wno-unused-parameter $(APP_INC) $(CORE_DEFS) -DGBADS_VERSION='"$(VERSION)"' \
-                      -Dpthread_create=host_pthread_create -Dmain=gbads_main -D_GNU_SOURCE $(if $(TEST),-DGBADS_TEST_PROFILE) $(if $(SLOWSD),-DGBADS_SLOW_SD)
+                      -Dpthread_create=host_pthread_create -Dmain=gbads_main -D_GNU_SOURCE $(if $(TEST),-DGBADS_TEST_PROFILE) $(if $(SLOWSD),-DGBADS_SLOW_SD) $(XDEF)
 # BENCH=TAG: a test bench build (its jobs from the LOG_URL machine, results back there), gba-ds-bench-TAG.3dsx
 ifneq ($(BENCH),)
 BENCH_DEF := -DGBADS_BENCH_TAG='"$(BENCH)"'
