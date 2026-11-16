@@ -662,7 +662,7 @@ static void jit_stats(ArmCore* c, unsigned frame, bool game, bool closing) {
 	struct Jit* jit = c->gba->jit;
 	if (!seen || !jit || (!closing && frame % c->statsEvery)) return;
 	double const perMs = 268111.856, frames = frame - seen->last ? frame - seen->last : 1;
-	fprintf(stderr, "threads: frames %u-%u: game thread waits for the renderer %.2f ms and the mixer %.2f ms a frame; renderer works %.2f ms, mixer %.2f ms; the game thread's picture %.2f ms, second picture %.2f ms\n",
+	if (game) fprintf(stderr, "threads: frames %u-%u: game thread waits for the renderer %.2f ms and the mixer %.2f ms a frame; renderer works %.2f ms, mixer %.2f ms; the game thread's picture %.2f ms, second picture %.2f ms\n",
 	        seen->last, frame, (renderWaitTicks - seen->renderWait) / perMs / frames, (audioWaitTicks - seen->audioWait) / perMs / frames,
 	        (renderWorkTicks - seen->renderWork) / perMs / frames, (audioWorkTicks - seen->audioWork) / perMs / frames, (pictureTicks - seen->picture) / perMs / frames,
 	        (splitTicks - seen->split) / perMs / frames);
@@ -1016,7 +1016,7 @@ static void run_frame(Emu* e, uint32_t keys, bool draw) {
 	audioThreadKick(gba);
 	if (c->cheatsOn) cheatsApply(&c->cheats, gba);
 #ifdef __3DS__
-	bool const timed = jitStatsOn;
+	bool const timed = jitStatsOn && c->game && draw; /* (the sums are the game thread's: a copy runs on another one) */
 	uint64_t const t0 = timed ? renderThreadHostTicks() : 0;
 #endif
 	if (draw) take_picture(e);
