@@ -454,8 +454,9 @@ static void expand_tables(void) {
 	made = true;
 }
 
+typedef uint32_t __attribute__((may_alias)) PixelPair; /* (-flto: the pixels are written as uint16_t elsewhere) */
 void emu_expand565_row(uint32_t* dst, const uint16_t* src, int n) {
-	const uint32_t* pairs = (const uint32_t*) src; /* (rows start on a word, n is even) */
+	const PixelPair* pairs = (const PixelPair*) src; /* (rows start on a word, n is even) */
 	for (int x = 0; x < n; x += 2) {
 		uint32_t w = pairs[x >> 1];
 		dst[x] = emuExpandHi[w >> 8 & 0xFF] | emuExpandLo[w & 0xFF];
@@ -1194,8 +1195,9 @@ static bool bg_line_has_pal(int bg, int y, int pal) {
 }
 
 #ifdef COLOR_16_BIT
-static uint16_t hud16[GBA_W * GBA_H];
-#define HUD_OUT(p) (split.dst = (p))
+/* the grab frame draws into a buffer of its own: mGBA leaves unchanged lines alone, so hud16 must keep the HUD's picture */
+static uint16_t hud16[GBA_W * GBA_H], grab16[GBA_W * GBA_H];
+#define HUD_OUT(p) (split.dst = (p), split.hud.outputBuffer = (p) == split.hudBuf ? hud16 : grab16)
 #else
 #define HUD_OUT(p) (split.hud.outputBuffer = (mColor*) (p))
 #endif
@@ -1303,7 +1305,7 @@ static void split_draw(struct GBAVideoRenderer* r, int y) {
 		}
 		filtered_draw_scanline(&split.hud.d, y);
 #ifdef COLOR_16_BIT
-		emu_expand565_row(&split.dst[y * GBA_W], &hud16[y * GBA_W], GBA_W);
+		emu_expand565_row(&split.dst[y * GBA_W], &split.hud.outputBuffer[y * GBA_W], GBA_W);
 #endif
 	}
 	split.drawScanline(r, y);
