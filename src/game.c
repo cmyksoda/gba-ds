@@ -3617,9 +3617,8 @@ static bool frame_is_dark(Emu* e);
 static bool frame_is_flat(Emu* e, const uint32_t* fb) { /* (fb: a picture of its own; else the game's) */
 	long sum = 0, n = 0;
 	static int l[GBA_W * GBA_H / 7 + 1];
-	for (int i = 0, x = 0, y = 0; i < GBA_W * GBA_H; i += 7, x += 7) {
-		while (x >= GBA_W) x -= GBA_W, ++y;
-		uint32_t c = fb ? fb[i] : emu_pixel(e, x, y);
+	for (int i = 0; i < GBA_W * GBA_H; i += 7) {
+		uint32_t c = fb ? fb[i] : emu_pixel_n(e, i);
 		l[n] = (int) ((c & 0xFF) + ((c >> 8) & 0xFF) + ((c >> 16) & 0xFF));
 		sum += l[n++];
 	}
@@ -6542,9 +6541,8 @@ static bool liveOn;
 
 static bool frame_is_dark(Emu* e) {
 	int bright = 0, total = 0;
-	for (int i = 0, x = 0, y = 0; i < GBA_W * GBA_H; i += 7, x += 7) {
-		while (x >= GBA_W) x -= GBA_W, ++y;
-		uint32_t c = emu_pixel(e, x, y);
+	for (int i = 0; i < GBA_W * GBA_H; i += 7) {
+		uint32_t c = emu_pixel_n(e, i);
 		int lum = ((c & 0xFF) + ((c >> 8) & 0xFF) * 2 + ((c >> 16) & 0xFF)) >> 2;
 		bright += lum > 40;
 		++total;

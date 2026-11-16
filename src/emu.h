@@ -92,6 +92,10 @@ void emu_fb_set(Emu* e, const uint32_t* px);
 static inline uint32_t emu_pixel(Emu* e, int x, int y) {
 	return e->fbStale ? emu_expand565_one(e->fb16[y * EMU_FB16_STRIDE + x]) : e->fb[y * GBA_W + x];
 }
+/* The same by pixel number (row after row, GBA_W to a row). */
+static inline uint32_t emu_pixel_n(Emu* e, int i) {
+	return e->fbStale ? emu_expand565_one(e->fb16[i / GBA_W * EMU_FB16_STRIDE + i % GBA_W]) : e->fb[i];
+}
 /* The next core opened has fb16 in linear memory, for the GPU's transfer. */
 void emu_picture_linear(bool on);
 
@@ -101,6 +105,9 @@ static inline uint32_t* emu_fb(Emu* e) {
 }
 static inline uint32_t emu_pixel(Emu* e, int x, int y) {
 	return e->fb[y * GBA_W + x];
+}
+static inline uint32_t emu_pixel_n(Emu* e, int i) {
+	return e->fb[i];
 }
 static inline void emu_fb_put(Emu* e, int x, int y, uint32_t c) {
 	e->fb[y * GBA_W + x] = c;
