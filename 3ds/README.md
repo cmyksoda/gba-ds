@@ -39,6 +39,12 @@ file and these changes (`mgba/build-libmgba.sh`):
   cartridge's clock or rumble) gets a copy the ROM's size, not 32 MiB.
 - `mgba/memory-map-hook.patch`: mGBA's large blocks come from GBA DS's allocator (`ctr/emu_ctr.c`,
   see Memory).
+- `mgba/gba-fast-memory.patch`, `gba-ldm-stm.patch`, `gba-dma-batch.patch`, `color-mix.patch`: fewer
+  instructions for the same result (short paths for loads, stores and jumps, LDM/STM over the set
+  bits, a DMA's units without the event list, a cheaper alpha blend). Pictures, RAM and states are
+  bit-identical to unpatched mGBA's.
+- `mgba/video-wake.patch`: `video_wake` in `gba-ds.cfg` (0, 1, 3, 7, 15, 31 or 63; 15 as before)
+  is how often mGBA's drawing thread is woken, once per N+1 lines.
 - `MINIMAL_CORE` taken out of the `flags.h` it writes: the library is built without it, and the
   app's view of mGBA's structs has to match.
 - No `.7z` support (`USE_LZMA=OFF`).
