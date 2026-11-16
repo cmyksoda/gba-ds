@@ -627,11 +627,13 @@ extern uint64_t jitCompileTicks, jitFlushTicks;
 extern uint32_t jitFlushCalls;
 extern bool jitStatsOn;
 extern uint64_t renderWaitTicks, renderWorkTicks, audioWaitTicks, audioWorkTicks;
+uint64_t renderThreadHostTicks(void);
+static uint64_t pictureTicks, splitTicks;
 
 struct JitSeen {
 	uint64_t compiled, deferred, flushes0, flushes1, compileTicks, flushTicks, invalidations, codeWrites, stepped, revived;
 	uint32_t flushCalls, loads;
-	uint64_t renderWait, renderWork, audioWait, audioWork;
+	uint64_t renderWait, renderWork, audioWait, audioWork, picture, split;
 	unsigned last;
 };
 
@@ -651,6 +653,8 @@ static void jit_stats_open(ArmCore* c, bool game) {
 	c->seen->renderWork = renderWorkTicks;
 	c->seen->audioWait = audioWaitTicks;
 	c->seen->audioWork = audioWorkTicks;
+	c->seen->picture = pictureTicks;
+	c->seen->split = splitTicks;
 }
 
 static void jit_stats(ArmCore* c, unsigned frame, bool game, bool closing) {
@@ -658,9 +662,10 @@ static void jit_stats(ArmCore* c, unsigned frame, bool game, bool closing) {
 	struct Jit* jit = c->gba->jit;
 	if (!seen || !jit || (!closing && frame % c->statsEvery)) return;
 	double const perMs = 268111.856, frames = frame - seen->last ? frame - seen->last : 1;
-	fprintf(stderr, "threads: frames %u-%u: game thread waits for the renderer %.2f ms and the mixer %.2f ms a frame; renderer works %.2f ms, mixer %.2f ms\n",
+	fprintf(stderr, "threads: frames %u-%u: game thread waits for the renderer %.2f ms and the mixer %.2f ms a frame; renderer works %.2f ms, mixer %.2f ms; the game thread's picture %.2f ms, second picture %.2f ms\n",
 	        seen->last, frame, (renderWaitTicks - seen->renderWait) / perMs / frames, (audioWaitTicks - seen->audioWait) / perMs / frames,
-	        (renderWorkTicks - seen->renderWork) / perMs / frames, (audioWorkTicks - seen->audioWork) / perMs / frames);
+	        (renderWorkTicks - seen->renderWork) / perMs / frames, (audioWorkTicks - seen->audioWork) / perMs / frames, (pictureTicks - seen->picture) / perMs / frames,
+	        (splitTicks - seen->split) / perMs / frames);
 	fprintf(stderr,
 	        "jit%s%s: frames %u-%u: compiled +%u, first visits stepped +%u, flushes +%u by writes or waits +%u by full memory, compiling %.2f ms and cache calls %.2f ms (%u) a frame, code %u of %u KiB (hot %u, cold %u, careful copies %u, unused %u), heap %u KiB free; invalidated +%u, writes to code +%u, instructions stepped +%u, revived +%u, states loaded +%u\n",
 	        game ? "" : " copy", closing ? " (closing)" : "", seen->last, frame, (unsigned) (jit->compiled - seen->compiled), (unsigned) (jit->deferred - seen->deferred),
@@ -687,6 +692,8 @@ static void jit_stats(ArmCore* c, unsigned frame, bool game, bool closing) {
 	seen->renderWork = renderWorkTicks;
 	seen->audioWait = audioWaitTicks;
 	seen->audioWork = audioWorkTicks;
+	seen->picture = pictureTicks;
+	seen->split = splitTicks;
 	seen->last = frame;
 }
 #endif
@@ -728,6 +735,9 @@ static void close_core(ArmCore* c) {
 	free(c->ring);
 	free(c);
 }
+
+static uint32_t colour_8888(uint16_t v);
+static void widen_tables(void);
 
 bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 	memset(e, 0, sizeof(*e));
@@ -905,10 +915,11 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 	jit_stats_open(c, audio);
 #endif
 	if (audio) {
-		c->ringCap = 8192;
+		c->ringCap = 8192; /* (a power of two: the ring's indexes are masked, the ARM11 has no divide) */
 		c->ring = calloc(c->ringCap, 2 * sizeof(int16_t));
 	}
 	cheatsInit(&c->cheats);
+	widen_tables(); /* (before any other thread takes a picture) */
 	if (!e->fb || (audio && !c->ring)) goto fail;
 #ifdef __3DS__
 	host_mem_note(audio ? "the game opened" : "a copy opened");
@@ -937,16 +948,48 @@ bool emu_cancelled(const Emu* e) {
 	return e->cancel && *e->cancel;
 }
 
+
+/* Each bit of a colour widens on its own, so a colour is its low byte's entry ORed with its high byte's. */
+static uint32_t widenLow[256], widenHigh[256];
+static bool widenReady;
+static void widen_tables(void) {
+	if (__atomic_load_n(&widenReady, __ATOMIC_ACQUIRE)) return;
+	for (uint32_t i = 0; i < 256; ++i) {
+		widenLow[i] = colour_8888((uint16_t) i);
+		widenHigh[i] = colour_8888((uint16_t) (i << 8));
+	}
+	__atomic_store_n(&widenReady, true, __ATOMIC_RELEASE);
+}
+
+static inline uint32_t widen(uint32_t v) {
+	return widenLow[v & 0xFF] | widenHigh[(v >> 8) & 0xFF];
+}
+
+/* (the tables come in as pointers so each lookup is one load; the compiler would add their offsets into the addresses otherwise) */
+static __attribute__((noipa)) void widen_words(uint32_t* restrict dst, const uint32_t* restrict words, const uint32_t* restrict low, const uint32_t* restrict high) {
+	for (int i = 0; i < GBA_W * GBA_H / 2; i += 2) {
+		uint32_t const a = words[i], b = words[i + 1];
+		dst[2 * i] = low[a & 0xFF] | high[(a >> 8) & 0xFF];
+		dst[2 * i + 1] = low[(a >> 16) & 0xFF] | high[a >> 24];
+		dst[2 * i + 2] = low[b & 0xFF] | high[(b >> 8) & 0xFF];
+		dst[2 * i + 3] = low[(b >> 16) & 0xFF] | high[b >> 24];
+	}
+}
+
+/* A whole picture; two colors a word where they are word aligned (the ARM11 can't load a half-word pair otherwise). */
+static void widen_picture(uint32_t* dst, const uint16_t* src) {
+	widen_tables();
+	if (!((uintptr_t) src & 3)) {
+		widen_words(dst, __builtin_assume_aligned(src, 4), widenLow, widenHigh);
+		return;
+	}
+	for (int i = 0; i < GBA_W * GBA_H; ++i) dst[i] = widen(src[i]);
+}
+
 /* armGBA's picture is the GBA's own 15-bit colours; GBA DS wants mGBA's
  * 32-bit ones (bytes R, G, B, X), widened the way mGBA widens them. */
 static void take_picture(Emu* e) {
-	const uint16_t* src = (const uint16_t*) AC(e)->gba->renderer.frame;
-	uint32_t* dst = e->fb;
-	for (int i = 0; i < GBA_W * GBA_H; ++i) {
-		uint32_t v = src[i];
-		uint32_t c = ((v << 3) & 0xF8) | ((v << 6) & 0xF800) | ((v << 9) & 0xF80000);
-		dst[i] = c | ((c >> 5) & 0x070707) | 0xFF000000u;
-	}
+	widen_picture(e->fb, (const uint16_t*) AC(e)->gba->renderer.frame);
 }
 
 static void run_frame(Emu* e, uint32_t keys, bool draw) {
@@ -973,8 +1016,21 @@ static void run_frame(Emu* e, uint32_t keys, bool draw) {
 	videoDrawSkipped = false;
 	audioThreadKick(gba);
 	if (c->cheatsOn) cheatsApply(&c->cheats, gba);
+#ifdef __3DS__
+	bool const timed = jitStatsOn;
+	uint64_t const t0 = timed ? renderThreadHostTicks() : 0;
+#endif
 	if (draw) take_picture(e);
+#ifdef __3DS__
+	uint64_t const t1 = timed ? renderThreadHostTicks() : 0;
+#endif
 	if (draw) split_frame(c);
+#ifdef __3DS__
+	if (timed) {
+		pictureTicks += t1 - t0;
+		splitTicks += renderThreadHostTicks() - t1;
+	}
+#endif
 	audioThreadTake(gba);
 #ifdef __3DS__
 	++c->ran;
@@ -984,10 +1040,10 @@ static void run_frame(Emu* e, uint32_t keys, bool draw) {
 		const int16_t* in = (const int16_t*) gba->audio.out;
 		for (uint32_t i = 0; i < gba->audio.outCount; ++i) {
 			if (c->ringCount == c->ringCap) { /* nobody's reading: the oldest goes */
-				c->ringHead = (c->ringHead + 1) % c->ringCap;
+				c->ringHead = (c->ringHead + 1) & (c->ringCap - 1);
 				--c->ringCount;
 			}
-			size_t at = (c->ringHead + c->ringCount) % c->ringCap;
+			size_t at = (c->ringHead + c->ringCount) & (c->ringCap - 1);
 			c->ring[at * 2] = in[i * 2];
 			c->ring[at * 2 + 1] = in[i * 2 + 1];
 			++c->ringCount;
@@ -1038,11 +1094,11 @@ size_t emu_audio_read(Emu* e, int16_t* out, size_t maxFrames) {
 	if (!c->ring) return 0;
 	size_t n = c->ringCount < maxFrames ? c->ringCount : maxFrames;
 	for (size_t i = 0; i < n; ++i) {
-		size_t at = (c->ringHead + i) % c->ringCap;
+		size_t at = (c->ringHead + i) & (c->ringCap - 1);
 		out[i * 2] = c->ring[at * 2];
 		out[i * 2 + 1] = c->ring[at * 2 + 1];
 	}
-	c->ringHead = (c->ringHead + n) % c->ringCap;
+	c->ringHead = (c->ringHead + n) & (c->ringCap - 1);
 	c->ringCount -= n;
 	return n;
 }
@@ -1649,7 +1705,7 @@ static void split_frame(ArmCore* c) {
 	if (c != split.core || !split.active) return;
 	if (bandOn) lastBandY0 = split.bandY0, lastBandY1 = split.bandY1;
 	uint32_t* dst = split.grabbing ? split.grabBuf : split.hudBuf;
-	for (int i = 0; dst && i < GBA_W * GBA_H; ++i) dst[i] = colour_8888(split.frame[i]);
+	if (dst) widen_picture(dst, split.frame);
 	if (split.grabbing) {
 		split.grabbing = false;
 		split.grabBuf = NULL;
