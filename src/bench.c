@@ -64,8 +64,7 @@ bool bench_active(void) {
 	return active;
 }
 
-static void write_line(const char* line) {
-	fprintf(stderr, "%s\n", line);
+static void write_files(const char* line) {
 	if (results) {
 		fprintf(results, "%s\n", line);
 		fflush(results);
@@ -76,9 +75,9 @@ static void write_line(const char* line) {
 #ifdef __3DS__
 /* The lines are written by a thread of the host's: the SD card can make a write wait for seconds, and the console's
  * first bench run lost 6.6 s to one every minute or so, in the game's frame. The longest write of each window is in
- * the next line (sd). */
+ * the next line (sd). The host puts each line in the log too. */
 static void put(const char* line) {
-	host_line_put(line, write_line);
+	host_line_put(line, write_files);
 }
 static void drain(void) {
 	host_line_drain();
@@ -91,7 +90,8 @@ static double take_worst_write(void) {
 }
 #else
 static void put(const char* line) {
-	write_line(line);
+	fprintf(stderr, "%s\n", line);
+	write_files(line);
 }
 static void drain(void) {}
 static void stop_writer(void) {}
@@ -135,9 +135,9 @@ void bench_frame(uint64_t frame, double emuMs, double drawMs, double screenMs, b
 #ifdef __3DS__
 	if (ms > 1000) {
 		/* (a frame that stopped: where, as the game loop saw it) */
-		char note[320];
-		snprintf(note, sizeof(note), "bench %s stall at frame %llu: %.0f ms = before emulating %.0f + emulating %.0f + second screen %.0f + drawing %.0f + outside the loop %.0f",
-		         jobId, (unsigned long long) frame, ms, preMs, emuMs, screenMs, drawMs, ms - loopMs);
+		char note[360];
+		snprintf(note, sizeof(note), "bench %s stall at frame %llu: %.0f ms = before emulating %.0f + emulating %.0f + second screen %.0f + drawing %.0f + outside the loop %.0f (log lock waits %.0f)",
+		         jobId, (unsigned long long) frame, ms, preMs, emuMs, screenMs, drawMs, ms - loopMs, host_line_wait_ms());
 		put(note);
 	}
 #else
