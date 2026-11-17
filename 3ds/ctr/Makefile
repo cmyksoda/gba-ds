@@ -60,12 +60,14 @@ LDFLAGS  := -specs=3dsx.specs -g -O3 -fwrapv -flto=auto -mword-relocations $(ARC
 LIBS     := $(if $(filter armgba,$(CORE)),,$(MGBA_BUILD)/libmgba.a) -L$(CTRULIB)/lib -L$(PORTLIBS)/lib -lcitro2d -lcitro3d -lctru -lz -lm $(XLIBS)
 
 PGO_DIR := $(REPO)/3ds/emu/pgo
+# (PGO_QUIET= shows which functions' profiles no longer fit the code)
+PGO_QUIET ?= -Wno-coverage-mismatch -Wno-missing-profile
 ifeq ($(PGO),gen)
 XCORE += -fprofile-generate -fprofile-update=single -fprofile-dir=/gcov -fprofile-prefix-path=$(CURDIR)/$(BUILD)
 XDEF  += -DGBADS_PGO_GEN
 LIBS  += -lgcov
 else ifeq ($(PGO),use)
-XCORE += -fprofile-use=$(PGO_DIR) -fprofile-prefix-path=$(CURDIR)/$(BUILD) -fprofile-partial-training -fprofile-correction -Wno-coverage-mismatch -Wno-missing-profile
+XCORE += -fprofile-use=$(PGO_DIR) -fprofile-prefix-path=$(CURDIR)/$(BUILD) -fprofile-partial-training -fprofile-correction $(PGO_QUIET)
 endif
 
 D3 := $(REPO)/3ds
