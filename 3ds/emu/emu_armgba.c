@@ -1154,6 +1154,11 @@ static void run_frame(Emu* e, uint32_t keys, bool draw) {
 		c->codeCore = core;
 	}
 #endif
+	if (!draw && e->fb != c->fbOwn) {
+		/* (the picture kept is a worker's buffer, which it writes again when this frame ends: copied before) */
+		memcpy(c->fbOwn, e->fb, GBA_W * GBA_H * sizeof(uint32_t));
+		e->fb = c->fbOwn;
+	}
 	++e->frames;
 	gbaSetKeys(gba, (uint16_t) keys);
 	videoDrawSkipped = !draw;
@@ -1181,11 +1186,6 @@ static void run_frame(Emu* e, uint32_t keys, bool draw) {
 	uint64_t const t0 = timed ? renderThreadHostTicks() : 0;
 #endif
 	if (draw) take_picture(e);
-	else if (e->fb != c->fbOwn) {
-		/* (the picture kept is a worker's buffer, which it writes again two frames on) */
-		memcpy(c->fbOwn, e->fb, GBA_W * GBA_H * sizeof(uint32_t));
-		e->fb = c->fbOwn;
-	}
 #ifdef __3DS__
 	uint64_t const t1 = timed ? renderThreadHostTicks() : 0;
 #endif
