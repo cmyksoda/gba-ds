@@ -142,8 +142,7 @@ int __wrap__open_r(struct _reent* r, const char* path, int flags, int mode) {
 
 /* The card's writer: the log (stderr, a device of its own, "logbuf:") and the bench's lines go through one ring in memory
  * to one thread, so a card that stops for seconds holds up neither. A full ring drops log writes and says how many; a bench
- * line with no room waits in a list, not in the game's frame (the writer shares core 3 with the hidden copy and can fall far
- * behind). Before the thread starts they are written straight out. */
+ * line with no room waits in a list, not in the game's frame (the writer shares core 3 with the hidden copy). */
 enum { RING = 10 * 1024, REC_MAX = 1023, LINE_BYTES = 640, LINE_SPARE = 1300, REC_LINE = 0x8000, SPILL_MAX = 256 };
 typedef struct Spilled {
 	struct Spilled* next;
@@ -253,7 +252,7 @@ static void* writer_main(void* arg) {
 		lg.dropped = lg.lost = 0;
 		LightLock_Unlock(&lg.lock);
 		if (dropped) fprintf(lg.file, "\n[log: %u write(s) dropped, the SD card was busy]\n", (unsigned) dropped);
-		if (lost) fprintf(lg.file, "\n[bench: %u line(s) lost, the SD card was busy for minutes]\n", (unsigned) lost);
+		if (lost && lg.file) fprintf(lg.file, "\n[bench: %u line(s) lost, the SD card was busy for minutes]\n", (unsigned) lost);
 		if (header & REC_LINE) {
 			u64 t0 = svcGetSystemTick();
 			lg.writeLine(rec);
