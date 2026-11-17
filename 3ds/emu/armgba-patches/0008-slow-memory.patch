@@ -1,15 +1,14 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: armGBA speedups <none@example.invalid>
-Date: Tue, 17 Nov 2026 14:30:00 -0500
-Subject: armGBA: palette and OAM accesses, IE and IME loads and the IE/IF word
- load run inline in the a32 memory routines
+Date: Tue, 17 Nov 2026 15:00:00 -0500
+Subject: armGBA: palette and OAM accesses, IE and IME loads and the IE/IF word load run inline in the a32 memory routines
 
 
 diff --git a/src/cpu/a32/backend.c b/src/cpu/a32/backend.c
-index 6138b1c..9ea78b6 100644
+index d1fdf04..22cd230 100644
 --- a/src/cpu/a32/backend.c
 +++ b/src/cpu/a32/backend.c
-@@ -642,6 +642,61 @@ static void emitOffset(struct Emitter* e, int bits, int size) {
+@@ -663,6 +663,61 @@ static void emitOffset(struct Emitter* e, int bits, int size) {
  	}
  }
  
@@ -71,7 +70,7 @@ index 6138b1c..9ea78b6 100644
  // romCode is set for cartridge code with the prefetch buffer, whose data accesses to the cartridge
  // stop it.
  static uint8_t* emitMemRoutine(struct Jit* jit, struct Emitter* e, int kind, bool romCode) {
-@@ -652,7 +707,7 @@ static uint8_t* emitMemRoutine(struct Jit* jit, struct Emitter* e, int kind, boo
+@@ -673,7 +728,7 @@ static uint8_t* emitMemRoutine(struct Jit* jit, struct Emitter* e, int kind, boo
  	int32_t waitN = size == 4 ? OFF(waitN32) : OFF(waitN16);
  	// The access and a load's internal cycle.
  	int fixed = store ? 1 : 2;
@@ -80,7 +79,7 @@ index 6138b1c..9ea78b6 100644
  	int slowCount = 0;
  
  	aDpR(e, C_AL, D_MOV, false, R0, 0, R1, S_LSR, 24);
-@@ -673,6 +728,20 @@ static uint8_t* emitMemRoutine(struct Jit* jit, struct Emitter* e, int kind, boo
+@@ -694,6 +749,20 @@ static uint8_t* emitMemRoutine(struct Jit* jit, struct Emitter* e, int kind, boo
  		aDpI(e, C_AL, D_CMP, true, 0, R0, REGION_ROM2_EX - REGION_ROM0);
  		toRom = aB(e, C_LS, NULL);
  	}
@@ -101,7 +100,7 @@ index 6138b1c..9ea78b6 100644
  	toSlow[slowCount++] = aB(e, C_AL, NULL);
  
  	for (int r = 0; r < 2; ++r) {
-@@ -799,32 +868,68 @@ static uint8_t* emitMemRoutine(struct Jit* jit, struct Emitter* e, int kind, boo
+@@ -820,32 +889,68 @@ static uint8_t* emitMemRoutine(struct Jit* jit, struct Emitter* e, int kind, boo
  		emitVramAccess(e, kind, romCode, toSlow, &slowCount);
  	}
  
