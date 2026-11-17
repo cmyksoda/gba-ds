@@ -803,6 +803,7 @@ static void close_core(ArmCore* c) {
 static uint32_t colour_8888(uint16_t v);
 static void widen_tables(void);
 int emuRenderWorkers = 1;
+bool emuHiddenCopy;
 
 bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 	memset(e, 0, sizeof(*e));
@@ -832,7 +833,7 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 		if (toLoad && emu_is_archive_name(romPath)) romRoom = malloc(gbaRomBufferSize(toLoad));
 		/* (set aside already: the heap free doesn't count it, so nothing more
 		 * is kept for it) */
-		host_jit_main(audio, romRoom ? 0 : toLoad);
+		host_jit_main(audio, romRoom ? 0 : toLoad, emuHiddenCopy);
 	}
 	c->gba = gbaCreate();
 	pthread_mutex_unlock(&sharedLock);
@@ -1177,7 +1178,10 @@ void emu_tidy(Emu* e) {
 	ArmCore* c = AC(e);
 	size_t size = 0;
 	size_t used = c && c->gba ? jitCodeUsed(c->gba, &size) : 0;
-	if (size && (used > size / 10 * 4 || getenv("GBADS_TIDY_ALWAYS"))) { /* (GBADS_TIDY_ALWAYS: tests) */
+	/* (three quarters: since armGBA reuses a full stretch part's room and caps careful
+	 * copies, Mario Kart's code levels off at about 60% of its 13 MiB, and emptying it at
+	 * 40% only cost a 120 ms frame between races, 2026-11-16) */
+	if (size && (used > size / 4 * 3 || getenv("GBADS_TIDY_ALWAYS"))) { /* (GBADS_TIDY_ALWAYS: tests) */
 		/* (what it had compiled goes back on the warm list, for the frames'
 		 * spare time to compile again before the race) */
 		enum { MOST = 1 << 16 };

@@ -503,6 +503,7 @@ bool emu_threaded(const Emu* e) {
 	return e->core && e->core->videoLogger;
 }
 int emuRenderWorkers = 1;
+bool emuHiddenCopy;
 
 bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 	memset(e, 0, sizeof(*e));
