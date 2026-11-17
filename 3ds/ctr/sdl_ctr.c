@@ -913,7 +913,7 @@ static bool update_by_gpu(SDL_Texture* t, const void* pixels, int pitch, int y0,
 }
 
 /* (TEST: the average time of a whole picture's upload, logged now and then) */
-static u64 upTicks;
+static u64 upTicks, upFlushTicks, upXferTicks;
 static unsigned upCount;
 
 /* A whole RGB565 picture: the GPU reads it where it is (linear memory, a texture-wide row), else from a copy in the stage. */
@@ -939,10 +939,16 @@ static int update_565(SDL_Texture* t, const void* pixels, int pitch) {
 		for (int y = 0; y < h; ++y) memcpy((u16*) t->stage + (size_t) y * texW, (const u8*) pixels + (size_t) y * pitch, (size_t) w * 2);
 		from = t->stage;
 	}
+	u64 flushT0 = svcGetSystemTick();
 	cache_flush(from, (size_t) texW * h * 2);
+	u64 xferT0 = svcGetSystemTick();
 	GPU_WAIT(C3D_SyncDisplayTransfer((u32*) from, GX_BUFFER_DIM(texW, h), (u32*) t->tex.data, GX_BUFFER_DIM(texW, h),
 	                                 GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGB565) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB565) |
 	                                     GX_TRANSFER_OUT_TILED(1)));
+	if (t->w == 240 && t->h == 160) {
+		upFlushTicks += xferT0 - flushT0;
+		upXferTicks += svcGetSystemTick() - xferT0;
+	}
 	return 0;
 }
 
@@ -957,8 +963,10 @@ int SDL_UpdateTexture(SDL_Texture* t, const SDL_Rect* rect, const void* pixels, 
 		if (t->w == 240 && t->h == 160) {
 			upTicks += svcGetSystemTick() - t0;
 			if (++upCount == 600) {
-				logLine("textures: a 240x160 picture's upload %.3f ms on average", (double) upTicks / upCount / CPU_TICKS_PER_MSEC);
-				upTicks = 0, upCount = 0;
+				logLine("textures: a 240x160 picture's upload %.3f ms on average (cache flush %.3f, GPU transfer %.3f)",
+				        (double) upTicks / upCount / CPU_TICKS_PER_MSEC, (double) upFlushTicks / upCount / CPU_TICKS_PER_MSEC,
+				        (double) upXferTicks / upCount / CPU_TICKS_PER_MSEC);
+				upTicks = upFlushTicks = upXferTicks = 0, upCount = 0;
 			}
 		}
 		return r;
