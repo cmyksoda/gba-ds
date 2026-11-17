@@ -880,6 +880,64 @@ static void tiling_selftest(void) {
 	texture_free(t);
 }
 
+/* gba-ds.cfg's cpu_tile: a whole 240x160 picture tiled by the CPU, straight into its texture, instead of through the
+ * stage and the copy engine a call waits for. The frame is begun first: that waits for the GPU to finish the last
+ * frame, which may still be drawing from this texture. */
+static bool cpuTile, cpuTileOk;
+
+void host_set_cpu_tile(bool on) {
+	cpuTile = on;
+}
+
+/* texel (x, y) of a tile: the Morton order of 8x8 */
+#define TILE_AT(x, y) (((x) & 1) | ((y) & 1) << 1 | ((x) & 2) << 1 | ((y) & 2) << 2 | ((x) & 4) << 2 | ((y) & 4) << 3)
+#define TILE_ROW(y, f) \
+	o[TILE_AT(0, y)] = f(s[(y) * sw + 0]), o[TILE_AT(1, y)] = f(s[(y) * sw + 1]), o[TILE_AT(2, y)] = f(s[(y) * sw + 2]), \
+	o[TILE_AT(3, y)] = f(s[(y) * sw + 3]), o[TILE_AT(4, y)] = f(s[(y) * sw + 4]), o[TILE_AT(5, y)] = f(s[(y) * sw + 5]), \
+	o[TILE_AT(6, y)] = f(s[(y) * sw + 6]), o[TILE_AT(7, y)] = f(s[(y) * sw + 7])
+
+/* the GPU's RGBA8 has R in the top byte: ARGB8888 is rotated to it, ABGR8888 and XBGR8888 (alpha made full) swapped */
+#define TO_RGBA_ARGB(p) ((p) << 8 | (p) >> 24)
+#define TO_RGBA_ABGR(p) __builtin_bswap32(p)
+#define TO_RGBA_XBGR(p) __builtin_bswap32((p) | 0xFF000000u)
+#define TILE_ALL(f) \
+	TILE_ROW(0, f), TILE_ROW(1, f), TILE_ROW(2, f), TILE_ROW(3, f), TILE_ROW(4, f), TILE_ROW(5, f), TILE_ROW(6, f), TILE_ROW(7, f)
+
+static void tile_rgba8(u32* out, size_t outTilesX, const Uint32* src, size_t sw, int tilesX, int tilesY, Uint32 format) {
+	for (int ty = 0; ty < tilesY; ++ty) {
+		const Uint32* row = src + (size_t) ty * 8 * sw;
+		u32* o = out + (size_t) ty * outTilesX * 64;
+		for (int tx = 0; tx < tilesX; ++tx, o += 64) {
+			const Uint32* s = row + tx * 8;
+			if (format == SDL_PIXELFORMAT_ARGB8888) TILE_ALL(TO_RGBA_ARGB);
+			else if (format == SDL_PIXELFORMAT_ABGR8888) TILE_ALL(TO_RGBA_ABGR);
+			else TILE_ALL(TO_RGBA_XBGR);
+		}
+	}
+}
+
+static u64 upTileTicks;
+
+/* (the texel columns past the picture, up to the texture's width, stay as they were: zero) */
+static bool tile_into(SDL_Texture* t, const void* pixels, int pitch) {
+	if (!t->streaming || t->tw != t->w || t->th != t->h || (pitch & 3) || ((u32) pixels & 3) || (t->w & 7) || (t->h & 7) || t->tex.width < 64) {
+		return false;
+	}
+	u64 t0 = svcGetSystemTick();
+	int tilesX = t->w / 8, tilesY = t->h / 8;
+	tile_rgba8(t->tex.data, t->tex.width / 8, pixels, (size_t) pitch / 4, tilesX, tilesY, t->format);
+	u64 t1 = svcGetSystemTick();
+	cache_flush(t->tex.data, (size_t) t->tex.width * 8 * 4 * (size_t) tilesY);
+	upTileTicks += t1 - t0;
+	return true;
+}
+
+static bool update_by_cpu_tiled(SDL_Texture* t, const void* pixels, int pitch) {
+	if (!cpuTile || !cpuTileOk) return false;
+	frame_begin();
+	return tile_into(t, pixels, pitch);
+}
+
 /* Rows y0 to y0 + rows - 1 (whole tile rows: multiples of 8) of the picture, from pixels, which starts at row y0. */
 static bool update_by_gpu(SDL_Texture* t, const void* pixels, int pitch, int y0, int rows) {
 	int w = t->w, h = t->h;
@@ -952,6 +1010,34 @@ static int update_565(SDL_Texture* t, const void* pixels, int pitch) {
 	return 0;
 }
 
+/* (TEST: the CPU's tiling of a picture against the GPU's, word for word, for each format; the CPU's is used only if they match) */
+static void cpu_tile_selftest(void) {
+	if (!gpu_tiling()) return;
+	static const Uint32 formats[3] = { SDL_PIXELFORMAT_XBGR8888, SDL_PIXELFORMAT_ABGR8888, SDL_PIXELFORMAT_ARGB8888 };
+	u32* px = malloc(240 * 160 * 4);
+	bool ok = px != NULL;
+	int bad = 0;
+	for (int k = 0; k < 3 && ok; ++k) {
+		SDL_Texture* a = SDL_CreateTexture(NULL, formats[k], SDL_TEXTUREACCESS_STREAMING, 240, 160);
+		SDL_Texture* b = SDL_CreateTexture(NULL, formats[k], SDL_TEXTUREACCESS_STREAMING, 240, 160);
+		u32 seed = 777 + (u32) k;
+		for (int i = 0; i < 240 * 160; ++i) px[i] = seed = seed * 1664525u + 1013904223u;
+		if (!a || !b || !update_by_gpu(a, px, 240 * 4, 0, 160) || !tile_into(b, px, 240 * 4)) {
+			ok = false;
+		} else {
+			svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32) a->tex.data, a->tex.size);
+			const u32 *ga = a->tex.data, *gb = b->tex.data;
+			for (u32 i = 0; i < a->tex.width * 160; ++i) bad += ga[i] != gb[i];
+		}
+		if (a) texture_free(a);
+		if (b) texture_free(b);
+	}
+	free(px);
+	cpuTileOk = ok && !bad;
+	logLine("textures: CPU tiling self-test: %s", !ok ? "not made" : bad ? "differs from the GPU's" : "all words match the GPU's (three formats)");
+	upTileTicks = 0;
+}
+
 int SDL_UpdateTexture(SDL_Texture* t, const SDL_Rect* rect, const void* pixels, int pitch) {
 	if (!t || t->target || !pixels) return -1;
 	SDL_Rect whole = { 0, 0, t->w, t->h };
@@ -973,13 +1059,20 @@ int SDL_UpdateTexture(SDL_Texture* t, const SDL_Rect* rect, const void* pixels, 
 	}
 	if (rect == &whole || (!rect->x && !rect->y && rect->w == t->w && rect->h == t->h)) {
 		u64 t0 = svcGetSystemTick();
-		bool done = update_by_gpu(t, pixels, pitch, 0, t->h);
+		bool done = t->w == 240 && t->h == 160 && update_by_cpu_tiled(t, pixels, pitch);
+		if (!done) done = update_by_gpu(t, pixels, pitch, 0, t->h);
 		if (!done) done = update_by_cpu(t, rect, pixels, pitch) == 0;
 		if (t->w == 240 && t->h == 160) {
 			upTicks += svcGetSystemTick() - t0;
 			if (++upCount == 600) {
-				logLine("textures: a 240x160 picture's upload %.3f ms on average", (double) upTicks / upCount / CPU_TICKS_PER_MSEC);
-				upTicks = 0, upCount = 0;
+				double up = (double) upTicks / upCount / CPU_TICKS_PER_MSEC;
+				if (upTileTicks) {
+					logLine("textures: a 240x160 picture's upload %.3f ms on average (tiled by the CPU: %.3f ms of it, the rest the frame start and the cache flush)", up,
+					        (double) upTileTicks / upCount / CPU_TICKS_PER_MSEC);
+				} else {
+					logLine("textures: a 240x160 picture's upload %.3f ms on average (tiled by the GPU)", up);
+				}
+				upTicks = upTileTicks = 0, upCount = 0;
 			}
 		}
 		return done ? 0 : -1;
@@ -1668,6 +1761,7 @@ int SDL_Init(Uint32 flags) {
 		videoUp = true;
 		logLine("start: the GPU is up");
 		tiling_selftest();
+		cpu_tile_selftest();
 		if (!padThread) pad_start();
 	}
 	if (flags & SDL_INIT_AUDIO) {

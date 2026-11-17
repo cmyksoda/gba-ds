@@ -68,6 +68,7 @@ typedef struct Config {
 	int aheadCore;     /* ahead_core: frame_buffer's thread */
 	int sideCore;      /* side_core: the pad thread, logos, files and the rest */
 	int videoCore;     /* video_core: mGBA's drawing thread (needs the patched libmgba) */
+	bool cpuTile;      /* cpu_tile: the 3DS tiles a whole 240x160 picture itself, not by the GPU's copy engine */
 	int videoWake;     /* video_wake: mGBA's drawing thread is woken every N+1 lines, N = 0, 1, 3, 7, 15, 31 or 63 (the patched libmgba) */
 	int core1Limit;    /* core1_limit: the percent of the system core given to a thread on core 1 */
 	bool coreProbe;    /* core_probe: how much CPU each core gives a thread, in the log at start */
