@@ -72,6 +72,10 @@ typedef struct ArmCore {
 	/* emu_mark_backdrop: the same picture drawn again on a backdrop of
 	 * MARK_555, where every pixel no layer or sprite drew stays MARK_555 */
 	uint16_t* markFrame;
+	/* armgba_picture_thread: the render workers widen the frames they hand over, into wideBuf in turn, and
+	 * e->fb points at the one that holds the frame taken (fbOwn is the one this machine made) */
+	uint32_t* fbOwn;
+	uint32_t* wideBuf[2];
 } ArmCore;
 
 static ArmCore* AC(const Emu* e) {
@@ -792,6 +796,8 @@ static void close_core(ArmCore* c) {
 		gbaDestroy(c->gba);
 	}
 	free(c->markFrame);
+	free(c->wideBuf[0]);
+	free(c->wideBuf[1]);
 	free(c->savePath);
 #ifdef __3DS__
 	free(c->seen);
@@ -802,6 +808,7 @@ static void close_core(ArmCore* c) {
 
 static uint32_t colour_8888(uint16_t v);
 static void widen_tables(void);
+static void widen_row(uint32_t* dst, const uint16_t* src);
 int emuRenderWorkers = 1;
 bool emuHiddenCopy;
 
@@ -1009,8 +1016,20 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 	if (getenv("GBADS_AUDIO_THREAD")) audioThreadStart(gba);
 #endif
 
-	e->fb = calloc(GBA_W * GBA_H, sizeof(uint32_t));
+	e->fb = c->fbOwn = calloc(GBA_W * GBA_H, sizeof(uint32_t));
 	e->audio = audio;
+	if (c->late && getenv("GBADS_ARMGBA_PICTURE_THREAD") && atoi(getenv("GBADS_ARMGBA_PICTURE_THREAD")) == 1) {
+		c->wideBuf[0] = calloc(GBA_W * GBA_H, sizeof(uint32_t));
+		c->wideBuf[1] = calloc(GBA_W * GBA_H, sizeof(uint32_t));
+		if (c->wideBuf[0] && c->wideBuf[1]) {
+			widen_tables();
+			renderThreadSetWiden(gba, widen_row, c->wideBuf[0], c->wideBuf[1]);
+		} else {
+			free(c->wideBuf[0]);
+			free(c->wideBuf[1]);
+			c->wideBuf[0] = c->wideBuf[1] = NULL;
+		}
+	}
 #ifdef __3DS__
 	c->game = audio;
 	jit_stats_open(c, audio);
@@ -1040,6 +1059,7 @@ fail:
 static Emu* rewindOwner;
 void emu_close(Emu* e) {
 	if (e->core) {
+		if (AC(e)->fbOwn) e->fb = AC(e)->fbOwn;
 		if (rewindOwner == e) emu_rewind_deinit();
 		close_core(AC(e));
 		e->core = NULL;
@@ -1079,6 +1099,18 @@ static __attribute__((noipa)) void widen_words(uint32_t* restrict dst, const uin
 	}
 }
 
+/* One row, from a render worker (its source is word aligned: the log's frame). */
+static void widen_row(uint32_t* dst, const uint16_t* src) {
+	const uint32_t* words = __builtin_assume_aligned(src, 4);
+	for (int i = 0; i < GBA_W / 2; i += 2) {
+		uint32_t const a = words[i], b = words[i + 1];
+		dst[2 * i] = widenLow[a & 0xFF] | widenHigh[(a >> 8) & 0xFF];
+		dst[2 * i + 1] = widenLow[(a >> 16) & 0xFF] | widenHigh[a >> 24];
+		dst[2 * i + 2] = widenLow[b & 0xFF] | widenHigh[(b >> 8) & 0xFF];
+		dst[2 * i + 3] = widenLow[(b >> 16) & 0xFF] | widenHigh[b >> 24];
+	}
+}
+
 /* A whole picture; two colors a word where they are word aligned (the ARM11 can't load a half-word pair otherwise). */
 static void widen_picture(uint32_t* dst, const uint16_t* src) {
 	widen_tables();
@@ -1093,7 +1125,14 @@ static void widen_picture(uint32_t* dst, const uint16_t* src) {
  * 32-bit ones (bytes R, G, B, X), widened the way mGBA widens them. */
 #define MARK_555 0x7C1F
 static void take_picture(Emu* e) {
-	widen_picture(e->fb, (const uint16_t*) AC(e)->gba->renderer.frame);
+	ArmCore* c = AC(e);
+	const uint32_t* wide = c->wideBuf[0] ? renderThreadWide(c->gba) : NULL;
+	if (wide) {
+		e->fb = (uint32_t*) wide;
+	} else {
+		e->fb = c->fbOwn;
+		widen_picture(e->fb, (const uint16_t*) c->gba->renderer.frame);
+	}
 	/* (emu_mark_backdrop: the backdrop's pixels told apart by their fourth byte, as mGBA's flags there tell them apart) */
 	const uint16_t* mark = AC(e)->markFrame;
 	for (int i = 0; mark && i < GBA_W * GBA_H; ++i) {
@@ -1142,6 +1181,11 @@ static void run_frame(Emu* e, uint32_t keys, bool draw) {
 	uint64_t const t0 = timed ? renderThreadHostTicks() : 0;
 #endif
 	if (draw) take_picture(e);
+	else if (e->fb != c->fbOwn) {
+		/* (the picture kept is a worker's buffer, which it writes again two frames on) */
+		memcpy(c->fbOwn, e->fb, GBA_W * GBA_H * sizeof(uint32_t));
+		e->fb = c->fbOwn;
+	}
 #ifdef __3DS__
 	uint64_t const t1 = timed ? renderThreadHostTicks() : 0;
 #endif
