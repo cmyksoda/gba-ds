@@ -920,7 +920,8 @@ static u64 upTileTicks;
 
 /* (the texel columns past the picture, up to the texture's width, stay as they were: zero) */
 static bool tile_into(SDL_Texture* t, const void* pixels, int pitch) {
-	if (!t->streaming || t->tw != t->w || t->th != t->h || (pitch & 3) || ((u32) pixels & 3) || (t->w & 7) || (t->h & 7) || t->tex.width < 64) {
+	const bool known = t->format == SDL_PIXELFORMAT_XBGR8888 || t->format == SDL_PIXELFORMAT_ABGR8888 || t->format == SDL_PIXELFORMAT_ARGB8888;
+	if (!known || !t->streaming || t->tw != t->w || t->th != t->h || (pitch & 3) || ((u32) pixels & 3) || (t->w & 7) || (t->h & 7) || t->tex.width < 64) {
 		return false;
 	}
 	u64 t0 = svcGetSystemTick();
