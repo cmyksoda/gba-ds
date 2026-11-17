@@ -243,6 +243,24 @@ static void* writer_main(void* arg) {
 	return NULL;
 }
 
+static bool linesFirst;
+
+/* Above the hidden copy's thread: a writer that waits out its long blind stretches lets the ring fill, and the game then
+ * waits for room. The game's own priority is safe to share: it runs on another core. */
+static void writer_priority(void) {
+	if (!lg.threaded) return;
+	s32 game = 0x30;
+	svcGetThreadPriority(&game, CUR_THREAD_HANDLE);
+	svcSetThreadPriority(threadGetHandle((Thread) lg.thread), linesFirst ? game : game + 1);
+}
+
+void host_set_lines_first(bool on) {
+	if (on == linesFirst) return;
+	linesFirst = on;
+	writer_priority();
+	logLine("lines_first %s: the line writer's priority is the game's%s", on ? "on" : "off", on ? "" : " plus one");
+}
+
 static bool writer_start(const char* name, size_t stack) {
 	if (lg.threaded) return true;
 	pthread_attr_t attr;
@@ -251,6 +269,7 @@ static bool writer_start(const char* name, size_t stack) {
 	host_next_thread_name(name);
 	lg.threaded = host_pthread_create(&lg.thread, &attr, writer_main, NULL) == 0;
 	pthread_attr_destroy(&attr);
+	writer_priority();
 	return lg.threaded;
 }
 

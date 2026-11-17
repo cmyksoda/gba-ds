@@ -234,6 +234,7 @@ static bool set_option(Config* c, const char* key, const char* val) {
 	INT("video_wake", videoWake)
 	INT("bench_check", benchCheck)
 	BOOL("core_probe", coreProbe)
+	BOOL("lines_first", linesFirst)
 	BOOL("ab_swap", abSwap)
 	STR("hotkey", hotkey)
 	if (!strcmp(key, "hotkey_fps")) return true; /* (a test build's: the quick menu has the FPS counter) */

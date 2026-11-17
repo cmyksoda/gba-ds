@@ -206,6 +206,7 @@ int main(int argc, char** argv) {
 
 #ifdef __3DS__
 	host_set_cores(cfg.sideCore, cfg.captureCore, cfg.aheadCore, cfg.videoCore, cfg.core1Limit, cfg.coreProbe);
+	host_set_lines_first(cfg.linesFirst);
 #endif
 	if (!ui_init(&cfg, true)) return 1;
 	ui_theme(cfg.lightTheme);

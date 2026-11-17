@@ -59,6 +59,8 @@ void host_log_flush(void);
 /* The bench's lines go through the same thread: put one (write is called with it, on the thread), wait for all that
  * were put, stop the thread, and the longest write in ms since the last call. */
 void host_line_put(const char* line, void (*write)(const char* line));
+/* lines_first: the writer thread at the game's priority instead of a step below it (above the hidden copy's thread). */
+void host_set_lines_first(bool on);
 void host_line_drain(void);
 void host_line_stop(void);
 double host_line_worst_ms(void);
