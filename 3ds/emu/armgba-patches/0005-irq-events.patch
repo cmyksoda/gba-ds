@@ -1,48 +1,17 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: armGBA speedups <none@example.invalid>
-Date: Tue, 17 Nov 2026 12:27:20 -0500
+Date: Tue, 17 Nov 2026 14:00:00 -0500
 Subject: armGBA: CPU writes to IE, IF and IME take effect at once when no event is
- due, and the availability change is a mark while the CPU runs
+ due, and a 32-bit write to IE and IF is one write
 
 
 diff --git a/src/gba.c b/src/gba.c
-index 8929a84..6bbec04 100644
+index 8929a84..3b6a858 100644
 --- a/src/gba.c
 +++ b/src/gba.c
-@@ -37,8 +37,9 @@ static void freeChange(void* context) {
- // IF and let interrupts nest a few instructions later, as on the console, without the one it
- // acknowledged coming back.
- static void scheduleChange(struct GBA* gba, struct IrqChange* slots, bool value, int32_t cycles, int32_t late) {
-+	struct IrqChange* const last = &slots[slots == gba->irq.availableChange ? 2 : 3];
- 	struct IrqChange* change = &slots[0];
--	while (change->busy && change < &slots[3]) {
-+	while (change->busy && change < last) {
- 		++change;
- 	}
- 	// With every slot in flight, the newest change takes the last one's place.
-@@ -64,26 +65,70 @@ static void lineChanged(struct GBA* gba, void* context, uint32_t late) {
- 	gba->irq.line = ((struct IrqChange*) context)->value;
+@@ -65,23 +65,40 @@ static void lineChanged(struct GBA* gba, void* context, uint32_t late) {
  }
  
-+// Only a halted CPU can see IE & IF as the halt logic does, so while it runs that change is a mark in the pool's
-+// last slot (due at event.when) with irq.available set already. Settling turns a mark not yet due back into an event.
-+static void settleAvailable(struct GBA* gba, int32_t at) {
-+	struct IrqChange* mark = &gba->irq.availableChange[3];
-+	if (!mark->busy) {
-+		return;
-+	}
-+	mark->busy = false;
-+	if ((int32_t) (mark->event.when - at) <= 0) {
-+		return;
-+	}
-+	gba->irq.available = !mark->value;
-+	scheduleChange(gba, gba->irq.availableChange, mark->value, (int32_t) (mark->event.when - timingCurrentTime(gba)), 0);
-+}
-+
-+void gbaIrqSettle(struct GBA* gba) {
-+	settleAvailable(gba, timingCurrentTime(gba));
-+}
-+
  // The first stage: the registers take their new values, and the later stages are scheduled if they
 -// change.
 -static void applyIrq(struct GBA* gba, void* context, uint32_t late) {
@@ -51,53 +20,43 @@ index 8929a84..6bbec04 100644
  	struct Irq* irq = &gba->irq;
 -	gbaIrqSync(gba);
 -	freeChange(context);
-+	settleAvailable(gba, timingCurrentTime(gba) + delay - late);
  	gba->io[IO(REG_IE)] = irq->ie;
  	gba->io[IO(REG_IF)] = irq->iflags;
  	gba->io[IO(REG_IME)] = irq->ime;
  	bool available = irq->ie & irq->iflags;
  	if (available != irq->available) {
 -		scheduleChange(gba, irq->availableChange, available, 1, (int32_t) late);
-+		if (gba->cpu.halted || gba->cpu.overclock) {
-+			scheduleChange(gba, irq->availableChange, available, delay + 1, late);
-+		} else {
-+			struct IrqChange* mark = &irq->availableChange[3];
-+			mark->event.when = timingCurrentTime(gba) + delay + 1 - late;
-+			mark->value = available;
-+			mark->busy = true;
-+			irq->available = available;
-+		}
++		scheduleChange(gba, irq->availableChange, available, delay + 1, late);
  	}
  	bool line = irq->ime && available;
  	if (line != irq->lineDriven) {
  		irq->lineDriven = line;
 -		scheduleChange(gba, irq->lineChange, line, 2, (int32_t) late);
 +		scheduleChange(gba, irq->lineChange, line, delay + 2, late);
- 	}
- }
- 
++	}
++}
++
 +static void applyIrq(struct GBA* gba, void* context, uint32_t late) {
 +	gbaIrqSync(gba);
 +	freeChange(context);
 +	applyStage(gba, 0, (int32_t) late);
 +}
 +
-+// A CPU write reaches the registers a cycle later. With no event due by then nothing can look in
-+// between, so it takes effect now and the later stages go where the first one would put them.
++// A CPU write reaches the registers a cycle later; with no event due by then it takes effect now, and the later
++// stages go where the first one would put them. A DMA's write keeps the event: DMA runs events in its own cycles.
 +static void applyWrite(struct GBA* gba) {
 +	struct Irq* irq = &gba->irq;
 +	const struct Event* next = gba->timing.root;
-+	if (gba->cpu.overclock || gba->inEvent || gba->timing.reroot || irq->quietPending || gbaQuietHblank(gba) || (next && timingUntil(gba, (struct Event*) next) <= 1)) {
++	bool wait = gba->performingDma || gba->cpu.overclock || gba->inEvent || gba->timing.reroot || irq->quietPending || gbaQuietHblank(gba);
++	if (wait || (next && timingUntil(gba, (struct Event*) next) <= 1)) {
 +		scheduleChange(gba, irq->apply, false, 1, 0);
 +		return;
-+	}
+ 	}
 +	applyStage(gba, 1, 0);
-+}
-+
+ }
+ 
  // Whether an event is one of the pipeline's stages: none starts DMA, so each can run after the
- // instruction it falls in.
- bool gbaIrqEvent(const struct Event* event) {
-@@ -543,33 +588,47 @@ void gbaIrqQuietChanged(struct GBA* gba, bool wasQuiet) {
+@@ -543,33 +560,47 @@ void gbaIrqQuietChanged(struct GBA* gba, bool wasQuiet) {
  
  // The three interrupt registers. Each write goes through the pipeline's first stage one cycle
  // later.
@@ -149,34 +108,11 @@ index 8929a84..6bbec04 100644
  }
  
  // The key interrupt: any of the chosen keys, or all of them at once, as KEYCNT says. It is checked
-@@ -603,6 +662,7 @@ void gbaSetOverclock(struct GBA* gba, int8_t overclock) {
- 	if (overclock == gba->cpu.overclock) {
- 		return;
- 	}
-+	gbaIrqSettle(gba);
- 	uint64_t console = timingConsoleCycles(gba);
- 	uint64_t cpu = gba->timing.globalCycles + gba->cpu.cycles;
- 	gba->cpu.overclock = overclock;
-@@ -620,6 +680,7 @@ void gbaSetOverclock(struct GBA* gba, int8_t overclock) {
- 
- // Halting takes a cycle on top of the write.
- void gbaHalt(struct GBA* gba) {
-+	gbaIrqSettle(gba);
- 	gba->cpu.cycles += 1;
- 	gba->cpu.nextEvent = gba->cpu.cycles;
- 	gba->cpu.halted = 1;
 diff --git a/src/gba.h b/src/gba.h
-index c66ea35..3b4b3a2 100644
+index c66ea35..d5bf1d2 100644
 --- a/src/gba.h
 +++ b/src/gba.h
-@@ -907,11 +907,14 @@ void gbaReset(struct GBA*, bool skipBios);
- void gbaRunPart(struct GBA*);
- void gbaSetKeys(struct GBA*, uint16_t keys);
- void gbaRaiseIrq(struct GBA*, int irq, uint32_t late);
-+// Makes the interrupt controller's pending changes events, as a state or a halted CPU needs them.
-+void gbaIrqSettle(struct GBA*);
- bool gbaQuietHblank(struct GBA*);
- void gbaIrqSync(struct GBA*);
+@@ -912,6 +912,7 @@ void gbaIrqSync(struct GBA*);
  void gbaIrqQuietChanged(struct GBA*, bool wasQuiet);
  void gbaWriteIe(struct GBA*, uint16_t value);
  void gbaWriteIf(struct GBA*, uint16_t value);
@@ -198,15 +134,3 @@ index 60eb922..25ef67a 100644
  	default:
  		ioWrite(gba, address, value & 0xFFFF);
  		ioWrite(gba, address | 2, value >> 16);
-diff --git a/src/state.c b/src/state.c
-index 19c96ff..dffc260 100644
---- a/src/state.c
-+++ b/src/state.c
-@@ -192,6 +192,7 @@ static void leaveOutHost(const struct GBA* gba, struct GBA* saved) {
- void gbaSaveState(struct GBA* gba, void* state) {
- 	// With a sound thread, the sound so far is in its copy.
- 	audioThreadSync(gba);
-+	gbaIrqSettle(gba);
- 	struct StateHeader header = { .magic = STATE_MAGIC, .size = sizeof(struct GBA), .base = 0 };
- 	struct Event* all[EVENTS];
- 	events(gba, all);
