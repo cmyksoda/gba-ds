@@ -142,16 +142,23 @@ int __wrap__open_r(struct _reent* r, const char* path, int flags, int mode) {
 
 /* The card's writer: the log (stderr, a device of its own, "logbuf:") and the bench's lines go through one ring in memory
  * to one thread, so a card that stops for seconds holds up neither. A full ring drops log writes and says how many; a bench
- * line waits for room (the ring holds about 25). Before the thread starts they are written straight out. */
-enum { RING = 10 * 1024, REC_MAX = 1023, LINE_BYTES = 640, LINE_SPARE = 1300, REC_LINE = 0x8000 };
+ * line with no room waits in a list, not in the game's frame (the writer shares core 3 with the hidden copy). */
+enum { RING = 10 * 1024, REC_MAX = 1023, LINE_BYTES = 640, LINE_SPARE = 1300, REC_LINE = 0x8000, SPILL_MAX = 256 };
+typedef struct Spilled {
+	struct Spilled* next;
+	u32 n;
+	char text[];
+} Spilled;
 static struct {
 	LightLock lock;
-	LightEvent wake, room;
+	LightEvent wake;
 	char ring[RING];
-	u32 head, used, dropped;
+	u32 head, used, dropped, lost, spilledNow;
+	Spilled *spillHead, *spillTail;
 	volatile bool threaded;
 	bool quit;
 	double worstMs;
+	u64 lockWaitTicks; /* (the game thread's waits for the lock, since host_line_wait_ms last asked) */
 	FILE* file;
 	void (*writeLine)(const char* line);
 	pthread_t thread;
@@ -166,6 +173,14 @@ static void ring_add(u32 flag, const char* data, u32 n) {
 	for (u32 i = 0; i < 2; ++i) lg.ring[(at + i) % RING] = bytes[i];
 	for (u32 i = 0; i < n; ++i) lg.ring[(at + 2 + i) % RING] = data[i];
 	lg.used += 2 + n;
+}
+
+/* (the lock is held for a few instructions: a wait for it is counted, for the bench's stall line) */
+static void ring_lock(void) {
+	if (!LightLock_TryLock(&lg.lock)) return;
+	u64 t0 = svcGetSystemTick();
+	LightLock_Lock(&lg.lock);
+	lg.lockWaitTicks += svcGetSystemTick() - t0;
 }
 
 static int logdev_open(struct _reent* r, void* file, const char* path, int flags, int mode) {
@@ -186,7 +201,7 @@ static ssize_t logdev_write(struct _reent* r, void* file, const char* buf, size_
 	}
 	for (size_t done = 0; done < n;) {
 		u32 part = n - done < REC_MAX ? (u32) (n - done) : REC_MAX;
-		LightLock_Lock(&lg.lock);
+		ring_lock();
 		if (lg.used + 2 + part + LINE_SPARE > RING) ++lg.dropped;
 		else ring_add(0, buf + done, part);
 		LightLock_Unlock(&lg.lock);
@@ -204,11 +219,24 @@ static const devoptab_t logDevice = {
 	.write_r = logdev_write,
 };
 
+/* (the lock is held) Lines the ring had no room for, in the order they came. */
+static void spill_move(void) {
+	while (lg.spillHead && lg.used + 2 + lg.spillHead->n <= RING) {
+		Spilled* s = lg.spillHead;
+		lg.spillHead = s->next;
+		if (!lg.spillHead) lg.spillTail = NULL;
+		--lg.spilledNow;
+		ring_add(REC_LINE, s->text, s->n);
+		free(s);
+	}
+}
+
 static void* writer_main(void* arg) {
 	(void) arg;
 	static char rec[REC_MAX + 1];
 	for (;;) {
 		LightLock_Lock(&lg.lock);
+		spill_move();
 		if (!lg.used) {
 			bool quit = lg.quit;
 			LightLock_Unlock(&lg.lock);
@@ -220,13 +248,15 @@ static void* writer_main(void* arg) {
 		u32 n = header & ~REC_LINE;
 		for (u32 i = 0; i < n; ++i) rec[i] = lg.ring[(lg.head + 2 + i) % RING];
 		rec[n] = 0;
-		u32 dropped = lg.dropped;
-		lg.dropped = 0;
+		u32 dropped = lg.dropped, lost = lg.lost;
+		lg.dropped = lg.lost = 0;
 		LightLock_Unlock(&lg.lock);
 		if (dropped) fprintf(lg.file, "\n[log: %u write(s) dropped, the SD card was busy]\n", (unsigned) dropped);
+		if (lost && lg.file) fprintf(lg.file, "\n[bench: %u line(s) lost, the SD card was busy for minutes]\n", (unsigned) lost);
 		if (header & REC_LINE) {
 			u64 t0 = svcGetSystemTick();
 			lg.writeLine(rec);
+			if (lg.file && fprintf(lg.file, "%s\n", rec) > 0) fflush(lg.file);
 			double ms = (double) (svcGetSystemTick() - t0) * 1000.0 / SYSCLOCK_ARM11;
 			LightLock_Lock(&lg.lock);
 			if (ms > lg.worstMs) lg.worstMs = ms;
@@ -238,7 +268,6 @@ static void* writer_main(void* arg) {
 		lg.head = (lg.head + 2 + n) % RING;
 		lg.used -= 2 + n;
 		LightLock_Unlock(&lg.lock);
-		LightEvent_Signal(&lg.room);
 	}
 	return NULL;
 }
@@ -275,7 +304,7 @@ static bool writer_start(const char* name, size_t stack) {
 }
 
 static void ring_drain(void) {
-	while (lg.threaded && lg.used) {
+	while (lg.threaded && (lg.used || lg.spillHead)) {
 		LightEvent_Signal(&lg.wake);
 		svcSleepThread(1000000);
 	}
@@ -298,18 +327,34 @@ void host_log_flush(void) {
 
 void host_line_put(const char* line, void (*write)(const char* line)) {
 	lg.writeLine = write;
+	u32 n = (u32) strnlen(line, LINE_BYTES - 1);
 	if (!writer_start("bench lines", 32 * 1024)) {
 		write(line);
+		logLine("%s", line);
 		return;
 	}
-	u32 n = (u32) strnlen(line, LINE_BYTES - 1);
-	for (;;) {
-		LightLock_Lock(&lg.lock);
-		bool fits = lg.used + 2 + n <= RING;
-		if (fits) ring_add(REC_LINE, line, n);
+	ring_lock();
+	bool fits = !lg.spillHead && lg.used + 2 + n <= RING;
+	if (fits) ring_add(REC_LINE, line, n);
+	bool full = !fits && lg.spilledNow >= SPILL_MAX;
+	if (full) ++lg.lost;
+	LightLock_Unlock(&lg.lock);
+	if (!fits && !full) {
+		Spilled* s = malloc(sizeof(*s) + n + 1);
+		ring_lock();
+		if (s) {
+			s->next = NULL;
+			s->n = n;
+			memcpy(s->text, line, n);
+			s->text[n] = 0;
+			if (lg.spillTail) lg.spillTail->next = s;
+			else lg.spillHead = s;
+			lg.spillTail = s;
+			++lg.spilledNow;
+		} else {
+			++lg.lost;
+		}
 		LightLock_Unlock(&lg.lock);
-		if (fits) break;
-		LightEvent_Wait(&lg.room);
 	}
 	LightEvent_Signal(&lg.wake);
 }
@@ -320,6 +365,14 @@ void host_line_drain(void) {
 
 void host_line_stop(void) {
 	writer_stop();
+}
+
+double host_line_wait_ms(void) {
+	LightLock_Lock(&lg.lock);
+	double ms = (double) lg.lockWaitTicks * 1000.0 / SYSCLOCK_ARM11;
+	lg.lockWaitTicks = 0;
+	LightLock_Unlock(&lg.lock);
+	return ms;
 }
 
 double host_line_worst_ms(void) {
@@ -333,7 +386,6 @@ double host_line_worst_ms(void) {
 static void log_start(void) {
 	LightLock_Init(&lg.lock);
 	LightEvent_Init(&lg.wake, RESET_ONESHOT);
-	LightEvent_Init(&lg.room, RESET_ONESHOT);
 	lg.file = fopen(APP_DIR "/log.txt", "w");
 	if (!lg.file) return;
 	if (AddDevice(&logDevice) < 0 || !freopen("logbuf:/log", "w", stderr)) {

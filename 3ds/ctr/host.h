@@ -66,6 +66,7 @@ void host_set_lines_first(bool on);
 void host_line_drain(void);
 void host_line_stop(void);
 double host_line_worst_ms(void);
+double host_line_wait_ms(void);
 void host_ui_busy(void);
 void host_fs_yield(void);
 void host_mem_note(const char* what);
