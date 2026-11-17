@@ -7142,14 +7142,15 @@ static void map_show_new(bool fresh) {
 static bool liveOn;
 
 static bool frame_is_dark(Emu* e) {
-	int bright = 0, total = 0;
+	/* dark: under 1 bright pixel in 40 of the ones sampled; a lit picture says no after the first few hundred */
+	const int total = (GBA_W * GBA_H + 6) / 7, most = (total - 1) / 40;
+	int bright = 0;
 	for (int i = 0; i < GBA_W * GBA_H; i += 7) {
 		uint32_t c = emu_pixel_n(e, i);
 		int lum = ((c & 0xFF) + ((c >> 8) & 0xFF) * 2 + ((c >> 16) & 0xFF)) >> 2;
-		bright += lum > 40;
-		++total;
+		if (lum > 40 && ++bright > most) return false;
 	}
-	return bright * 40 < total;
+	return true;
 }
 
 static int game_screen(void) {
