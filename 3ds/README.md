@@ -225,7 +225,8 @@ gets its races to 60 frames a second on a New 3DS:
   code memory); at most 1.5 ms of compiling in a frame; the code memory
   emptied between races once it's 75% full (when it's full the recompiler
   empties it itself, a 100-300 ms frame). armGBA's side: no blocks compiled
-  from where an interrupt returns or an event falls, careful copies only
+  from where an interrupt returns or an event falls (but for a place returned
+  to 16 times, `armgba_mid_after`), careful copies only
   for blocks events fall in often and in at most a third of the code
   memory, and a full part of a stretch's leftover room used as a stretch of
   its own; a race's code levels off at about 8 of its 13 MiB.
@@ -234,6 +235,30 @@ gets its races to 60 frames a second on a New 3DS:
 
 A race still has the odd frame of 18-22 ms here and there, in busy stretches
 (about 9 ms of emulating on average, the HUD 2-4, drawing 2.5).
+
+## Speed (games the CPU holds up)
+
+GT Advance 3, Super Mario Advance 4, Metroid Fusion and others spend their
+frame in armGBA itself. What cut it, with the same pictures, RAM and sound
+(checked on the desktop build and by the bench's hashes):
+
+- A place the CPU keeps returning to in the middle of a block (an interrupt's
+  return, line after line) gets a block of its own after 16 returns, in place
+  of the rest of the block being stepped on the exact CPU
+  (`armgba_mid_after`; 0 steps as before; at most one such block for each
+  16 KiB of code memory between flushes).
+- The render log's entries reach its workers once a line, and the sound log
+  takes one barrier an entry instead of three: the ARM11's barriers are slow
+  (`armgba_lean_logs = 0` for the old way, to compare on a console).
+- The interrupt pipeline's events and a halfword store to an I/O register
+  take shorter ways through the core.
+- `make PGO=use` builds armGBA's files from a profile (`3ds/emu/pgo/`, made
+  with `PGO=gen` and `3ds/emu/pgo-train.py`; both builds need `BUILD=build/gen`,
+  emptied first: GCC names a static function's profile by its object's path):
+  about 6% less to emulate in Azahar. A function whose code or line number
+  changed since the profile was made loses its profile (`PGO_QUIET=` lists
+  them): redo it after armGBA changes. `HOTCOLD=1` also keeps the profile's
+  hot code together.
 
 ## Speed (Yoshi's Island)
 

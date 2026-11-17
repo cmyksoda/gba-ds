@@ -10,6 +10,11 @@
 #   make HOTCOLD=1   links with ld/3dsx.ld, devkitARM's script with the profile's hot code kept together and its cold code
 #                    apart (-fprofile-use libmgba, ../mgba/build-libmgba.sh MGBA_PGO=use: GCC marks them .text.hot/.text.unlikely)
 #   XDEF, XLDFLAGS, XLIBS: more compiler defines, linker flags and libraries (empty by default; a profiling build's -lgcov)
+#   XCORE: more compiler flags for armGBA's files only (the profile build's -fprofile-generate / -fprofile-use)
+#   PGO=gen          armGBA's files count what they do (-fprofile-generate, -lgcov): ../emu/pgo-train.py plays ../emu/pgo/training.txt
+#                    in Azahar with the build and keeps the counts in ../emu/pgo/. PGO=use builds armGBA's files from them
+#                    (a function whose code changed since loses its profile). Both want BUILD=build/gen, emptied first: GCC names a
+#                    static function's profile by its object's path, so another BUILD loses those (PGO_QUIET= lists them).
 #   make cia-parts   what bannertool makes for the .cia (../Makefile's `cia` then runs makerom: cia.sh)
 
 ifeq ($(strip $(DEVKITARM)),)
@@ -55,6 +60,22 @@ ASFLAGS  := -g $(ARCH)
 LDFLAGS  := -specs=3dsx.specs -g -O3 -fwrapv -flto=auto -mword-relocations $(ARCH) -Wl,-Map,$(BUILD)/$(TARGET).map -Wl,--gc-sections -Wl,--wrap=stat -Wl,--wrap=threadCreate$(if $(SLOWSD), -Wl$(comma)--wrap=_write_r -Wl$(comma)--wrap=_read_r -Wl$(comma)--wrap=_open_r)$(if $(TEST), -Wl$(comma)--wrap=malloc -Wl$(comma)--wrap=calloc) $(if $(HOTCOLD),-B$(CURDIR)/ld/) $(XLDFLAGS)
 LIBS     := $(if $(filter armgba,$(CORE)),,$(MGBA_BUILD)/libmgba.a) -L$(CTRULIB)/lib -L$(PORTLIBS)/lib -lcitro2d -lcitro3d -lctru -lz -lm $(XLIBS)
 
+PGO_DIR := $(REPO)/3ds/emu/pgo
+# (PGO_QUIET= shows which functions' profiles no longer fit the code)
+PGO_QUIET ?= -Wno-coverage-mismatch -Wno-missing-profile
+ifneq ($(filter gen use,$(PGO)),)
+ifneq ($(BUILD),build/gen)
+$(error PGO=$(PGO) needs BUILD=build/gen: a profile only fits the objects it was made from by their path)
+endif
+endif
+ifeq ($(PGO),gen)
+XCORE += -fprofile-generate -fprofile-update=single -fprofile-dir=/gcov -fprofile-prefix-path=$(CURDIR)/$(BUILD)
+XDEF  += -DGBADS_PGO_GEN
+LIBS  += -lgcov
+else ifeq ($(PGO),use)
+XCORE += -fprofile-use=$(PGO_DIR) -fprofile-prefix-path=$(CURDIR)/$(BUILD) -fprofile-partial-training -fprofile-correction $(PGO_QUIET)
+endif
+
 D3 := $(REPO)/3ds
 S  := $(REPO)/src
 APP_SRC := $(addprefix $(S)/,main.c bench.c config.c font.c ui.c library.c mapper.c hotkeys.c folderpick.c game.c paths.c image.c brand_data.c \
@@ -88,7 +109,7 @@ ifneq ($(BENCH),)
 BENCH_DEF := -DGBADS_BENCH_TAG='"$(BENCH)"'
 endif
 $(HOST_OBJ): EXTRA := -O2 -Wall -Wextra $(APP_INC) $(CORE_DEFS) $(BENCH_DEF) $(if $(SLOWSD),-DGBADS_SLOW_SD) -DGBADS_VERSION='"$(VERSION)"' -DGBADS_UPSTREAM='"$(UPSTREAM)"' $(if $(LOG_URL),-DGBADS_LOG_URL='"$(LOG_URL)"')
-$(CORE_OBJ): EXTRA := $(ARMGBA_CORE_FLAGS)
+$(CORE_OBJ): EXTRA := $(ARMGBA_CORE_FLAGS) $(XCORE)
 $(WEBP_OBJ): EXTRA := -O2 -I$(REPO)/third_party/libwebp
 
 .PHONY: all cia-parts clean

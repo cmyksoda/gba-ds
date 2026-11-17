@@ -223,6 +223,10 @@ static bool apply_options(Config* cfg, char* words, char* bad, size_t badSize) {
 	return true;
 }
 
+#ifdef GBADS_PGO_GEN
+void __gcov_dump(void);
+#endif
+
 bool bench_run(Config* cfg) {
 	FILE* jobs = fopen(cfg->bench, "r");
 	if (!jobs) {
@@ -407,5 +411,8 @@ bool bench_run(Config* cfg) {
 	if (results) fclose(results);
 	results = NULL;
 	active = false;
+#ifdef GBADS_PGO_GEN
+	__gcov_dump(); /* (a profiling build: its counters go to the SD card before the app closes) */
+#endif
 	return true;
 }

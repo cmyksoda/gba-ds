@@ -845,6 +845,8 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 		goto fail;
 	}
 	struct GBA* gba = c->gba;
+	threadLogsLean = !getenv("GBADS_ARMGBA_LEAN_LOGS") || atoi(getenv("GBADS_ARMGBA_LEAN_LOGS")); /* (armgba_lean_logs = 0: a barrier at every entry of the render and sound logs) */
+	if (getenv("GBADS_ARMGBA_MID_AFTER")) jitSetMidAfter(gba, atoi(getenv("GBADS_ARMGBA_MID_AFTER"))); /* (armgba_mid_after: 0 steps every return into a block) */
 	c->hooks.context = c;
 	renderSetHooks(gba, &c->hooks);
 	gbaLoadBios(gba, armgbaBios, SIZE_BIOS);
