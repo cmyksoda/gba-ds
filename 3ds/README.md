@@ -277,7 +277,8 @@ the console; Azahar's copies finish at once).
 ## armGBA
 
 `third_party/armgba` is armGBA-3DS: armGBA's main with the 3DS port on top
-(ratherDashing/armGBA).
+(ratherDashing/armGBA). Every build that compiles it copies its `src/` into the build folder and applies
+`emu/armgba-patches/*.patch` there (`emu/armgba.mk`), so the submodule stays at its public commit and clean.
 What GBA DS uses of it that other frontends don't:
 
 - `struct RenderHooks` (`src/video/render.h`): layers and sprites left out

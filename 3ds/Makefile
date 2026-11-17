@@ -2,7 +2,8 @@
 # the devkitpro/devkitarm Docker image, the emulator tests in linuxserver/azahar.
 #
 #   make 3ds         ctr/gba-ds.3dsx (libmgba for the 3DS first, into ../deps/mgba-3ds, the first time)
-#   make 3ds CORE=armgba   on armGBA and its recompiler (git submodule update --init third_party/armgba)
+#   make 3ds CORE=armgba   on armGBA and its recompiler (git submodule update --init third_party/armgba; its
+#                    source is copied to the build folder with emu/armgba-patches applied)
 #   make 3ds LOG_URL=http://<this machine>:8377/log   a diagnosis build that sends its logs to tools/logserver.py
 #   make cia         ctr/gba-ds.cia as well (makerom and bannertool in TOOLS, ~/3ds-tools/bin)
 #   make sim         ../build/sim/harness: tools/harness.c on armGBA with its x86-64 recompiler (no console)

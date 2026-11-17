@@ -1,0 +1,2 @@
+armGBA speedups on top of third_party/armgba's public commit (5e95541), applied in name order to a copy of its src/ in the build folder by `../armgba.mk`; the submodule itself is never touched, and a patch that does not apply stops the build.
+They can be folded into ratherDashing/armGBA's 3ds-release (the four patches make exactly the tree of the local armGBA branch's f53b311); after that, move the submodule pointer to it and delete this folder and the copying in `../armgba.mk`.

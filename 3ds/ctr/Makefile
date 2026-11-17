@@ -14,7 +14,8 @@
 #   PGO=gen          armGBA's files count what they do (-fprofile-generate, -lgcov): ../emu/pgo-train.py plays ../emu/pgo/training.txt
 #                    in Azahar with the build and keeps the counts in ../emu/pgo/. PGO=use builds armGBA's files from them
 #                    (a function whose code changed since loses its profile). Both want BUILD=build/gen, emptied first: GCC names a
-#                    static function's profile by its object's path, so another BUILD loses those (PGO_QUIET= lists them).
+#                    static function's profile by its object's path, so another BUILD loses those (PGO_QUIET= lists them). The patched
+#                    copy of armGBA (../emu/armgba.mk) is named as the submodule's files for it: a profile made before it still fits.
 #   make cia-parts   what bannertool makes for the .cia (../Makefile's `cia` then runs makerom: cia.sh)
 
 ifeq ($(strip $(DEVKITARM)),)
@@ -36,9 +37,10 @@ BUILD   := build$(if $(TEST),-test)
 # CORE=armgba (default): armGBA and its recompiler (../emu). CORE=mgba: src/emu.c on libmgba, as every other
 # GBA DS build (../mgba/build-libmgba.sh makes it; MGBA_BUILD is its build folder).
 CORE ?= armgba
-ARMGBA := $(REPO)/third_party/armgba
 ifeq ($(CORE),armgba)
 ARMGBA_BACKEND := a32
+ARMGBA_COPY := $(BUILD)/armgba-src
+ARMGBA_LINE_NAMES := $(filter gen use,$(PGO))
 include $(REPO)/3ds/emu/armgba.mk
 CORE_DEFS := -DGBADS_ARMGBA
 CORE_INC  := -I$(ARMGBA)/src
@@ -86,7 +88,7 @@ WEBP_SRC := $(wildcard $(REPO)/third_party/libwebp/src/dec/*.c $(REPO)/third_par
 HOST_SRC := $(D3)/ctr/host.c $(D3)/ctr/sdl_ctr.c
 ifeq ($(CORE),armgba)
 APP_SRC  += $(D3)/emu/emu_armgba.c
-HOST_SRC += $(D3)/ctr/jitmem.c $(ARMGBA)/platform/3ds/source/svc.s
+HOST_SRC += $(D3)/ctr/jitmem.c $(ARMGBA_SRC)/platform/3ds/source/svc.s
 else
 APP_SRC  += $(S)/emu.c $(D3)/ctr/emu_ctr.c
 endif
@@ -94,7 +96,7 @@ endif
 obj = $(patsubst $(REPO)/%,$(BUILD)/%.o,$(1))
 APP_OBJ  := $(call obj,$(APP_SRC))
 HOST_OBJ := $(call obj,$(HOST_SRC))
-CORE_OBJ := $(call obj,$(ARMGBA_CORE_SRC))
+CORE_OBJ := $(call ARMGBA_OBJ,$(BUILD))
 WEBP_OBJ := $(call obj,$(WEBP_SRC))
 OBJ := $(APP_OBJ) $(HOST_OBJ) $(CORE_OBJ) $(WEBP_OBJ)
 
@@ -117,6 +119,13 @@ all: $(TARGET).3dsx
 
 # (a flag changed here rebuilds everything: objects built with other defines see other struct layouts)
 $(OBJ): Makefile
+ifeq ($(CORE),armgba)
+$(APP_OBJ) $(HOST_OBJ) $(CORE_OBJ) $(ARMGBA_CORE_SRC): $(ARMGBA_STAMP)
+$(CORE_OBJ): $(BUILD)/third_party/armgba/%.o: $(ARMGBA)/%
+	@mkdir -p $(dir $@)
+	@echo $(notdir $<)
+	@$(CC) -MMD -MP $(CFLAGS) $(EXTRA) -c $< -o $@
+endif
 
 $(BUILD)/%.c.o: $(REPO)/%.c
 	@mkdir -p $(dir $@)
@@ -147,7 +156,7 @@ $(BUILD)/banner.bnr: banner.png banner.wav
 	@$(BANNERTOOL) makebanner -i banner.png -a banner.wav -o $@
 $(BUILD)/icon.icn: icon.png
 	@$(BANNERTOOL) makesmdh -s "$(TITLE)" -l "GBA games with their own map on the second screen" -p "GBA DS" -i icon.png -o $@
-$(BUILD)/gba-ds.rsf: $(ARMGBA)/platform/3ds/armgba.rsf
+$(BUILD)/gba-ds.rsf: $(REPO)/third_party/armgba/platform/3ds/armgba.rsf
 	@sed -e 's/: armGBA$$/: GBA DS/' -e 's/CTR-H-AGBA/CTR-H-GBDS/' -e 's/0xFA6BA/0xFD5D5/' $< > $@
 cia-parts: $(BUILD)/$(TARGET).elf $(BUILD)/banner.bnr $(BUILD)/icon.icn $(BUILD)/gba-ds.rsf
 
