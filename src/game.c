@@ -1038,6 +1038,7 @@ static int hudMapTexW, hudMapTexH;
 static SDL_Rect hudMapSrc, hudMapDst; /* the map's part of hudMapTex, and its place on the canvas (w 0: no big map) */
 static uint32_t* hudFlat;
 static uint64_t hudBaseKey; /* which backdrop hudCanvas holds as it is (0: none, or changed since) */
+static unsigned hudBaseSerial, hudTitleSerial, hudTitleGen; /* a count of remakes of hudCanvas, and as of the level's name on it */
 static unsigned hudLayerGen = 1, hudFlatGen; /* a count of changes to the layers, and as of the flattened picture */
 static unsigned hudBackGen, hudLogoBackGen, hudLogoBelowGen, cardLogoGen; /* a count of each backdrop's remakes */
 /* what each view's textures don't have yet */
@@ -1109,6 +1110,7 @@ static uint32_t hudLogoBelow[HUD_CW * HUD_CH]; /* profile hud.logoBelow: dark gr
  * the HUD (mapTitleN rows; 0: none taken yet) */
 static uint32_t mapTitle[GBA_W * 32];
 static int mapTitleN;
+static unsigned mapTitleGen; /* a count of changes to mapTitle */
 static bool hudLogoBelowDone;
 static int snapShow, snapRevert;   /* consecutive frames matching show / a revert screen */
 static uint32_t snapShown[GBA_W * GBA_H]; /* the copy on the second screen (kept with save states) */
@@ -4367,9 +4369,17 @@ static void hud_stale_all(void) {
 	++hudLayerGen;
 }
 
+/* the level's name is on hudCanvas over its backdrop, whose key stays: the views need the canvas, and it isn't remade */
+static void hud_canvas_titled(void) {
+	for (int v = 0; v < 2; ++v) hudOld[v].base = true;
+	++hudLayerGen;
+	hudTitleSerial = hudBaseSerial, hudTitleGen = mapTitleGen;
+}
+
 /* hudCanvas has changed: held as the backdrop `key` (0: edited in place, so made again next time) */
 static void hud_base_changed(uint64_t key) {
 	hudBaseKey = key;
+	++hudBaseSerial;
 	for (int v = 0; v < 2; ++v) hudOld[v].base = true;
 	++hudLayerGen;
 }
@@ -4612,6 +4622,8 @@ static void hud_compose(int band) {
 			}
 		}
 	}
+	/* (the level's name has gone: the backdrop it was laid on is made again) */
+	if (lay && canvas && hudBaseKey && hudTitleSerial == hudBaseSerial && !(h->mapTitleRows && mapTitleN)) hudBaseKey = 0;
 	if (!canvas) {
 		/* (the picture kept as it is: only the pieces that go back onto the
 		 * game screen, below, which the game picture needs every frame) */
@@ -4710,14 +4722,19 @@ static void hud_compose(int band) {
 	/* hud.mapTitleRows: the level's name from the map picture on top, the
 	 * HUD that far down */
 	int titleDy = h->mapTitleRows && mapTitleN ? mapTitleN + 2 : 0; /* (2 rows apart) */
-	for (int y = 0; canvas && y < titleDy; ++y) {
+	/* (a kept backdrop still has the name on it: laid over again, the whole canvas would be sent every frame) */
+	const bool titleKept = lay && hudBaseKey && hudTitleSerial == hudBaseSerial && hudTitleGen == mapTitleGen;
+	for (int y = 0; canvas && y < titleDy && !titleKept; ++y) {
 		if (y * 2 < cr0 || y * 2 >= cr1) continue;
 		for (int x = 0; x < GBA_W; ++x) {
 			uint32_t* o = &hudCanvas[y * 2 * HUD_CW + x * 2];
 			o[0] = o[1] = o[HUD_CW] = o[HUD_CW + 1] = mapTitle[y * GBA_W + x];
 		}
 	}
-	if (titleDy) hud_base_changed(0);
+	if (titleDy && !titleKept) {
+		if (lay && canvas && hudBaseKey) hud_canvas_titled();
+		else hud_base_changed(0);
+	}
 	int moveDx[HUD_MOVES] = { 0 }, moveDy[HUD_MOVES] = { 0 };
 	bool moving[HUD_MOVES] = { false };
 	int pieceLo[HUD_MOVES] = { 0 }, pieceTop[HUD_MOVES] = { 0 };
@@ -6041,6 +6058,7 @@ static void screen_restore_apply(void) {
 	 * card and the level name go (back from the state, if it has them) */
 	if (hudProf && hudProf->hud.card.tile) hudBackValid = false, cardScore = -1, sideScore = -1;
 	mapTitleN = 0, hudLogoBelowDone = false;
+	++mapTitleGen;
 	heldN = 0, heldNumW = 0, heldArmed = true;
 	logoForced = false, logoHolding = 0;
 	if (!ours) {
@@ -6076,7 +6094,7 @@ static void screen_restore_apply(void) {
 	}
 	if ((d = blob_find(b, n, "TITL", &sz)) && sz >= 4) {
 		int rows = (int) rd32(d);
-		if (rows > 0 && rows <= 32 && sz == 4 + (size_t) GBA_W * rows * 4) memcpy(mapTitle, d + 4, sz - 4), mapTitleN = rows;
+		if (rows > 0 && rows <= 32 && sz == 4 + (size_t) GBA_W * rows * 4) memcpy(mapTitle, d + 4, sz - 4), mapTitleN = rows, ++mapTitleGen;
 	}
 	if (hudProf && hudProf->hud.held.y1 && (d = blob_find(b, n, "HELD", &sz)) && sz >= 4) {
 		int rows = (int) rd32(d);
@@ -7103,6 +7121,7 @@ static void map_show_new(bool fresh) {
 		if (!mapTitleN) hudLogoBelowDone = false; /* (the logo moves down under it) */
 		mapTitleN = SDL_min(hudProf->hud.mapTitleRows, 32);
 		for (int i = 0; i < GBA_W * mapTitleN; ++i) mapTitle[i] = mapRes.frames[0][i] | 0xFF000000;
+		++mapTitleGen;
 	}
 	mapShownIdx = -1;
 	/* (pages, a few seconds each: Fire Emblem's unit status; they
@@ -7125,14 +7144,15 @@ static void map_show_new(bool fresh) {
 static bool liveOn;
 
 static bool frame_is_dark(Emu* e) {
-	int bright = 0, total = 0;
+	/* dark: under 1 bright pixel in 40 of the ones sampled; a lit picture says no after the first few hundred */
+	const int total = (GBA_W * GBA_H + 6) / 7, most = (total - 1) / 40;
+	int bright = 0;
 	for (int i = 0; i < GBA_W * GBA_H; i += 7) {
 		uint32_t c = emu_pixel_n(e, i);
 		int lum = ((c & 0xFF) + ((c >> 8) & 0xFF) * 2 + ((c >> 16) & 0xFF)) >> 2;
-		bright += lum > 40;
-		++total;
+		if (lum > 40 && ++bright > most) return false;
 	}
-	return bright * 40 < total;
+	return true;
 }
 
 static int game_screen(void) {
@@ -8185,6 +8205,7 @@ static void ss_setup(const char* rom, const char* code) {
 		hudLogoBelowDone = false;
 		cardLogoMade = false; /* (the last game's logo stays in card_logo's picture otherwise) */
 		mapTitleN = 0;
+		++mapTitleGen;
 		hudBackValid = false;
 		hudRegrab = 0;
 		snapShow = snapRevert = 0;
@@ -8408,6 +8429,7 @@ static enum GameExit game_run_inner(Config* c, const char* rom, bool fromLibrary
 	host_set_cores(cfg->sideCore, cfg->captureCore, cfg->aheadCore, cfg->videoCore, cfg->core1Limit, false);
 	host_set_video_wake(cfg->videoWake);
 	host_set_lines_first(cfg->linesFirst);
+	host_set_cpu_tile(cfg->cpuTile);
 	emu_threaded_video(cfg->threadedVideo && isNew3ds()); /* (mGBA's drawing thread on the New 3DS's third core) */
 #else
 	emu_threaded_video(cfg->threadedVideo);

@@ -232,6 +232,7 @@ static bool set_option(Config* c, const char* key, const char* val) {
 	CORE("video_core", videoCore)
 	INT("core1_limit", core1Limit)
 	INT("video_wake", videoWake)
+	BOOL("cpu_tile", cpuTile)
 	INT("bench_check", benchCheck)
 	BOOL("core_probe", coreProbe)
 	BOOL("lines_first", linesFirst)
