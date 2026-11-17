@@ -10,6 +10,7 @@
 #   make HOTCOLD=1   links with ld/3dsx.ld, devkitARM's script with the profile's hot code kept together and its cold code
 #                    apart (-fprofile-use libmgba, ../mgba/build-libmgba.sh MGBA_PGO=use: GCC marks them .text.hot/.text.unlikely)
 #   XDEF, XLDFLAGS, XLIBS: more compiler defines, linker flags and libraries (empty by default; a profiling build's -lgcov)
+#   XCORE: more compiler flags for armGBA's files only (the profile build's -fprofile-generate / -fprofile-use)
 #   make cia-parts   what bannertool makes for the .cia (../Makefile's `cia` then runs makerom: cia.sh)
 
 ifeq ($(strip $(DEVKITARM)),)
@@ -88,7 +89,7 @@ ifneq ($(BENCH),)
 BENCH_DEF := -DGBADS_BENCH_TAG='"$(BENCH)"'
 endif
 $(HOST_OBJ): EXTRA := -O2 -Wall -Wextra $(APP_INC) $(CORE_DEFS) $(BENCH_DEF) $(if $(SLOWSD),-DGBADS_SLOW_SD) -DGBADS_VERSION='"$(VERSION)"' -DGBADS_UPSTREAM='"$(UPSTREAM)"' $(if $(LOG_URL),-DGBADS_LOG_URL='"$(LOG_URL)"')
-$(CORE_OBJ): EXTRA := $(ARMGBA_CORE_FLAGS)
+$(CORE_OBJ): EXTRA := $(ARMGBA_CORE_FLAGS) $(XCORE)
 $(WEBP_OBJ): EXTRA := -O2 -I$(REPO)/third_party/libwebp
 
 .PHONY: all cia-parts clean
