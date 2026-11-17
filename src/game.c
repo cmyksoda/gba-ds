@@ -4622,6 +4622,8 @@ static void hud_compose(int band) {
 			}
 		}
 	}
+	/* (the level's name has gone: the backdrop it was laid on is made again) */
+	if (lay && canvas && hudBaseKey && hudTitleSerial == hudBaseSerial && !(h->mapTitleRows && mapTitleN)) hudBaseKey = 0;
 	if (!canvas) {
 		/* (the picture kept as it is: only the pieces that go back onto the
 		 * game screen, below, which the game picture needs every frame) */
@@ -4730,7 +4732,7 @@ static void hud_compose(int band) {
 		}
 	}
 	if (titleDy && !titleKept) {
-		if (lay && hudBaseKey) hud_canvas_titled();
+		if (lay && canvas && hudBaseKey) hud_canvas_titled();
 		else hud_base_changed(0);
 	}
 	int moveDx[HUD_MOVES] = { 0 }, moveDy[HUD_MOVES] = { 0 };
