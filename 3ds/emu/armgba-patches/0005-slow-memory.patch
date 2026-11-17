@@ -6,7 +6,7 @@ Subject: armGBA: palette and OAM accesses, IE and IME loads and the IE/IF word
 
 
 diff --git a/src/cpu/a32/backend.c b/src/cpu/a32/backend.c
-index 6138b1c..3f3a7ea 100644
+index 6138b1c..9ea78b6 100644
 --- a/src/cpu/a32/backend.c
 +++ b/src/cpu/a32/backend.c
 @@ -642,6 +642,61 @@ static void emitOffset(struct Emitter* e, int bits, int size) {
@@ -38,8 +38,8 @@ index 6138b1c..3f3a7ea 100644
 +	patchHere(e, same);
 +}
 +
-+// Palette (palette set) or OAM, 1 KiB each, mirrored; r1 = address. Neither stalls for the display, and
-+// only a 32-bit palette access has a wait state. Byte stores go to C.
++// Palette RAM (palette true) or OAM, 1 KiB each, mirrored; r1 = address. Neither stalls for the
++// display, and only a 32-bit palette access has a wait state. Byte stores go to C.
 +static void emitSmallVideoAccess(struct Emitter* e, int kind, bool romCode, bool palette, uint8_t** toSlow, int* slowCount) {
 +	bool store = kind >= MEM_STORE32;
 +	int size = accessSize(kind);
