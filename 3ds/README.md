@@ -245,18 +245,20 @@ frame in armGBA itself. What cut it, with the same pictures, RAM and sound
 - A place the CPU keeps returning to in the middle of a block (an interrupt's
   return, line after line) gets a block of its own after 16 returns, in place
   of the rest of the block being stepped on the exact CPU
-  (`armgba_mid_after`; 0 steps as before; at most 2048 such blocks between
-  flushes).
+  (`armgba_mid_after`; 0 steps as before; at most one such block for each
+  16 KiB of code memory between flushes).
 - The render log's entries reach its workers once a line, and the sound log
   takes one barrier an entry instead of three: the ARM11's barriers are slow
   (`armgba_lean_logs = 0` for the old way, to compare on a console).
 - The interrupt pipeline's events and a halfword store to an I/O register
   take shorter ways through the core.
 - `make PGO=use` builds armGBA's files from a profile (`3ds/emu/pgo/`, made
-  with `PGO=gen` and `3ds/emu/pgo-train.py`; BUILD must stay relative, GCC
-  names the files by it): about 6% less to emulate in Azahar. A function
-  whose code or line number changed since the profile was made loses its
-  profile (`PGO_QUIET=` lists them): redo it after armGBA changes. `HOTCOLD=1` also keeps the profile's hot code together.
+  with `PGO=gen` and `3ds/emu/pgo-train.py`; both builds need `BUILD=build/gen`,
+  emptied first: GCC names a static function's profile by its object's path):
+  about 6% less to emulate in Azahar. A function whose code or line number
+  changed since the profile was made loses its profile (`PGO_QUIET=` lists
+  them): redo it after armGBA changes. `HOTCOLD=1` also keeps the profile's
+  hot code together.
 
 ## Speed (Yoshi's Island)
 
