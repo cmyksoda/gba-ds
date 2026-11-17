@@ -246,7 +246,7 @@ static void* writer_main(void* arg) {
 static bool linesFirst;
 
 /* Above the hidden copy's thread: a writer that waits out its long blind stretches lets the ring fill, and the game then
- * waits for room. The game's own priority is safe to share: it runs on another core. */
+ * waits for room. Core 3 also has the second render worker at this priority: read video wait. New 3DS only (the game's core). */
 static void writer_priority(void) {
 	if (!lg.threaded) return;
 	s32 game = 0x30;
@@ -255,6 +255,7 @@ static void writer_priority(void) {
 }
 
 void host_set_lines_first(bool on) {
+	on = on && isNew3ds();
 	if (on == linesFirst) return;
 	linesFirst = on;
 	writer_priority();
