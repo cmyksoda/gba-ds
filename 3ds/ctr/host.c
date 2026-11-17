@@ -959,6 +959,9 @@ int main(void) {
 		fclose(f);
 	}
 	setenv("GBADS_HOME", APP_DIR, 1);
+#ifdef GBADS_LOG_URL
+	setenv("GBADS_DEBUG", "1", 1); /* capture times and the like, for the diagnosis */
+#endif
 	logLine("GBA DS for the 3DS %s (GBA DS %s)%s", GBADS_VERSION, GBADS_UPSTREAM,
 #ifdef GBADS_LOG_URL
 	        ", diagnosis build: logs to " GBADS_LOG_URL

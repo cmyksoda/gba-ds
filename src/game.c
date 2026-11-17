@@ -62,6 +62,14 @@ static double thread_cpu_ms(void) {
 #endif
 	return t.tv_sec * 1000.0 + t.tv_nsec / 1e6;
 }
+/* CLOCK_MONOTONIC in seconds: the time the kernel log and the journal's
+ * monotonic stamps use, so a stall can be matched with what the system did
+ * (launch.sh logs both on ROCKNIX) */
+static double mono_seconds(void) {
+	struct timespec t;
+	if (clock_gettime(CLOCK_MONOTONIC, &t) != 0) return 0;
+	return t.tv_sec + t.tv_nsec / 1e9;
+}
 static int cpu_mhz(int cpu) {
 #ifdef __linux__
 	if (cpu < 0) return 0;
@@ -89,6 +97,7 @@ static int current_cpu(void) {
 }
 
 #define GBA_FPS (16777216.0 / 280896.0)
+#define FF_MAX_RUNS 30 /* fast-forward at Max: at most this many frames a display frame */
 
 static Config* cfg;
 static Emu emu;
@@ -194,6 +203,9 @@ static const MapProfile* twinProf;
 static bool tallTrace; /* GBADS_TALL_TRACE: a line a frame about the live view */
 static int twinShakeNow, twinShakeNext; /* the game's screen shake in this frame's picture / the next's */
 static bool tallMsg, tallGameTop; /* (for the log: PP-11's screen, the top screen's picture) */
+static bool tallTopLogo; /* PP-11's screen up with no table rows above it: the logo on the top screen */
+static bool tallFixedBot; /* PP-10: the game's banners on the bottom screen (the ball's there) */
+static int tallFixedHold; /* frames the banners stay where they went with none shown */
 static uint32_t lastTop[GBA_W * GBA_H]; /* the top screen before PP-11's screen came up */
 static bool haveLastTop;
 
@@ -304,7 +316,7 @@ static void twin_jump(Emu* e, uint32_t T, int row) {
 	for (int i = 0; i < 4; ++i) if (J->scroll[i]) emu_write16(e, T + J->scroll[i], (uint16_t) row);
 	for (int i = 0; i < 3; ++i) if (J->scrollAt[i]) emu_write16(e, J->scrollAt[i], (uint16_t) row);
 	for (int bg = 0; bg < 4; ++bg) if ((J->scrollVofs >> bg) & 1) emu_write16(e, 0x04000012 + bg * 4, (uint16_t) row);
-	if (J->plus16) emu_write16(e, J->plus16, (uint16_t) (row + 16));
+	if (J->plus16) emu_write16(e, J->plus16, (uint16_t) (J->plus16Base + row + 16));
 }
 
 /* A sprite's height from its attribute 0 and 1 (double for an affine one
@@ -313,6 +325,12 @@ static int obj_height(uint16_t a0, uint16_t a1) {
 	static const uint8_t h[3][4] = { { 8, 16, 32, 64 }, { 8, 8, 16, 32 }, { 16, 32, 32, 64 } };
 	int s = a0 >> 14;
 	int v = s < 3 ? h[s][a1 >> 14] : 8;
+	return (a0 & 0x0300) == 0x0300 ? v * 2 : v;
+}
+static int obj_width(uint16_t a0, uint16_t a1) {
+	static const uint8_t w[3][4] = { { 8, 16, 32, 64 }, { 16, 32, 32, 64 }, { 8, 8, 16, 32 } };
+	int s = a0 >> 14;
+	int v = s < 3 ? w[s][a1 >> 14] : 8;
 	return (a0 & 0x0300) == 0x0300 ? v * 2 : v;
 }
 /* the game's sprites at the same place on the screen whatever the camera,
@@ -535,7 +553,8 @@ static void twin_first_carry(Twin* tw) {
 
 	emu_write16(&tw->e, C->cam, (uint16_t) tw->cam);
 	bool fresh = !tw->carried;
-	emu_frame(&tw->e, twinKeys[twinCur] & 0x3FF);
+	/* (not drawn: only its second frame's picture is shown) */
+	emu_frame_blind(&tw->e, twinKeys[twinCur] & 0x3FF);
 	carry_take(tw);
 	/* (starting again: its own sprites are the ones it just drew, not
 	 * what it kept from when it last ran, on another table or before a
@@ -555,15 +574,28 @@ static void twin_first(void* arg) {
 	}
 	const typeof(twinProf->tall.live)* L = &twinProf->tall.live;
 	tw->up = false;
-	if (!emu_state_load(&tw->e, twinStates[twinCur])) return;
-	uint32_t T = twin_hold(tw, tw->row, tw->panStep);
-	if (!T) return;
-	twin_jump(&tw->e, T, tw->row + (int8_t) emu_read8(&tw->e, T + L->shake));
-	emu_frame(&tw->e, twinKeys[twinCur] & 0x3FF);
-	/* (how far its pans moved it: put right next frame) */
-	int at = (int16_t) emu_read16(&tw->e, L->view) - (int8_t) emu_read8(&tw->e, T + L->shake);
-	tw->panStep += at - tw->row;
-	if (tw->panStep > 8 || tw->panStep < -8) tw->panStep = 0;
+	/* (its pans' step is guessed from last frame's; when the game's view
+	 * starts or stops moving (the ball let go from a trap) the guess is a
+	 * frame out, the copy's picture a few rows off its place and the rows
+	 * between the screens wrong: then the frame is run again with the step
+	 * it really took) */
+	for (int again = 0; again < 2; ++again) {
+		if (!emu_state_load(&tw->e, twinStates[twinCur])) return;
+		uint32_t T = twin_hold(tw, tw->row, tw->panStep);
+		if (!T) return;
+		twin_jump(&tw->e, T, tw->row + (int8_t) emu_read8(&tw->e, T + L->shake));
+		/* not drawn: its picture is never shown (twin_second's is), and
+		 * drawing is about half of a frame's work, on the frame's critical
+		 * path (twins[1]'s runs before the game's frame, on its thread) */
+		emu_frame_blind(&tw->e, twinKeys[twinCur] & 0x3FF);
+		/* (how far its pans moved it: put right) */
+		int at = (int16_t) emu_read16(&tw->e, L->view) - (int8_t) emu_read8(&tw->e, T + L->shake);
+		int miss = at - tw->row;
+		tw->panStep += miss;
+		if (tw->panStep > 8 || tw->panStep < -8) tw->panStep = 0;
+		if (!miss) break;
+		if (tallTrace || debug) fprintf(stderr, "copy %d: %d row(s) off, run again\n", (int) (tw - twins), miss);
+	}
 	tw->up = true;
 }
 /* With the game's frame: this frame, whose picture it shows */
@@ -637,6 +669,11 @@ static void twin_step(void) {
 	twinShakeNow = twinShakeNext, twinShakeNext = k;
 	int u = (int16_t) emu_read16(&emu, L->view) - k, vmax = twinProf->tall.rows - 2 * GBA_H;
 	int want[TWINS] = { vmax, SDL_max(SDL_min(u, vmax), 0) + GBA_H };
+	/* (PP-11: the game's whole screen is on the bottom one; the top screen
+	 * shows the rows just above it, from twins[0] held there, when the
+	 * table has them) */
+	bool above = tallMsg && u - GBA_H >= 0;
+	if (above) want[0] = u - GBA_H;
 	for (int i = 0; i < TWINS; ++i) {
 		if (twins[i].row != want[i] && !twins[i].up) twins[i].panStep = 0;
 		twins[i].row = want[i];
@@ -644,7 +681,7 @@ static void twin_step(void) {
 	/* (in the table's upper part the game itself is on the top screen:
 	 * twins[0] isn't needed, and since the copies are taken from the game
 	 * every frame, it's back at once when it is) */
-	twins[0].need = u > vmax, twins[1].need = true;
+	twins[0].need = u > vmax || above, twins[1].need = true;
 	twinRun = true;
 }
 
@@ -679,8 +716,21 @@ static void twin_open(const char* rom, const MapProfile* p) {
 		for (int i = 0; i < 2; ++i) free(twinStates[i]), twinStates[i] = NULL;
 		return;
 	}
+	/* The camera's stores (a dump of its own: its Rev's set, by CRC32) are Thumb
+	 * STR / STRH with an immediate offset (top bits 6 / 8). A ROM whose code is
+	 * elsewhere (an untried dump of the release) has something else there: no
+	 * copies (the logo on the other screen), not a copy with its code broken. */
+	const uint32_t* nops = p->tall.live.rev.crc && p->tall.live.rev.crc == emu.romCrc ? p->tall.live.rev.nop : p->tall.live.nop;
+	for (int i = 0; i < 4 && nops[i]; ++i) {
+		unsigned op = emu_read16(&twins[0].e, nops[i]) >> 12;
+		if (op == 6 || op == 8) continue;
+		fprintf(stderr, "live view: not this ROM's camera store at %08x (%04x), copies off\n", nops[i], emu_read16(&twins[0].e, nops[i]));
+		for (int j = 0; j < opened; ++j) emu_close(&twins[j].e);
+		for (int j = 0; j < 2; ++j) free(twinStates[j]), twinStates[j] = NULL;
+		return;
+	}
 	for (int k = 0; k < TWINS; ++k) {
-		for (int i = 0; i < 4 && p->tall.live.nop[i]; ++i) emu_write16(&twins[k].e, p->tall.live.nop[i], 0x46C0); /* mov r8, r8 */
+		for (int i = 0; i < 4 && nops[i]; ++i) emu_write16(&twins[k].e, nops[i], 0x46C0); /* mov r8, r8 */
 		for (int i = 0; i < 16 && p->tall.live.carry.patch[i].addr; ++i) emu_write16(&twins[k].e, p->tall.live.carry.patch[i].addr, p->tall.live.carry.patch[i].v);
 		emu_layers(&twins[k].e, 0x1F & ~p->tall.hudBg); /* (its score bar's layers: fixed to the screen, the game's are shown) */
 	}
@@ -922,6 +972,13 @@ static bool combatOn, combatMade;
 static uint32_t* combatPx; /* its pixels */
 static bool combatInGame; /* (hud.logoUnder) the HUD's first probe matches: in a chapter */
 static SDL_Texture* hudTex[2]; /* the HUD's second screen (HUD_CW x HUD_CH) */
+/* (the 3DS: one texture for both screens, its textures being the GPU's and
+ * not a renderer's: a 480x320 picture uploaded once a frame, not twice) */
+#ifdef __3DS__
+#define HUD_TEX_SHARED 1
+#else
+#define HUD_TEX_SHARED 0
+#endif
 static SDL_Texture* logoTex[2];
 /* the logo centred in a GBA-sized picture, so it's scaled (and gridded)
  * like the game; NULL for a user's high-resolution logo */
@@ -992,6 +1049,7 @@ static struct {
 static int hudFrames; /* split frames since the race (re)started */
 static int mapX0, mapY0, mapX1, mapY1; /* the map's box on the HUD, measured over the first frames */
 static bool mapFound;
+static int mapFoundAt; /* (hudFrames it was first seen, if after the first 8) */
 static SpriteRule hudWorldObjs[4]; /* hud.world.objs, the same way */
 static SpriteRule hudObjs[12]; /* hudProf's hud.objs, as used (see romPatch) */
 static int hudFadeEff, hudFadeIn; /* the last full fade (2: white, 3: black); frames to fade the next backdrop in */
@@ -1083,6 +1141,31 @@ typedef struct {
 static SlowFrame slowWorst;
 static int slowCount;
 
+/* Stalls (issue #50): a loop iteration over STALL_MS from top to top, any
+ * build, no GBADS_DEBUG needed. Each part of the iteration is timed, the
+ * wait before the frame and the sleep after it included (slow frames above
+ * only see the work in between), so one line in a player's log says where
+ * the time went. At most STALL_LINES lines per 5 s; the 5 s report counts
+ * them all. */
+#define STALL_MS 100
+#define STALL_LINES 4
+typedef struct {
+	Uint64 top, synced, work, emu0, emu1, draw0, draw1, sleep0, end;
+	double sleepWant;  /* s */
+	double audio;      /* ms handing sound to SDL */
+	double presentTop, presentBottom;
+	double cpuMs;      /* the thread's CPU time at the top */
+	long preempt;      /* its involuntary switches at the top */
+	int queueMs;       /* the sound queue at the top */
+	unsigned long long frame;
+	int kept;          /* frames the keeper ran during the present */
+	bool valid;
+} LoopMarks;
+static LoopMarks loopCur;
+static int stallCount, stallLogged;
+static unsigned keptTotal; /* frames the keeper ran (the 5 s report) */
+static double stallWorst;
+
 static void slow_frame_note(SlowFrame f) {
 	++slowCount;
 	if (f.total > slowWorst.total) slowWorst = f;
@@ -1111,12 +1194,12 @@ static bool debug;
 
 /* ---------------------------------------------------------------- menu */
 
-enum MenuItem { M_RESUME, M_CHEATS, M_PATCHES, M_ACH, M_SHOT, M_SWAP, M_SCALE, M_LCD, M_OVERLAY, M_FPS, M_SAVE, M_LOAD, M_RESTART, M_LIBRARY, M_EXIT, M_FRAMEBUF, M_LOGO, M_MATCH, M_REWIND, M_AUTOSAVE, M_AUTOLOAD, M_BUG, M_SLOT, M_SHAPES, M_FF, M_COLOR, M_GHOST, M_BUTTONS, M_PIXLOGO };
+enum MenuItem { M_RESUME, M_CHEATS, M_PATCHES, M_ACH, M_SHOT, M_SWAP, M_SCALE, M_LCD, M_OVERLAY, M_FPS, M_SAVE, M_LOAD, M_RESTART, M_LIBRARY, M_EXIT, M_FRAMEBUF, M_LOGO, M_MATCH, M_REWIND, M_AUTOSAVE, M_AUTOLOAD, M_BUG, M_SLOT, M_SHAPES, M_FF, M_COLOR, M_GHOST, M_BUTTONS, M_PIXLOGO, M_PLACE };
 static const char* menuLabels[] = {
 	/* title case: drawn in Futura from the built-in images (tools/make_brand.py) */
 	[M_RESUME] = "Resume", [M_SWAP] = "Swap Screens", [M_SAVE] = "Save State", [M_SCALE] = "", [M_LCD] = "", [M_FPS] = "", [M_FRAMEBUF] = "", [M_OVERLAY] = "", [M_LOGO] = "", [M_MATCH] = "", [M_REWIND] = "", [M_RESTART] = "Restart Game",
 	[M_LOAD] = "Load State", [M_CHEATS] = "Cheats", [M_PATCHES] = "Patches", [M_BUTTONS] = "Buttons", [M_ACH] = "Achievements", [M_SHOT] = "Take Screenshot", [M_LIBRARY] = "Close Game", [M_EXIT] = "Close GBA DS",
-	[M_AUTOSAVE] = "", [M_AUTOLOAD] = "", [M_BUG] = "Submit a Bug Report", [M_SLOT] = "", [M_FF] = "", [M_COLOR] = "", [M_GHOST] = "", [M_PIXLOGO] = "",
+	[M_AUTOSAVE] = "", [M_AUTOLOAD] = "", [M_BUG] = "Submit a Bug Report", [M_SLOT] = "", [M_FF] = "", [M_COLOR] = "", [M_GHOST] = "", [M_PIXLOGO] = "", [M_PLACE] = "",
 };
 static int menuItems[12], nMenuItems;
 /* Some buttons are half as wide, two to a row (Save State | Load State):
@@ -1141,9 +1224,21 @@ static int layout_rows(const int* items, int n, int* row, int* side) {
 	}
 	return rows;
 }
-/* two pages, switched with L1/R1 or the tabs */
-#define N_PAGES 3
+/* Seven pages, switched with L1/R1 or the tabs: Game and Tools hold buttons
+ * (actions); the other five are rows of settings (docs/MENUS.md), the same
+ * categories as the game list's Settings, each changed for this game (A) or
+ * for all games (Y), kept in states/<game>.cfg or states/prefs.cfg. */
+#define N_PAGES 7
+enum { PG_GAME, PG_TOOLS, PG_DISPLAY, PG_SCREENS, PG_CONTROLS, PG_SPEED, PG_MAP };
 static int pages[N_PAGES][12], pageLen[N_PAGES], curPage;
+static const char* rowKeys[N_PAGES][10]; /* a settings page's rows: the settings' keys, or "@name" for a button that opens something */
+static int rowN[N_PAGES];
+static int rowSel;     /* 0: the This game / All games bar; 1...: the rows */
+static bool scopeAll;  /* the bar: changes go to all games */
+static int rowPressed = -1;
+static bool page_is_rows(int p) {
+	return p >= PG_DISPLAY;
+}
 /* Buttons still held when the menu closes (or after a HOME combo) are kept
  * from the game until released, so e.g. the A that picked "Save state"
  * doesn't make Samus jump. */
@@ -1156,12 +1251,13 @@ static int hkBtn[HK_COUNT];
 static void suppress_held(void) {
 	for (int b = 0; b < B_COUNT; ++b) suppress[b] = btnNow[b];
 }
-static const char* pageNames[N_PAGES] = { "Game", "Display", "Extras" };
+static const char* pageNames[N_PAGES] = { "Game", "Tools", "Display", "Screens", "Controls", "Speed", "Map" };
 /* Restart Game, Close Game and Close GBA DS ask first: chosen once, the
  * button says "Are You Sure?" (and the note what happens); chosen again,
  * it's done. Another page, another button or closing the menu calls it off. */
 static int armedItem = -1;
 static void rebuild_textures(void);
+static void commit_current(const char* key);
 static bool confirm_item(int item) {
 	return item == M_RESTART || item == M_LIBRARY || item == M_EXIT;
 }
@@ -1170,6 +1266,7 @@ static int menuSel;
 static int menuPressed = -1;      /* item under a finger that went down in the menu */
 static bool ignorePointerUp;      /* the tap that opened the menu */
 static char menuNote[64];
+static bool pacedFallback; /* Match Display Rate fell back to the GBA's rate (pacing_update) */
 
 static const SDL_Color C_BTN = { 34, 30, 58, 240 };
 static const SDL_Color C_BTN_SEL = { 92, 52, 140, 250 };
@@ -1185,21 +1282,13 @@ static SDL_Rect ach_area(int scr);
 /* Every label a pause-menu button can show, for sizing the text so the
  * widest fits (item_label gives the current one). */
 static const char* const allLabels[] = {
-	"Resume", "Restart Game", "Are You Sure?", "Save State", "Load State", "Cheats", "Buttons", "Achievements",
-	"Take Screenshot", "Close Game", "Close GBA DS", "Swap Screens", "Scale: Pixel Perfect", "Scale: Full Width",
-	"Scale: Zoom", "Scale: Stretch", "Shader: Off", "Shader: LCD Grid", "Shader: Scanlines", "Shader: Soft Cells",
-	"Shader: Subpixels (Light)", "Shader: Subpixels", "Shader: Subpixels (Strong)", "Overlays: Off", "Overlays: Generated",
-	"Overlays: Custom", "Submit a Bug Report",
-	"Map Animations: On", "Map Animations: Off", "Map Refresh: Every 3 s", "Map Refresh: Every 1.5 s",
-	"Map Refresh: Every 1 s", "Map Refresh: Every 0.5 s", "Map Refresh: Custom", "Frame Buffer: On",
-	"Frame Buffer: Off", "Match Display Rate: On", "Match Display Rate: Off",
+	"Resume", "Restart Game", "Are You Sure?", "Save State", "Load State", "Cheats", "Patches", "Achievements",
+	"Take Screenshot", "Close Game", "Close GBA DS", "Submit a Bug Report",
 	"\u2039   Slot 0: Sep 30, 12:59 PM   \u203A", /* (the slot row, with its arrows) */
 };
 /* the labels of the half-width buttons, which fit in half the width */
 static const char* const halfLabels[] = {
-	"Save State", "Load State", "Save State 0", "Load State 0", "Save on Quit: On", "Save on Quit: Off", "Auto-Load: On", "Auto-Load: Off",
-	"Rewind: On", "Rewind: Off", "Fast Forward: On", "Fast Forward: Off",
-	"Color Correction: On", "Color Correction: Off", "LCD Ghosting: On", "LCD Ghosting: Off",
+	"Save State", "Load State", "Save State 0", "Load State 0",
 };
 
 /* The pause menu's layout: buttons across the whole screen (a small margin
@@ -1221,7 +1310,7 @@ static MenuGeom menu_geom(int scr) {
 	int n = 1;
 	for (int p = 0; p < N_PAGES; ++p) {
 		int row[12], side[12];
-		n = SDL_max(n, layout_rows(pages[p], pageLen[p], row, side));
+		n = SDL_max(n, page_is_rows(p) ? rowN[p] + 1 : layout_rows(pages[p], pageLen[p], row, side));
 	}
 	if (r.w == cw && r.h == ch && n == cn) return cache;
 	MenuGeom g;
@@ -1269,21 +1358,52 @@ static void slot_pick_newest(void) {
 		if (stat(gp.slot[i], &st) == 0 && st.st_mtime > best) best = st.st_mtime, stateSlot = i;
 	}
 }
-/* "Slot 3: Oct 31, 1:45 PM" (when it was saved), or "Slot 3: Empty" */
+/* What's in a slot shared with RetroArch (issue #39), looked at again
+ * only when the file changes */
+static StateFileKind slot_kind(const struct stat* st, bool* fromGbads) {
+	static struct {
+		char path[1024];
+		time_t time;
+		off_t size;
+		StateFileKind kind;
+		bool gbads;
+	} seen[10];
+	int i = stateSlot;
+	if (strcmp(seen[i].path, gp.slot[i]) || seen[i].time != st->st_mtime || seen[i].size != st->st_size) {
+		snprintf(seen[i].path, sizeof(seen[i].path), "%s", gp.slot[i]);
+		seen[i].time = st->st_mtime, seen[i].size = st->st_size;
+		seen[i].kind = emu_state_file_kind(&emu, gp.slot[i], &seen[i].gbads);
+	}
+	*fromGbads = seen[i].gbads;
+	return seen[i].kind;
+}
+/* "Slot 3: Oct 31, 1:45 PM" (when it was saved), or "Slot 3: Empty";
+ * shared with RetroArch, also who saved it: "Slot 3: Oct 31, 1:45 PM, RetroArch",
+ * "Slot 3: Another emulator's" */
 static const char* slot_label(void) {
-	static char buf[64];
+	static char buf[80];
 	struct stat st;
 	if (stat(gp.slot[stateSlot], &st) != 0) {
 		snprintf(buf, sizeof(buf), "Slot %d: Empty", stateSlot);
 		return buf;
+	}
+	const char* by = "";
+	if (gp.raDir[0]) {
+		bool fromGbads;
+		StateFileKind k = slot_kind(&st, &fromGbads);
+		if (k == STATE_FILE_OTHER_CORE || k == STATE_FILE_UNREADABLE) {
+			snprintf(buf, sizeof(buf), "Slot %d: %s", stateSlot, k == STATE_FILE_OTHER_CORE ? "Another emulator's" : "Can't be read");
+			return buf;
+		}
+		if (!fromGbads) by = ", RetroArch";
 	}
 	struct tm t, now;
 	time_t n = time(NULL);
 	localtime_r(&st.st_mtime, &t);
 	localtime_r(&n, &now);
 	static const char* const mon[12] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
-	if (t.tm_year != now.tm_year) snprintf(buf, sizeof(buf), "Slot %d: %s %d, %d", stateSlot, mon[t.tm_mon], t.tm_mday, t.tm_year + 1900);
-	else snprintf(buf, sizeof(buf), "Slot %d: %s %d, %d:%02d %s", stateSlot, mon[t.tm_mon], t.tm_mday, (t.tm_hour + 11) % 12 + 1, t.tm_min, t.tm_hour < 12 ? "AM" : "PM");
+	if (t.tm_year != now.tm_year) snprintf(buf, sizeof(buf), "Slot %d: %s %d, %d%s", stateSlot, mon[t.tm_mon], t.tm_mday, t.tm_year + 1900, by);
+	else snprintf(buf, sizeof(buf), "Slot %d: %s %d, %d:%02d %s%s", stateSlot, mon[t.tm_mon], t.tm_mday, (t.tm_hour + 11) % 12 + 1, t.tm_min, t.tm_hour < 12 ? "AM" : "PM", by);
 	return buf;
 }
 static void slot_step(int d) {
@@ -1294,6 +1414,7 @@ static void slot_step(int d) {
 static bool item_enabled(int item) {
 	if (item == M_CHEATS) return cheats.n > 0;
 	if (item == M_SHAPES) return ui_screens_differ(); /* (two screens of a shape: nothing to match) */
+	if (item == M_PLACE) return nScreens == 2;         /* (one screen: no gap) */
 	if (item == M_FRAMEBUF) return !tallProf;          /* (always on in the pinball games' two-screen view) */
 	return item != M_LOAD || file_exists(gp.slot[stateSlot]);
 }
@@ -1439,8 +1560,7 @@ static void draw_cheats(int scr) {
 		const Cheat* c = &cheats.items[cheatRows[i]];
 		bool sel = i == cheatSel;
 		SDL_Rect row = { g.x, y, g.w, g.rowH };
-		if (sel) ui_fill_round(scr, (SDL_Rect) { row.x - px / 2, row.y - px / 2, row.w + px, row.h + px }, C_BTN_EDGE, rad);
-		ui_fill_round(scr, row, sel ? C_BTN_SEL : C_BTN, rad);
+		ui_key(scr, row, rad, sel ? KEY_SEL : KEY_PLAIN);
 		fit_text(line, sizeof(line), TF_BODY, tcap, c->desc, nameW);
 		ui_font_text(scr, TF_BODY, g.x + px * 4, y + g.rowH / 2, tcap, line, C_TEXT, -1);
 		SDL_Rect pill = { g.x + g.w - pillW - px * 3, y + px * 2, pillW, g.rowH - px * 4 };
@@ -2091,8 +2211,7 @@ static void draw_patches(int scr) {
 		}
 		bool sel = i == patchSel;
 		SDL_Rect row = { g.x, y, g.w, g.rowH };
-		if (sel) ui_fill_round(scr, (SDL_Rect) { row.x - px / 2, row.y - px / 2, row.w + px, row.h + px }, C_BTN_EDGE, rad);
-		ui_fill_round(scr, row, sel ? C_BTN_SEL : C_BTN, rad);
+		ui_key(scr, row, rad, sel ? KEY_SEL : KEY_PLAIN);
 		bool on = patch_is_on(pr);
 		bool dim = pr->kind == PR_PATCH && !pr->usable && !on;
 		bool moving = sel && patchMoving;
@@ -2146,13 +2265,9 @@ static SDL_Rect item_rect(int scr, int i) {
 static SDL_Rect top_box(int scr, int t, int n) {
 	MenuGeom g = menu_geom(scr);
 	if (n == N_PAGES) {
-		/* the page tabs between the L1 / R1 prompts: each as wide as its name needs, sharing the width */
+		/* the page tabs (icons, drawn by draw_tab_icon) between the L1 / R1 prompts, sharing the width */
 		int x = g.margin + g.prompt + g.gap, avail = g.w - (g.prompt + g.gap) * 2 - g.gap * (n - 1);
-		int need[N_PAGES], sum = 0;
-		for (int i = 0; i < n; ++i) sum += need[i] = ui_label_width(scr, g.tabCap, pageNames[i]) + g.pad * 2;
-		int used = 0;
-		for (int i = 0; i < t; ++i) used += need[i];
-		int x0 = x + used * avail / sum + t * g.gap, x1 = x + (used + need[t]) * avail / sum + t * g.gap;
+		int x0 = x + t * avail / n + t * g.gap, x1 = x + (t + 1) * avail / n + t * g.gap;
 		return (SDL_Rect) { x0, g.tabY, x1 - x0, g.h };
 	}
 	int tw = (g.w - g.gap * (n - 1)) / n;
@@ -2314,12 +2429,9 @@ static void draw_note(int scr) {
 			SDL_Rect k = note_key_rect(scr, r, c);
 			bool sel = r == noteRow && c == noteCol;
 			bool special = noteKeys[r][c][0] < ' ';
-			if (sel) {
-				int e = SDL_max(1, mg.h / 28);
-				ui_fill_round(scr, (SDL_Rect) { k.x - e, k.y - e, k.w + e * 2, k.h + e * 2 }, C_BTN_EDGE, rad + e);
-			}
 			bool lit = noteKeys[r][c][0] == '\x01' && noteShift;
-			ui_fill_round(scr, k, sel ? C_BTN_SEL : lit ? C_BTN_EDGE : special ? (SDL_Color) { 52, 44, 84, 240 } : C_BTN, rad);
+			(void) special; /* (the special keys look like the others) */
+			ui_key(scr, k, rad, sel ? KEY_SEL : lit ? KEY_LIT : KEY_PLAIN);
 			ui_label(scr, k.x + k.w / 2, k.y + k.h / 2, kc, note_key_label(r, c), lit ? (SDL_Color) { 20, 16, 36, 255 } : C_TEXT);
 		}
 	}
@@ -2368,6 +2480,16 @@ static int battery_percent(void) {
 	return pct;
 }
 
+/* "Paused" in the middle of the other screen, on a key */
+static void draw_paused_label(int o) {
+	float px = ui_px(o) + 1;
+	int cap = px * 7 * 34 / 35, tw = ui_font_width(TF_BOLD, cap, "Paused"), padX = px * 10, h = cap * 2 + px * 8;
+	SDL_Rect r = screens[o].rect;
+	SDL_Rect k = { (r.w - tw) / 2 - padX, (r.h - h) / 2, tw + padX * 2, h };
+	ui_key(o, k, px * 4, KEY_PLAIN);
+	ui_label(o, r.w / 2, r.h / 2, cap, "Paused", C_GOLD);
+}
+
 /* Status text on the top (first) screen while paused, with a drop shadow:
  * align -1 at the top left, 1 at the top right. */
 static void draw_status(const char* text, int align) {
@@ -2375,8 +2497,10 @@ static void draw_status(const char* text, int align) {
 	float px = ui_px(s);
 	int cap = px * 5;
 	int x = align < 0 ? (int) (px * 5) : screens[s].rect.w - (int) (px * 5), cy = px * 7;
-	int sh = SDL_max(1, (int) (px / 2));
-	ui_font_text(s, TF_BOLD, x + sh, cy + sh, cap, text, (SDL_Color) { 0, 0, 0, 255 }, align);
+	/* on a key, so it shows over the game's picture (dark or light, as the menus) */
+	int tw = ui_font_width(TF_BOLD, cap, text), padX = px * 4, h = cap * 2 + px * 3;
+	SDL_Rect k = { align < 0 ? x - padX : x - tw - padX, cy - h / 2, tw + padX * 2, h };
+	ui_key(s, k, px * 3, KEY_PLAIN);
 	ui_font_text(s, TF_BOLD, x, cy, cap, text, C_TEXT, align);
 }
 
@@ -2388,6 +2512,7 @@ static void draw_battery(void) {
 	struct tm tm;
 	if (localtime_r(&now, &tm)) {
 		snprintf(buf, sizeof(buf), "%02d:%02d", tm.tm_hour, tm.tm_min);
+		if (getenv("GBADS_CLOCK")) snprintf(buf, sizeof(buf), "%.5s", getenv("GBADS_CLOCK")); /* (tests: the same picture each run) */
 		draw_status(buf, -1);
 	}
 	int pct = battery_percent();
@@ -2710,10 +2835,9 @@ static void draw_rewind(void) {
 	int w = padX + iw + gap + tw + padX, h = SDL_max(cap, ih) + padY * 2;
 	SDL_Rect r = screens[s].rect;
 	SDL_Rect b = { (r.w - w) / 2, (r.h - h) / 2, w, h };
-	SDL_Color bg = G_BG, edge = G_EDGE, fg = G_TEXT;
-	bg.a = (Uint8) (bg.a * rewindShown), edge.a = (Uint8) (edge.a * rewindShown), fg.a = (Uint8) (fg.a * rewindShown);
-	ui_fill_round(s, (SDL_Rect) { b.x - 1, b.y - 1, b.w + 2, b.h + 2 }, edge, px * 4 + 1);
-	ui_fill_round(s, b, bg, px * 4);
+	if (rewindShown < 0.35f) return; /* (a key doesn't fade: it goes) */
+	SDL_Color fg = ui_key_ink();
+	ui_key(s, b, px * 4, KEY_PLAIN);
 	/* the sign: two triangles side by side, pointing left (rewind) or right (fast-forward) */
 	int ix = b.x + padX, cy = b.y + b.h / 2, half = ih / 2, tri = iw / 2;
 	for (int t = 0; t < 2; ++t) {
@@ -2741,6 +2865,7 @@ static void draw_bar(void) {
 	time_t now = time(NULL);
 	struct tm tm;
 	if (localtime_r(&now, &tm)) snprintf(buf[0], sizeof(buf[0]), "%02d:%02d", tm.tm_hour, tm.tm_min);
+	if (getenv("GBADS_CLOCK")) snprintf(buf[0], sizeof(buf[0]), "%.5s", getenv("GBADS_CLOCK")); /* (tests: the same picture each run) */
 	int pct = battery_percent();
 	if (fps > 0) snprintf(buf[1], sizeof(buf[1]), "%.1f FPS", fps);
 	else snprintf(buf[1], sizeof(buf[1]), "\u2014 FPS"); /* (the first second) */
@@ -2787,6 +2912,8 @@ static void set_page(int page) {
 	menuPressed = -1;
 	menuNote[0] = 0;
 	armedItem = -1;
+	rowSel = page_is_rows(page) ? 1 : 0;
+	rowPressed = -1;
 }
 
 /* D-pad up / down: the row above or below (round at the ends), the same side of a split row */
@@ -3129,9 +3256,7 @@ static void draw_ovl_menu(int scr) {
 	for (int i = 0; i < n; ++i) {
 		SDL_Rect r = ovl_row_rect(scr, i);
 		bool sel = i == ovlSel;
-		int e = SDL_max(1, mg.h / 28);
-		if (sel) ui_fill_round(scr, (SDL_Rect) { r.x - e, r.y - e, r.w + e * 2, r.h + e * 2 }, C_BTN_EDGE, rad + e);
-		ui_fill_round(scr, r, sel ? C_BTN_SEL : C_BTN, rad);
+		ui_key(scr, r, rad, sel ? KEY_SEL : KEY_PLAIN);
 		const char* label = ovl_row_label(rows[i]);
 		int lc = SDL_min(cap, cap * (r.w - mg.pad * 2) / SDL_max(1, ui_label_width(scr, cap, label)));
 		if (rows[i] == OR_INNER || rows[i] == OR_OUTER) {
@@ -3202,11 +3327,9 @@ static void draw_picker(int scr) {
 	if (tw > mg.w) hc = hc * mg.w / tw, tw = mg.w;
 	int x = (r.w - tw) / 2;
 	for (int i = 0; i < 4; ++i) x = draw_btn_hint(scr, x, p.hintY, hc, btn[i], words[i]);
-	ui_fill_round(scr, p.cancel, C_BTN, mg.rad);
+	ui_key(scr, p.cancel, mg.rad, KEY_PLAIN);
 	ui_label(scr, p.cancel.x + p.cancel.w / 2, p.cancel.y + p.cancel.h / 2, p.cap, "Cancel", C_TEXT);
-	int e = SDL_max(1, mg.h / 28);
-	ui_fill_round(scr, (SDL_Rect) { p.ok.x - e, p.ok.y - e, p.ok.w + e * 2, p.ok.h + e * 2 }, C_BTN_EDGE, mg.rad + e);
-	ui_fill_round(scr, p.ok, C_BTN_SEL, mg.rad);
+	ui_key(scr, p.ok, mg.rad, KEY_SEL);
 	ui_label(scr, p.ok.x + p.ok.w / 2, p.ok.y + p.ok.h / 2, p.cap, "OK", C_TEXT);
 }
 
@@ -3229,11 +3352,7 @@ static void draw_hex(int scr) {
 		for (int j = 0; j < hex_row_len(i); ++j) {
 			SDL_Rect k = hex_key_rect(scr, i, j);
 			bool sel = i == hexRow && j == hexCol;
-			if (sel) {
-				int e = SDL_max(1, mg.h / 28);
-				ui_fill_round(scr, (SDL_Rect) { k.x - e, k.y - e, k.w + e * 2, k.h + e * 2 }, C_BTN_EDGE, mg.rad + e);
-			}
-			ui_fill_round(scr, k, sel ? C_BTN_SEL : i == 2 ? (SDL_Color) { 52, 44, 84, 240 } : C_BTN, mg.rad);
+			ui_key(scr, k, mg.rad, sel ? KEY_SEL : KEY_PLAIN);
 			bool dim = i == 2 && j == 1 && !canDone;
 			ui_label(scr, k.x + k.w / 2, k.y + k.h / 2, SDL_min(mg.cap, k.h * 2 / 5), hexKeys[i][j], dim ? C_DIS : C_TEXT);
 		}
@@ -3267,6 +3386,9 @@ static void ovl_activate(int i, int dir) {
 		snprintf(cfg->bezelOuter, sizeof(cfg->bezelOuter), "%06X", BEZEL_OUTER_DEFAULT);
 		break;
 	}
+	commit_current("overlays"); /* (the layer in force) */
+	commit_current("overlay_screens");
+	commit_current("bezel_logo");
 	save_prefs();
 }
 static void ovl_close_all(void) {
@@ -3276,34 +3398,34 @@ static void ovl_close_all(void) {
 	pickDrag = 0;
 }
 
-/* ---------------------------------------------------------------- Extras > Buttons
+/* ---------------------------------------------------------------- face buttons
  *
- * GEN-10: which GBA button each face button gives the game, per game. A
- * screen of its own (as Overlays): a row per face button, by position
- * (right, bottom, top, left), stepping through GBA A / B / L / R / Nothing,
- * then Reset Buttons. Kept in <state_dir>/<game>.buttons ("right a" lines);
- * with no file, ab_swap's layout. Only the game's keys change (run loop,
- * the GBA layout's branch): GBA DS's own screens keep B_A / B_B. In games
- * with a layout picker (profile `controls`), the SNES / four-button layout
- * decides the face buttons wherever it's in use. */
+ * GEN-10: which GBA button each face button gives the game, by position
+ * (right, bottom, top, left): GBA A / B / L / R, Start, Select, Turbo A /
+ * Turbo B or nothing. Controls > the four button rows (button_right ... in
+ * gba-ds.cfg, for this game or for all games); with none chosen, ab_swap's
+ * layout. Before v1.5.4 a game's choices were kept in <game>.buttons: read
+ * once into the game's own settings (fb_load). Only the game's keys change
+ * (run loop, the GBA layout's branch): GBA DS's own screens keep B_A / B_B.
+ * In games with a layout picker (profile `controls`), the SNES / four-button
+ * layout decides the face buttons wherever it's in use. */
 enum { FB_RIGHT, FB_BOTTOM, FB_TOP, FB_LEFT, FB_COUNT };
-enum { FG_A, FG_B, FG_L, FG_R, FG_NONE, FG_COUNT };
+enum { FG_A, FG_B, FG_L, FG_R, FG_START, FG_SELECT, FG_TURBO_A, FG_TURBO_B, FG_NONE, FG_COUNT };
 static const char* const fbNames[FB_COUNT] = { "right", "bottom", "top", "left" };
-static const char* const fbLabels[FB_COUNT] = { "A (Right)", "B (Bottom)", "X (Top)", "Y (Left)" };
-static const char* const fgNames[FG_COUNT] = { "a", "b", "l", "r", "none" };
-static const char* const fgLabels[FG_COUNT] = { "GBA A", "GBA B", "GBA L", "GBA R", "Nothing" };
+static const char* const fgNames[FG_COUNT] = { "a", "b", "l", "r", "start", "select", "turbo_a", "turbo_b", "none" };
+static const char* const fgLabels[FG_COUNT] = { "GBA A", "GBA B", "GBA L", "GBA R", "Start", "Select", "Turbo A", "Turbo B", "Nothing" };
 static int fbMap[FB_COUNT]; /* each face button's FG_ */
-static bool fbSet;          /* the player's own (else ab_swap's) */
-static char fbPath[1400];
-static bool btnsOpen;
-static int btnsSel, btnsPress = -1;
-#define BTNS_ROWS (FB_COUNT + 1) /* + Reset Buttons */
+static bool fbSet;          /* a choice in force (else ab_swap's) */
 
+/* from the settings in force (called again whenever one changes) */
 static void fb_default(void) {
 	fbMap[FB_RIGHT] = cfg->abSwap ? FG_B : FG_A;
 	fbMap[FB_BOTTOM] = cfg->abSwap ? FG_A : FG_B;
 	fbMap[FB_TOP] = fbMap[FB_LEFT] = FG_NONE;
 	fbSet = false;
+	for (int i = 0; i < FB_COUNT; ++i)
+		for (int j = 0; j < FG_COUNT && cfg->faceBtn[i][0]; ++j)
+			if (!strcmp(cfg->faceBtn[i], fgNames[j])) fbMap[i] = j, fbSet = true;
 }
 
 /* "right GBA A, bottom GBA B, ..." for the log and bug reports */
@@ -3315,97 +3437,244 @@ static const char* fb_describe(void) {
 	return s;
 }
 
+static void game_keys_reload(void);
 static void fb_load(void) {
-	fb_default();
-	snprintf(fbPath, sizeof(fbPath), "%s/%s.buttons", cfg->stateDir, gp.base);
-	FILE* f = fopen(fbPath, "r");
-	if (!f) return;
-	char k[16], v[16];
-	while (fscanf(f, "%15s %15s", k, v) == 2) {
-		for (int i = 0; i < FB_COUNT; ++i) {
-			if (strcmp(k, fbNames[i])) continue;
-			for (int j = 0; j < FG_COUNT; ++j)
-				if (!strcmp(v, fgNames[j])) fbMap[i] = j, fbSet = true;
+	/* a game's <game>.buttons from before v1.5.4: moved into its own settings */
+	char old[1400];
+	snprintf(old, sizeof(old), "%s/%s.buttons", cfg->stateDir, gp.base);
+	FILE* f = fopen(old, "r");
+	if (f) {
+		char k[16], v[16], lines[FB_COUNT][2][24];
+		const char* kv[FB_COUNT][2];
+		int n = 0;
+		while (fscanf(f, "%15s %15s", k, v) == 2 && n < FB_COUNT) {
+			for (int i = 0; i < FB_COUNT; ++i) {
+				if (strcmp(k, fbNames[i])) continue;
+				snprintf(lines[n][0], 24, "button_%s", fbNames[i]);
+				snprintf(lines[n][1], 24, "%s", v);
+				kv[n][0] = lines[n][0], kv[n][1] = lines[n][1];
+				++n;
+			}
 		}
-	}
-	fclose(f);
-	if (fbSet) fprintf(stderr, "buttons: %s\n", fb_describe());
-}
-
-static void fb_save(void) {
-	if (!fbSet) {
-		remove(fbPath);
-	} else {
-		FILE* f = fopen(fbPath, "w");
-		if (!f) return;
-		for (int i = 0; i < FB_COUNT; ++i) fprintf(f, "%s %s\n", fbNames[i], fgNames[fbMap[i]]);
 		fclose(f);
+		if (n) {
+			config_kv_update(gp.settings, "# this game's own settings: they win over the ones for all games", n, kv);
+			config_load_game_file(cfg, gp.settings); /* (put over the settings now) */
+			fprintf(stderr, "buttons: %s.buttons moved into %s\n", gp.base, gp.settings);
+		}
+		remove(old);
+		game_keys_reload();
 	}
-	fprintf(stderr, "buttons: %s%s\n", fb_describe(), fbSet ? "" : " (the default)");
+	fb_default();
+	if (fbSet) fprintf(stderr, "buttons: %s\n", fb_describe());
 }
 
 /* the GBA keys the face buttons give the game (the GBA layout) */
 static uint32_t fb_keys(void) {
-	static const uint32_t key[FG_COUNT] = { K_A, K_B, K_L, K_R, 0 };
+	static const uint32_t key[FG_COUNT] = { K_A, K_B, K_L, K_R, K_START, K_SELECT, K_A, K_B, 0 };
+	/* Turbo A / B (#55): the key goes down and up turbo_rate times a second (60 frames a second) */
+	int period = SDL_clamp(60 / SDL_max(1, cfg->turboRate), 2, 12);
+	bool turboOn = (frameCount % (uint64_t) period) < (uint64_t) (period / 2);
 	/* (ui.c puts the bottom button on B_A with ab_swap: by position again) */
 	int phys[FB_COUNT] = { cfg->abSwap ? B_B : B_A, cfg->abSwap ? B_A : B_B, B_X, B_Y };
 	uint32_t keys = 0;
 	for (int i = 0; i < FB_COUNT; ++i)
-		if (HELD(phys[i])) keys |= key[fbMap[i]];
+		if (HELD(phys[i]) && (fbMap[i] != FG_TURBO_A && fbMap[i] != FG_TURBO_B ? true : turboOn)) keys |= key[fbMap[i]];
 	return keys;
-}
-
-static SDL_Rect btns_row_rect(int scr, int i) {
-	MenuGeom g = menu_geom(scr);
-	return (SDL_Rect) { g.margin, g.top + i * (g.h + g.gap), g.w, g.h };
-}
-
-static void btns_activate(int i, int dir) {
-	if (i < 0 || i >= BTNS_ROWS) return;
-	if (i == FB_COUNT) {
-		fb_default(); /* Reset Buttons */
-	} else {
-		fbMap[i] = (fbMap[i] + (dir < 0 ? FG_COUNT - 1 : 1)) % FG_COUNT;
-		fbSet = true;
-	}
-	fb_save();
-}
-
-static void draw_buttons_menu(int scr) {
-	MenuGeom mg = menu_geom(scr);
-	int rad = mg.rad, cap = mg.cap;
-	SDL_Rect b = tab_rect(scr, 0), t = tab_rect(scr, 1);
-	ui_fill_round(scr, b, C_BTN, rad);
-	ui_label(scr, b.x + b.w / 2, b.y + b.h / 2, cap, "Back", C_TEXT);
-	ui_fill_round(scr, t, C_BTN_EDGE, rad);
-	ui_label(scr, t.x + t.w / 2, t.y + t.h / 2, cap, "Buttons", (SDL_Color) { 20, 16, 36, 255 });
-	for (int i = 0; i < BTNS_ROWS; ++i) {
-		SDL_Rect r = btns_row_rect(scr, i);
-		bool sel = i == btnsSel;
-		int e = SDL_max(1, mg.h / 28);
-		if (sel) ui_fill_round(scr, (SDL_Rect) { r.x - e, r.y - e, r.w + e * 2, r.h + e * 2 }, C_BTN_EDGE, rad + e);
-		ui_fill_round(scr, r, sel ? C_BTN_SEL : C_BTN, rad);
-		char label[64];
-		if (i < FB_COUNT) snprintf(label, sizeof(label), "%s: %s", fbLabels[i], fgLabels[fbMap[i]]);
-		else snprintf(label, sizeof(label), "Reset Buttons");
-		int lc = SDL_min(cap, cap * (r.w - mg.pad * 2) / SDL_max(1, ui_label_width(scr, cap, label)));
-		ui_label(scr, r.x + r.w / 2, r.y + r.h / 2, lc, label, i < FB_COUNT && fbMap[i] == FG_NONE ? C_DIS : C_TEXT);
-	}
-	const char* note = NULL;
-	if (ctlProf && ctlProf->controls.snes.bottom)
-		note = "With SNES picked under Controls in the quick bar, the SNES layout replaces these in levels.";
-	else if (ctlProf)
-		note = "With Four buttons picked under Controls in the quick bar (or Auto, while you're skating), the four-button layout replaces these.";
-	if (note) {
-		SDL_Rect last = btns_row_rect(scr, BTNS_ROWS - 1);
-		ui_font_wrap(scr, TF_BODY, mg.margin + mg.pad, last.y + last.h + mg.gap * 2, mg.w - mg.pad * 2, mg.noteCap, note, C_DIS);
-	}
 }
 
 static const char* scale_label(const char* scale) {
 	return !strcmp(scale, "fit")       ? "Scale: Full Width" :
 	       !strcmp(scale, "zoom")      ? "Scale: Zoom" :
 	       !strcmp(scale, "stretch")   ? "Scale: Stretch" : "Scale: Pixel Perfect";
+}
+
+/* ---------------------------------------------------------------- settings pages
+ *
+ * Display, Screens, Controls, Speed and Map are rows of settings (config.c's
+ * table), each changed for this game (A, or a tap with "This game" lit) or
+ * for all games (Y, or "All games" lit): this game's go to states/<game>.cfg,
+ * all games' to states/prefs.cfg. A row with a value of its own for this game
+ * wears a "Game" tag; X (or a tap on the tag) takes it away. Row 0 is the
+ * This game / All games bar. */
+static char gameKeys[48][40]; /* the keys states/<game>.cfg holds */
+static int nGameKeys;
+static bool game_has_key(const char* k) {
+	for (int i = 0; i < nGameKeys; ++i)
+		if (!strcmp(gameKeys[i], k)) return true;
+	return false;
+}
+static bool game_has(const Setting* st) {
+	return st->field == SF_FF ? game_has_key("fast_forward") || game_has_key("ff_speed") : game_has_key(st->key);
+}
+
+static SDL_Rect srow_rect(int scr, int i) {
+	MenuGeom g = menu_geom(scr);
+	return (SDL_Rect) { g.margin, g.top + i * (g.h + g.gap), g.w, g.h };
+}
+static SDL_Rect scope_rect(int scr, int half) {
+	MenuGeom g = menu_geom(scr);
+	SDL_Rect r = srow_rect(scr, 0);
+	int hw = (r.w - g.gap) / 2;
+	return (SDL_Rect) { r.x + half * (r.w - hw), r.y, hw, r.h };
+}
+static SDL_Rect rowTag[12], rowBack[12]; /* where the last drawing put each row's Game tag and left arrow (for touch) */
+static bool rowTagOn[12];
+
+/* why a row can't be changed here, or NULL */
+static const char* row_disabled(const char* key) {
+	if (!strcmp(key, "frame_buffer") && tallProf) return "Always on in this game: it needs it for full speed";
+	if (!strcmp(key, "screen_match") && !ui_screens_differ()) return "Your screens are the same shape: nothing to match";
+	if (!strcmp(key, "screen_placement") && nScreens != 2) return "Only one screen: nothing to move";
+	return NULL;
+}
+
+static void draw_rows_page(int scr, const MenuGeom* mg) {
+	int cap = mg->cap, rad = mg->rad, n = rowN[curPage];
+	/* the bar */
+	for (int h = 0; h < 2; ++h) {
+		SDL_Rect r = scope_rect(scr, h);
+		bool on = (h == 1) == scopeAll;
+		ui_key(scr, r, rad, on ? (rowSel == 0 ? KEY_SEL : KEY_LIT) : KEY_PLAIN);
+		ui_label(scr, r.x + r.w / 2, r.y + r.h / 2, cap, h ? "All games" : "This game", on ? (rowSel == 0 ? C_TEXT : (SDL_Color) { 20, 16, 36, 255 }) : C_DIS);
+	}
+	const char* note = NULL;
+	bool noteGold = false;
+	for (int i = 1; i <= n; ++i) {
+		SDL_Rect r = srow_rect(scr, i);
+		bool sel = i == rowSel;
+		ui_key(scr, r, rad, sel ? KEY_SEL : KEY_PLAIN);
+		const char* key = rowKeys[curPage][i - 1];
+		rowTagOn[i] = false;
+		int cy = r.y + r.h / 2, lc = cap * 9 / 10;
+		if (key[0] == '@') {
+			ui_font_text(scr, TF_BOLD, r.x + mg->pad, cy, lc, "Overlay colors and logo", C_TEXT, -1);
+			ui_font_text(scr, TF_BOLD, r.x + r.w - mg->pad, cy, cap, "›", sel ? C_TEXT : C_DIS, 1);
+			if (sel) note = "Opens the bezel's own page, for whichever the game or all games have";
+			continue;
+		}
+		const Setting* st = config_setting(key);
+		if (!st) continue;
+		const char* off = row_disabled(key);
+		char val[48];
+		config_setting_text(cfg, st, val, sizeof(val));
+		if (off && !strcmp(key, "frame_buffer")) snprintf(val, sizeof(val), "Always on here");
+		bool has = game_has(st);
+		SDL_Color vc = off ? C_DIS : C_GOLD;
+		ui_font_text(scr, TF_BOLD, r.x + mg->pad, cy, lc, st->label, off ? C_DIS : C_TEXT, -1);
+		int lw = ui_font_width(TF_BOLD, lc, st->label);
+		int ax = r.x + r.w - mg->pad;
+		ui_font_text(scr, TF_BOLD, ax, cy, cap, "›", sel ? C_TEXT : C_DIS, 1);
+		int vw = ui_font_width(TF_BOLD, lc, val);
+		ui_font_text(scr, TF_BOLD, ax - cap, cy, lc, val, vc, 1);
+		int bx = ax - cap * 2 - vw;
+		ui_font_text(scr, TF_BOLD, bx, cy, cap, "‹", sel ? C_TEXT : C_DIS, 1);
+		rowBack[i] = (SDL_Rect) { bx - cap * 2, r.y, cap * 3, r.h };
+		if (has) {
+			/* the Game tag, after the label */
+			int tc = SDL_max(6, cap * 5 / 8), tw = ui_font_width(TF_BOLD, tc, "Game") + mg->pad;
+			rowTag[i] = (SDL_Rect) { r.x + mg->pad + lw + mg->pad / 2, cy - tc, tw, tc * 2 };
+			ui_fill_round(scr, rowTag[i], C_GOLD, tc / 2);
+			ui_font_text(scr, TF_BOLD, rowTag[i].x + tw / 2, cy, tc, "Game", (SDL_Color) { 20, 16, 36, 255 }, 0);
+			rowTagOn[i] = true;
+		}
+		if (sel) {
+			const char* ctl = (!strncmp(key, "button_", 7) && ctlProf) ? (ctlProf->controls.snes.bottom ? "With SNES picked under Controls in the quick bar, the SNES layout replaces these in levels."
+			                                                                                      : "With Four buttons picked under Controls in the quick bar, the four-button layout replaces these.") : NULL;
+			note = off ? off : has ? "This game has its own value. X, or going on past the last choice: same as all games" : ctl ? ctl : st->note;
+		}
+	}
+	if (menuNote[0]) note = menuNote, noteGold = true;
+	else if (rowSel == 0) note = "A: the one lit above. Y: all games. X: undo this game's value";
+	if (note) {
+		SDL_Rect last = srow_rect(scr, n);
+		int nc = SDL_min(mg->noteCap, mg->noteCap * mg->w / SDL_max(1, ui_font_width(TF_BOLD, mg->noteCap, note)));
+		/* on a dark panel: the bezel's logo (or the game's picture) can be behind the line */
+		int ny = last.y + last.h + mg->h * 3 / 5, nh = nc * 3;
+		ui_fill_round(scr, (SDL_Rect) { last.x, ny - nh / 2, last.w, nh }, (SDL_Color) { 8, 6, 18, 245 }, rad);
+		ui_font_text(scr, TF_BOLD, screens[scr].rect.w / 2, ny, nc, note, noteGold ? C_GOLD : (SDL_Color) { 190, 186, 205, 255 }, 0);
+	}
+}
+
+/* The tabs' pictures, drawn from rectangles on a 24 x 24 grid (nothing to
+ * load): Game a handheld, Tools a toolbox, Display a monitor, Screens two
+ * screens, Controls a gamepad, Speed fast forward, Map a pin. fg is the
+ * picture, bg what's behind it (its cut-outs). */
+static void icon_fill(int scr, SDL_Rect box, int size, float gx, float gy, float gw, float gh, float gr, SDL_Color c) {
+	float u = size / 24.0f;
+	int x0 = box.x + (box.w - size) / 2, y0 = box.y + (box.h - size) / 2;
+	int ix = x0 + (int) lroundf(gx * u), iy = y0 + (int) lroundf(gy * u);
+	int iw = SDL_max(1, (int) lroundf((gx + gw) * u) - (int) lroundf(gx * u)), ih = SDL_max(1, (int) lroundf((gy + gh) * u) - (int) lroundf(gy * u));
+	ui_fill_round(scr, (SDL_Rect) { ix, iy, iw, ih }, c, (int) lroundf(gr * u));
+}
+/* a triangle pointing right (dir 1) or down (dir 2), as one-row strips */
+static void icon_tri(int scr, SDL_Rect box, int size, float gx, float gy, float gw, float gh, int dir, SDL_Color c) {
+	float u = size / 24.0f;
+	int x0 = box.x + (box.w - size) / 2, y0 = box.y + (box.h - size) / 2;
+	int ix = x0 + (int) lroundf(gx * u), iy = y0 + (int) lroundf(gy * u), iw = (int) lroundf(gw * u), ih = (int) lroundf(gh * u);
+	if (dir == 1) {
+		for (int r = 0; r < ih; ++r) {
+			float t = fabsf((r + 0.5f) / ih * 2 - 1);
+			int w = SDL_max(1, (int) lroundf(iw * (1 - t)));
+			ui_fill(scr, (SDL_Rect) { ix, iy + r, w, 1 }, c);
+		}
+	} else {
+		for (int r = 0; r < ih; ++r) {
+			int w = SDL_max(1, (int) lroundf(iw * (1 - (r + 0.5f) / ih)));
+			ui_fill(scr, (SDL_Rect) { ix + (iw - w) / 2, iy + r, w, 1 }, c);
+		}
+	}
+}
+static void draw_tab_icon(int scr, int page, SDL_Rect box, SDL_Color fg, SDL_Color bg) {
+	int size = SDL_min(box.h * 68 / 100, box.w * 80 / 100);
+	SDL_Rect b = box;
+#define F(x, y, w, h, r, c) icon_fill(scr, b, size, x, y, w, h, r, c)
+	switch (page) {
+	case PG_GAME: /* a handheld: screen, D-pad, two buttons */
+		F(5, 2, 14, 20, 3, fg);
+		F(7, 4, 10, 8, 1, bg);
+		F(7.5f, 16.8f, 4, 1.4f, 0.5f, bg);
+		F(8.8f, 15.5f, 1.4f, 4, 0.5f, bg);
+		F(14, 15.2f, 2.4f, 2.4f, 1.2f, bg);
+		F(16.4f, 17.4f, 2.4f, 2.4f, 1.2f, bg);
+		break;
+	case PG_TOOLS: /* a toolbox */
+		F(8, 2.5f, 8, 6, 2.5f, fg);
+		F(10, 4.5f, 4, 4, 1, bg);
+		F(3, 8, 18, 13.5f, 2, fg);
+		F(3, 13.2f, 18, 1.4f, 0, bg);
+		F(10.2f, 11.5f, 3.6f, 4.8f, 1, fg);
+		break;
+	case PG_DISPLAY: /* a monitor */
+		F(2, 3.5f, 20, 14, 2, fg);
+		F(4, 5.5f, 16, 10, 1, bg);
+		F(10, 17.5f, 4, 3, 0, fg);
+		F(7, 20, 10, 2, 1, fg);
+		break;
+	case PG_SCREENS: /* two screens, one over the other */
+		F(4, 1.5f, 16, 9.5f, 1.5f, fg);
+		F(6, 3.5f, 12, 5.5f, 0.5f, bg);
+		F(4, 13, 16, 9.5f, 1.5f, fg);
+		F(6, 15, 12, 5.5f, 0.5f, bg);
+		break;
+	case PG_CONTROLS: /* a gamepad */
+		F(1, 6.5f, 22, 12, 6, fg);
+		F(4.5f, 11.6f, 6, 1.8f, 0.5f, bg);
+		F(6.6f, 9.5f, 1.8f, 6, 0.5f, bg);
+		F(14.2f, 9.2f, 3.2f, 3.2f, 1.6f, bg);
+		F(17.4f, 12.2f, 3.2f, 3.2f, 1.6f, bg);
+		break;
+	case PG_SPEED: /* fast forward */
+		icon_tri(scr, b, size, 2.5f, 5, 9.5f, 14, 1, fg);
+		icon_tri(scr, b, size, 12, 5, 9.5f, 14, 1, fg);
+		break;
+	case PG_MAP: /* a pin */
+		icon_tri(scr, b, size, 6.2f, 12, 11.6f, 10.5f, 2, fg);
+		F(4.5f, 1.5f, 15, 15, 7.5f, fg);
+		F(9, 6, 6, 6, 3, bg);
+		break;
+	}
+#undef F
 }
 
 static void draw_menu(void) {
@@ -3434,7 +3703,7 @@ static void draw_menu(void) {
 		ra_list_draw(scr, ach_area(scr));
 		if (nScreens > 1) {
 			int o = ui_other_screen();
-			ui_label(o, screens[o].rect.w / 2, screens[o].rect.h / 2, (ui_px(o) + 1) * 7 * 34 / 35, "Paused", C_GOLD);
+			draw_paused_label(o);
 		}
 		return;
 	}
@@ -3442,7 +3711,7 @@ static void draw_menu(void) {
 		draw_note(scr);
 		if (nScreens > 1) {
 			int o = ui_other_screen();
-			ui_label(o, screens[o].rect.w / 2, screens[o].rect.h / 2, (ui_px(o) + 1) * 7 * 34 / 35, "Paused", C_GOLD);
+			draw_paused_label(o);
 		}
 		return;
 	}
@@ -3450,15 +3719,7 @@ static void draw_menu(void) {
 		draw_patches(scr);
 		if (nScreens > 1) {
 			int o = ui_other_screen();
-			ui_label(o, screens[o].rect.w / 2, screens[o].rect.h / 2, (ui_px(o) + 1) * 7 * 34 / 35, "Paused", C_GOLD);
-		}
-		return;
-	}
-	if (btnsOpen) {
-		draw_buttons_menu(scr);
-		if (nScreens > 1) {
-			int o = ui_other_screen();
-			ui_label(o, screens[o].rect.w / 2, screens[o].rect.h / 2, (ui_px(o) + 1) * 7 * 34 / 35, "Paused", C_GOLD);
+			draw_paused_label(o);
 		}
 		return;
 	}
@@ -3472,7 +3733,7 @@ static void draw_menu(void) {
 		draw_cheats(scr);
 		if (nScreens > 1) {
 			int o = ui_other_screen();
-			ui_label(o, screens[o].rect.w / 2, screens[o].rect.h / 2, (ui_px(o) + 1) * 7 * 34 / 35, "Paused", C_GOLD);
+			draw_paused_label(o);
 		}
 		return;
 	}
@@ -3484,8 +3745,8 @@ static void draw_menu(void) {
 	for (int t = 0; t < N_PAGES; ++t) {
 		SDL_Rect r = top_box(scr, t, N_PAGES);
 		bool on = t == curPage;
-		ui_fill_round(scr, r, on ? C_BTN_EDGE : C_BTN, rad);
-		ui_label(scr, r.x + r.w / 2, r.y + r.h / 2, mg.tabCap, pageNames[t], on ? (SDL_Color) { 20, 16, 36, 255 } : C_DIS);
+		ui_key(scr, r, rad, on ? KEY_LIT : KEY_PLAIN);
+		draw_tab_icon(scr, t, r, on ? (SDL_Color) { 20, 16, 36, 255 } : ui_theme_light() ? (SDL_Color) { 92, 94, 112, 255 } : (SDL_Color) { 150, 152, 168, 255 }, ui_key_mid(on ? KEY_LIT : KEY_PLAIN));
 	}
 	SDL_Rect t0 = top_box(scr, 0, N_PAGES), t1 = top_box(scr, N_PAGES - 1, N_PAGES);
 	/* L1 / R1 button prompts beside the tabs (the prompt art is 25:16) */
@@ -3499,12 +3760,18 @@ static void draw_menu(void) {
 		ui_text(scr, t0.x - px * 14, t0.y + (t0.h - px * 7) / 2, px, "L1", C_DIS);
 		ui_text(scr, t1.x + t1.w + px * 3, t1.y + (t1.h - px * 7) / 2, px, "R1", C_DIS);
 	}
+	if (page_is_rows(curPage)) {
+		draw_rows_page(scr, &mg);
+		if (nScreens > 1) {
+			int o = ui_other_screen();
+			draw_paused_label(o);
+		}
+		return;
+	}
 	for (int i = 0; i < nMenuItems; ++i) {
 		SDL_Rect r = item_rect(scr, i);
 		bool sel = i == menuSel;
-		int e = SDL_max(1, mg.h / 28); /* the selected button's edge */
-		if (sel) ui_fill_round(scr, (SDL_Rect) { r.x - e, r.y - e, r.w + e * 2, r.h + e * 2 }, C_BTN_EDGE, rad + e);
-		ui_fill_round(scr, r, sel ? C_BTN_SEL : C_BTN, rad);
+		ui_key(scr, r, rad, sel ? KEY_SEL : KEY_PLAIN);
 		bool en = item_enabled(menuItems[i]);
 		const char* label = menuLabels[menuItems[i]];
 		if (menuItems[i] == M_SCALE) label = scale_label(cfg->scale);
@@ -3516,10 +3783,16 @@ static void draw_menu(void) {
 		if (menuItems[i] == M_FPS) label = cfg->showFps ? "Show FPS: On" : "Show FPS: Off";
 		if (menuItems[i] == M_FRAMEBUF) label = tallProf ? "Frame Buffer: Always on here" : cfg->frameBuffer ? "Frame Buffer: On" : "Frame Buffer: Off";
 		if (menuItems[i] == M_REWIND) label = cfg->rewind ? "Rewind: On" : "Rewind: Off";
-		if (menuItems[i] == M_FF) label = cfg->fastForward ? "Fast Forward: On" : "Fast Forward: Off";
-		if (menuItems[i] == M_MATCH) label = cfg->matchDisplay ? "Match Display Rate: On" : "Match Display Rate: Off";
+		if (menuItems[i] == M_FF) {
+			static char ffLabel[32];
+			if (cfg->fastForward && cfg->ffSpeed <= 0) snprintf(ffLabel, sizeof(ffLabel), "Fast Forward: Max");
+			else if (cfg->fastForward) snprintf(ffLabel, sizeof(ffLabel), "Fast Forward: %dx", cfg->ffSpeed);
+			label = cfg->fastForward ? ffLabel : "Fast Forward: Off";
+		}
+		if (menuItems[i] == M_MATCH) label = !cfg->matchDisplay ? "Match Display Rate: Off" : pacedFallback ? "Match Display Rate: Off for now" : "Match Display Rate: On";
 		if (menuItems[i] == M_SHAPES) label = !en || !strcmp(cfg->screenMatch, "keep") ? "Keep device aspect ratios" :
 		                                      !strcmp(cfg->screenMatch, "aspect") ? "Match screen aspect ratios" : "Match screen sizes and aspect ratios";
+		if (menuItems[i] == M_PLACE) label = en && !strcmp(cfg->screenPlace, "no_gap") ? "Screen Placement: Closest to Gap" : "Screen Placement: Centered";
 		if (menuItems[i] == M_PIXLOGO) label = cfg->customLogos == CL_OFF ? "Custom Logos: Do Not Use" : cfg->customLogos == CL_FULL ? "Custom Logos: Full Detail" : "Custom Logos: Pixelated";
 		if (menuItems[i] == M_LOGO) label = cfg->showLogo ? "No Second Screen: Show Logo" : "No Second Screen: Keep Blank";
 		if (menuItems[i] == M_OVERLAY) {
@@ -3550,7 +3823,7 @@ static void draw_menu(void) {
 	}
 	if (nScreens > 1) {
 		int o = ui_other_screen();
-		ui_label(o, screens[o].rect.w / 2, screens[o].rect.h / 2, (ui_px(o) + 1) * 7 * 34 / 35, "Paused", C_GOLD);
+		draw_paused_label(o);
 	}
 }
 
@@ -3599,7 +3872,9 @@ static void snapshot_hiding_sprites_poke(const SpriteRule* hide, int n, const Sp
 	emu_hide_sprites(&emu, all, na);
 	emu_state_load(&emu, st);
 	if (pokeAt) emu_write16(&emu, pokeAt, pokeV);
-	emu_frame(&emu, 0);
+	/* (a core whose picture is a frame late (armGBA on the 3DS) runs another
+	 * for the first one's picture: the state is put back after either way) */
+	for (int i = 0, n = 1 + emu_frame_lag(&emu); i < n; ++i) emu_frame(&emu, 0);
 	memcpy(out, emu_fb(&emu), sizeof(raw));
 	emu_hide_sprites(&emu, nKept ? kept : NULL, nKept);
 	emu_state_load(&emu, st);
@@ -3704,7 +3979,11 @@ static void hud_make_backdrop(void) {
 	if (!hudBackValid && hudFadeEff) hudFadeIn = 16; /* (after a fade out) */
 	hudBackValid = true;
 	bg_pal_levels(hudPalRef);
+#ifdef __3DS__
+	if (0) { /* (a picture written to the SD card: most of a second there) */
+#else
 	if (debug) {
+#endif
 		char path[1200];
 		snprintf(path, sizeof(path), "%s/hud-backdrop.bmp", cfg->stateDir);
 		SDL_Surface* bs = SDL_CreateRGBSurfaceWithFormatFrom(hudGrab, GBA_W, GBA_H, 32, GBA_W * 4, SDL_PIXELFORMAT_XBGR8888);
@@ -3721,6 +4000,48 @@ static void hud_make_backdrop(void) {
 	bool grey = hudProf->hud.backdropGrey;
 	float sc = SDL_max((float) HUD_CW / GBA_W, (float) HUD_CH / h);
 	float ox = (GBA_W - HUD_CW / sc) / 2, oy = (h - HUD_CH / sc) / 2;
+#ifdef __3DS__
+	/* the same scaling in whole numbers, two channels at a time (weights in
+	 * 256ths, dimmed by 82/256): the source rows blended once per output
+	 * row, then across. Floats took the 3DS 76 ms, a hitch as each race
+	 * starts */
+	{
+		static int xs0[HUD_CW], xs1[HUD_CW], xw[HUD_CW];
+		static uint32_t rowv[GBA_W];
+		for (int x = 0; x < HUD_CW; ++x) {
+			float fx = ox + (x + 0.5f) / sc - 0.5f;
+			xs0[x] = SDL_clamp((int) fx, 0, GBA_W - 1), xs1[x] = SDL_min(xs0[x] + 1, GBA_W - 1);
+			xw[x] = (int) (SDL_clamp(fx - xs0[x], 0.0f, 1.0f) * 256);
+		}
+#define LERP2(p, q, w) (((((p) & 0xFF00FFu) * (256u - (w)) + ((q) & 0xFF00FFu) * (w)) >> 8) & 0xFF00FFu) | \
+	(((((p) & 0x00FF00u) * (256u - (w)) + ((q) & 0x00FF00u) * (w)) >> 8) & 0x00FF00u)
+		int lastY0 = -1, lastWy = -1;
+		for (int y = 0; y < HUD_CH; ++y) {
+			float fy = oy + (y + 0.5f) / sc - 0.5f;
+			int y0 = SDL_clamp((int) fy, 0, h - 1), y1 = SDL_min(y0 + 1, h - 1);
+			unsigned wy = (unsigned) (SDL_clamp(fy - y0, 0.0f, 1.0f) * 256);
+			if (y0 != lastY0 || (int) wy != lastWy) {
+				const uint32_t* r0 = &hudGrab[y0 * GBA_W];
+				const uint32_t* r1 = &hudGrab[y1 * GBA_W];
+				for (int x = 0; x < GBA_W; ++x) rowv[x] = LERP2(r0[x], r1[x], wy);
+				lastY0 = y0, lastWy = (int) wy;
+			}
+			uint32_t* o = &hudBack[y * HUD_CW];
+			for (int x = 0; x < HUD_CW; ++x) {
+				uint32_t v = LERP2(rowv[xs0[x]], rowv[xs1[x]], (unsigned) xw[x]);
+				v = ((((v & 0xFF00FFu) * 82) >> 8) & 0xFF00FFu) | ((((v & 0x00FF00u) * 82) >> 8) & 0x00FF00u);
+				if (grey) {
+					unsigned rr = v & 0xFF, g = (v >> 8) & 0xFF, bb = (v >> 16) & 0xFF;
+					unsigned l = (rr * 77 + g * 150 + bb * 29) >> 8;
+					v = l << 16 | l << 8 | l;
+				}
+				o[x] = 0xFF000000u | v;
+			}
+		}
+#undef LERP2
+		return;
+	}
+#endif
 	for (int y = 0; y < HUD_CH; ++y) {
 		float fy = oy + (y + 0.5f) / sc - 0.5f;
 		int y0 = SDL_clamp((int) fy, 0, h - 1), y1 = SDL_min(y0 + 1, h - 1);
@@ -3938,6 +4259,7 @@ static const uint32_t* card_logo(void) {
  * frame */
 static uint32_t mapHeld[GBA_W * GBA_H];
 static bool mapHeldOk;
+static bool hudPicNew = true; /* (this frame's HUD picture is a new one: emu_hud_fresh) */
 static int mapUndrawn; /* frames since the map was last drawn */
 static uint16_t mapDots[32][3];
 static int nMapDots;
@@ -4010,7 +4332,11 @@ static void map_hold_update(const typeof(hudProf->hud)* h, uint32_t clear) {
 			if (!mask[y * bw + x] && (hudPx[(y + y0) * GBA_W + x + x0] & 0xFFFFFF) != clear) ++other;
 		}
 	}
-	if (other < 16) { /* (the dots alone: the map isn't drawn this frame) */
+	/* (the dots alone: the map isn't drawn this frame. Where the HUD
+	 * picture is from a few frames back (armGBA on the 3DS: emu_hud_fresh
+	 * isn't every frame), its dots aren't where the sprites read now are:
+	 * a course's outline is thousands of pixels, a few dots tens) */
+	if (other < (emu_hud_every() > 1 ? 256 : 16)) {
 		++mapUndrawn;
 		return;
 	}
@@ -4055,6 +4381,12 @@ static void hud_backdrop_from(const uint32_t* src, uint64_t key) {
 	hud_base_changed(key);
 }
 
+/* ... or, with the layers off, the canvas rows c0 .. c0 + cn - 1 of it (hud_compose's band) */
+static void hud_backdrop_band(const uint32_t* src, uint64_t key, size_t c0, size_t cn) {
+	if (hudLayered) hud_backdrop_from(src, key);
+	else memcpy(hudCanvas + c0, src + c0, cn * 4);
+}
+
 /* A frame's pieces are made in hudOverBuild, from a clean sheet */
 static void hud_over_begin(void) {
 	for (int y = 0; y < GBA_H; ++y) {
@@ -4076,10 +4408,16 @@ static void hud_over_end(void) {
 	}
 }
 
+static void hud_upload(void) {
+	for (int i = 0; i < nViews; ++i) {
+		if (!(HUD_TEX_SHARED && i > 0 && hudTex[i] == hudTex[0])) ui_update_texture(hudTex[i], hudCanvas, HUD_CW * 4);
+	}
+}
+
 /* hudCanvas holds the whole picture (no pieces or map over it) and has to be sent: the layers off */
 static void hud_canvas_whole(void) {
 	if (!hudLayered) {
-		for (int i = 0; i < nViews; ++i) ui_update_texture(hudTex[i], hudCanvas, HUD_CW * 4);
+		hud_upload();
 		return;
 	}
 	hud_base_changed(0);
@@ -4121,7 +4459,7 @@ static void hud_sync(int v) {
 		/* (a run of strips, over gaps of one: a send has its own cost) */
 		while (b + 1 < GBA_H / 8 && (m >> (b + 1) & 1 || (b + 2 < GBA_H / 8 && m >> (b + 2) & 1))) ++b;
 		for (int i = a; i <= b; ++i) hudOld[v].overStrips &= ~(1u << i);
-		ui_update_texture_rows(hudOverTex[v], hudOver, GBA_W * 4, a * 8, SDL_min(b * 8 + 8, GBA_H));
+		ui_update_texture_rows(hudOverTex[v], hudOver, GBA_W * 4, a * 8, SDL_min(b * 8 + 8, GBA_H) - a * 8);
 	}
 	if (hudOld[v].map && hudMapTex[v]) {
 		ui_update_texture(hudMapTex[v], hudMapPx, hudMapTexW * 4);
@@ -4200,22 +4538,39 @@ static void hud_draw(int s) {
 	ui_image_pixels_over(s, hudTex, HUD_CW, HUD_CH, cfg->mapScale, lcd, layers, n);
 }
 
-static void hud_compose(void) {
+/* hud_compose's band: the whole picture, none of it (only what goes on the
+ * game screen: the sign, the pieces moved back there), or a third of its
+ * rows (whole bands of 8 rows, the last one taking the rest) */
+#define HB_NONE (-1)
+#define HB_ALL 3
+#define HUD_BAND_ROWS (HUD_CH / 3 / 8 * 8)
+static int hud_band_y0(int band) { return band * HUD_BAND_ROWS; }
+static int hud_band_n(int band) { return band == 2 ? HUD_CH - 2 * HUD_BAND_ROWS : HUD_BAND_ROWS; }
+
+static void hud_compose(int band) {
 	const typeof(hudProf->hud)* h = &hudProf->hud;
 	uint32_t clear = emu_hud_clear();
-	const bool lay = hudLayered;
-	if (lay) hud_over_begin();
+	const bool lay = hudLayered; /* (whole pictures only: bands are for the layers off) */
+	/* (what's done once a picture: with its first band, or the whole) */
+	bool first = band == HB_ALL || band == 0;
+	bool canvas = band != HB_NONE;
+	/* the canvas rows made this time */
+	int cr0 = band == HB_ALL ? 0 : canvas ? hud_band_y0(band) : 0;
+	int cr1 = band == HB_ALL ? HUD_CH : canvas ? cr0 + hud_band_n(band) : 0;
+	size_t c0 = (size_t) cr0 * HUD_CW, cn = (size_t) (cr1 - cr0) * HUD_CW;
 	bool racing = !hudScene && memprobes_match(h->layout, 4, &emu);
 	{
 		static int lastRacing = -1;
 		if (debug && racing != lastRacing) fprintf(stderr, "frame %llu: HUD layout %s\n", (unsigned long long) frameCount, racing ? "racing" : "plain");
 		lastRacing = racing;
 	}
-	/* the map's box: grown over the race's first frames, then kept */
-	if (racing && h->map.x1 && (hudFrames <= 8 || h->mapAt.scale)) {
+	/* the map's box: grown over the race's first frames, then kept (or
+	 * over 8 frames from the first picture with it: the 3DS's first HUD
+	 * picture of a race can come 12 frames in) */
+	if (first && racing && h->map.x1 && (hudFrames <= 8 || !mapFound || hudFrames <= mapFoundAt + 8 || h->mapAt.scale)) {
 		for (int y = h->map.y0; y <= h->map.y1; ++y) {
 			for (int x = h->map.x0; (x = next_lit(&hudPx[y * GBA_W], x, h->map.x1, clear)) <= h->map.x1; ++x) {
-				if (!mapFound) mapX0 = mapX1 = x, mapY0 = mapY1 = y, mapFound = true;
+				if (!mapFound) mapX0 = mapX1 = x, mapY0 = mapY1 = y, mapFound = true, mapFoundAt = hudFrames > 8 ? hudFrames : 0;
 				mapX0 = SDL_min(mapX0, x), mapX1 = SDL_max(mapX1, x);
 				mapY0 = SDL_min(mapY0, y), mapY1 = SDL_max(mapY1, y);
 			}
@@ -4233,7 +4588,9 @@ static void hud_compose(void) {
 	}
 	/* (hud.mapAt.holdTile: the map held between the frames it's drawn in) */
 	bool hold = bigMap && h->mapAt.holdTile;
-	if (hold) map_hold_update(h, clear);
+	/* (once a HUD picture: mapUndrawn counts pictures, and armGBA on the 3DS
+	 * draws one every few frames) */
+	if (hold && first && hudPicNew) map_hold_update(h, clear);
 	/* the sign: only when nothing else of the HUD is on its rows nearby */
 	bool sign = false;
 	if (racing && h->sign.x1) {
@@ -4255,13 +4612,16 @@ static void hud_compose(void) {
 			}
 		}
 	}
-	if (hudScene) {
+	if (!canvas) {
+		/* (the picture kept as it is: only the pieces that go back onto the
+		 * game screen, below, which the game picture needs every frame) */
+	} else if (hudScene) {
 		if (!hudLogoDone) hud_make_logo_back();
-		hud_backdrop_from(hudLogoBack, HUD_KEY(1, hudLogoBackGen));
+		hud_backdrop_band(hudLogoBack, HUD_KEY(1, hudLogoBackGen), c0, cn);
 	} else if ((hudAlt ? h->alt.mapBelow : h->mapBelow) && mapShownIdx >= 0 && mapW == GBA_W && mapH == GBA_H && map_px(mapShownIdx)) {
 		/* (hud.mapBelow, hud.alt.mapBelow: the map picture behind, at the game's size) */
 		const uint32_t* mp = map_px(mapShownIdx);
-		for (int y = 0; y < GBA_H; ++y) {
+		for (int y = cr0 / 2; y < cr1 / 2; ++y) {
 			for (int x = 0; x < GBA_W; ++x) {
 				uint32_t* o = &hudCanvas[y * 2 * HUD_CW + x * 2];
 				o[0] = o[1] = o[HUD_CW] = o[HUD_CW + 1] = mp[y * GBA_W + x] | 0xFF000000;
@@ -4270,7 +4630,7 @@ static void hud_compose(void) {
 		hud_base_changed(0);
 	} else if (h->logoBelow || h->logoBehind) {
 		if (!hudLogoBelowDone) hud_make_logo_below();
-		hud_backdrop_from(hudLogoBelow, HUD_KEY(2, hudLogoBelowGen));
+		hud_backdrop_band(hudLogoBelow, HUD_KEY(2, hudLogoBelowGen), c0, cn);
 	} else if (hudBackValid) {
 		/* the game fading the whole screen to black or white: the
 		 * backdrop too. By BLDCNT (every BG layer, darken or brighten, by
@@ -4294,24 +4654,24 @@ static void hud_compose(void) {
 		if (fade >= 62 && h->mapCnt) {
 			hudBackValid = false;
 			hudFadeEff = eff;
-			for (int i = 0; i < HUD_CW * HUD_CH; ++i) hudCanvas[i] = eff == 2 ? 0xFFFFFFFF : 0xFF000000;
+			for (size_t i = c0; i < c0 + cn; ++i) hudCanvas[i] = eff == 2 ? 0xFFFFFFFF : 0xFF000000;
 			hud_base_changed(0);
 			fade = 0;
 		} else {
 			if (hudFadeIn > 0) {
 				/* a new backdrop, faded in over 16 frames from how the last
 				 * scene faded out, or less if the game's own fade is less */
-				int in = hudFadeIn-- * 4;
+				int in = (first ? hudFadeIn-- : hudFadeIn) * 4;
 				if (in > fade || eff != hudFadeEff) eff = hudFadeEff, fade = in;
 			}
 			/* (the backdrop as faded by this much: kept while it stays so, not faded again each frame) */
 			uint64_t key = HUD_KEY(3, hudBackGen) | (fade ? ((uint64_t) ((eff & 3) << 7 | fade) + 1) << 48 : 0);
 			if (!lay || hudBaseKey != key) {
-				memcpy(hudCanvas, hudBack, sizeof(hudCanvas));
+				memcpy(hudCanvas + c0, hudBack + c0, cn * 4);
 				if (fade) {
 					uint8_t lut[256];
 					for (int v = 0; v < 256; ++v) lut[v] = (uint8_t) (eff == 3 ? v - v * fade / 64 : v + (255 - v) * fade / 64);
-					for (int i = 0; i < HUD_CW * HUD_CH; ++i) {
+					for (size_t i = c0; i < c0 + cn; ++i) {
 						uint32_t c = hudCanvas[i];
 						hudCanvas[i] = 0xFF000000 | lut[c & 0xFF] | (uint32_t) lut[(c >> 8) & 0xFF] << 8 | (uint32_t) lut[(c >> 16) & 0xFF] << 16;
 					}
@@ -4321,11 +4681,11 @@ static void hud_compose(void) {
 		}
 	} else if (h->card.tile) {
 		const uint32_t* cl = card_logo();
-		hud_backdrop_from(cl, HUD_KEY(4, cardLogoGen));
+		hud_backdrop_band(cl, HUD_KEY(4, cardLogoGen), c0, cn);
 	} else {
 		uint32_t plain = h->mapCnt ? (hudFadeEff == 2 ? 0xFFFFFFFF : 0xFF000000) : h->black ? SCREEN_LIVE : 0xFF1A1010;
 		if (!lay || hudBaseKey != HUD_KEY(5, plain)) {
-			for (int i = 0; i < HUD_CW * HUD_CH; ++i) hudCanvas[i] = plain;
+			for (size_t i = c0; i < c0 + cn; ++i) hudCanvas[i] = plain;
 			hud_base_changed(HUD_KEY(5, plain));
 		}
 	}
@@ -4350,7 +4710,8 @@ static void hud_compose(void) {
 	/* hud.mapTitleRows: the level's name from the map picture on top, the
 	 * HUD that far down */
 	int titleDy = h->mapTitleRows && mapTitleN ? mapTitleN + 2 : 0; /* (2 rows apart) */
-	for (int y = 0; y < titleDy; ++y) {
+	for (int y = 0; canvas && y < titleDy; ++y) {
+		if (y * 2 < cr0 || y * 2 >= cr1) continue;
 		for (int x = 0; x < GBA_W; ++x) {
 			uint32_t* o = &hudCanvas[y * 2 * HUD_CW + x * 2];
 			o[0] = o[1] = o[HUD_CW] = o[HUD_CW + 1] = mapTitle[y * GBA_W + x];
@@ -4396,11 +4757,48 @@ static void hud_compose(void) {
 		}
 		if (ubot >= 0) moveDx[m] = ulo - pieceLo[m], moveDy[m] = ubot + 1 + mv->under - pieceTop[m];
 	}
+	/* the pieces that go back onto the game picture: every frame (it's a
+	 * new picture each frame), from their own boxes (a pixel belongs to the
+	 * first moving piece whose box has it) */
+	for (int m = 0; moves && m < HUD_MOVES; ++m) {
+		const HudMove* mv = &moves[m];
+		if (!moving[m] || !mv->toGame) continue;
+		for (int y = SDL_max(mv->y0, 0); y <= SDL_min(mv->y1, GBA_H - 1); ++y) {
+			for (int x = SDL_max(mv->x0, 0); x <= SDL_min(mv->x1, GBA_W - 1); ++x) {
+				uint32_t c = hudPx[y * GBA_W + x];
+				if ((c & 0xFFFFFF) == clear) continue;
+				bool earlier = false;
+				for (int k = 0; k < m && !earlier; ++k) {
+					const HudMove* o = &moves[k];
+					earlier = moving[k] && x >= o->x0 && x <= o->x1 && y >= o->y0 && y <= o->y1;
+				}
+				if (earlier) continue;
+				int nx = x + moveDx[m], ny = y + moveDy[m];
+				if (nx < 0 || nx >= GBA_W || ny < 0 || ny >= GBA_H) continue;
+				emu_fb_put(&emu, nx, ny, c); /* back onto the game picture */
+			}
+		}
+	}
+	if (!canvas) return;
+	if (lay) hud_over_begin();
 	int movingIdx[HUD_MOVES], nMoving = 0; /* (the pieces that move, to look through for each pixel) */
 	for (int m = 0; m < HUD_MOVES; ++m) {
 		if (moving[m]) movingIdx[nMoving++] = m;
 	}
 	for (int y = 0; y < GBA_H; ++y) {
+		if (band != HB_ALL) {
+			/* (a row whose pixels can't land in these canvas rows, as they
+			 * are or moved: passed by) */
+			int r = (y + titleDy) * 2;
+			bool may = r + 1 >= cr0 && r < cr1;
+			for (int m = 0; !may && moves && m < HUD_MOVES; ++m) {
+				const HudMove* mv = &moves[m];
+				if (!moving[m] || mv->toGame || y < mv->y0 || y > mv->y1) continue;
+				int rr = (y + moveDy[m] + titleDy) * 2;
+				may = rr + 1 >= cr0 && rr < cr1;
+			}
+			if (!may) continue;
+		}
 		for (int x = 0; (x = next_lit(&hudPx[y * GBA_W], x, GBA_W - 1, clear)) < GBA_W; ++x) {
 			uint32_t c = hudPx[y * GBA_W + x];
 			int nx = x, ny = y;
@@ -4415,10 +4813,7 @@ static void hud_compose(void) {
 				}
 			}
 			if (nx < 0 || nx >= GBA_W || ny < 0 || ny >= GBA_H) continue;
-			if (toGame) {
-				emu_fb_put(&emu, nx, ny, c); /* back onto the game picture */
-				continue;
-			}
+			if (toGame) continue; /* (on the game picture, above) */
 			if (h->rows && y >= h->rows) continue; /* (hud.rows: the game draws the rest) */
 			if (sign && x >= h->sign.x0 && x <= h->sign.x1 && y >= h->sign.y0 && y <= h->sign.y1) continue;
 			if (bigMap && x >= bx0 && x <= bx1 && y >= by0 && y <= by1) continue;
@@ -4429,6 +4824,7 @@ static void hud_compose(void) {
 				hudOverUse[ny] = true;
 				continue;
 			}
+			if (ny * 2 < cr0 || ny * 2 >= cr1) continue;
 			uint32_t* o = &hudCanvas[ny * 2 * HUD_CW + nx * 2];
 			o[0] = o[1] = o[HUD_CW] = o[HUD_CW + 1] = c;
 		}
@@ -4474,7 +4870,9 @@ static void hud_compose(void) {
 				if (hold && mapUndrawn <= 3 && (c & 0xFFFFFF) == clear) c = mapHeld[y * GBA_W + x];
 				if ((c & 0xFFFFFF) == clear) continue;
 				for (int j = 0; j < q; ++j) {
-					uint32_t* o = &hudCanvas[(ty + (y - by0) * q + j) * HUD_CW + tx + (x - bx0) * q];
+					int row = ty + (y - by0) * q + j;
+					if (row < cr0 || row >= cr1) continue;
+					uint32_t* o = &hudCanvas[row * HUD_CW + tx + (x - bx0) * q];
 					for (int i = 0; i < q; ++i) o[i] = c;
 				}
 			}
@@ -4585,6 +4983,8 @@ static bool hud_take_pieces(const typeof(hudProf->hud)* h) {
 static uint32_t mirrorHeld[GBA_W * GBA_H];
 static bool mirrorHave, mirrorOn;
 
+
+
 static void update_hud(void) {
 	const typeof(hudProf->hud)* h = &hudProf->hud;
 	/* hud.held: taken from the game screen the first frame it's shown in place */
@@ -4679,6 +5079,13 @@ static void update_hud(void) {
 	}
 	if (h->mapCnt && mapBg < 0) race = false;
 	if (race && h->offTile && oam_has_tile(h->offTile)) race = false;
+	{
+		/* off the race for half a second: the core may tidy up now rather
+		 * than in the next race */
+		static int offFor;
+		offFor = race ? 0 : offFor + 1;
+		if (offFor >= 30 && offFor % 60 == 30) emu_tidy(&emu);
+	}
 	if (h->drop) {
 		/* (only left out of the game screen: the second screen keeps
 		 * its map picture or logo) */
@@ -4766,9 +5173,42 @@ static void update_hud(void) {
 			/* hud.freeze: the picture as it was (World-e's status bar
 			 * sliding away as the inventory opens, and back, SM4-8) */
 		} else if (!(empty && !hudShown)) {
-			if (emu_hud_grabbed()) hud_make_backdrop(); /* (that frame drew no HUD: the last one is reused) */
-			hud_compose();
-			if (!hudLayered) for (int i = 0; i < nViews; ++i) ui_update_texture(hudTex[i], hudCanvas, HUD_CW * 4);
+			bool grabbed = emu_hud_grabbed();
+			if (grabbed) hud_make_backdrop(); /* (that frame drew no HUD: the last one is reused) */
+			/* (the picture made again only when there's a new one to make it
+			 * from: armGBA on the 3DS draws the HUD one frame in five) */
+			bool fresh = emu_hud_fresh();
+			hudPicNew = fresh;
+			if (hudLayered) {
+				/* (the layers kept as they are between new pictures; the pieces that go on the game screen every frame) */
+				hud_compose(fresh || grabbed || !hudShown || hudFrames <= 3 ? HB_ALL : HB_NONE);
+			} else {
+#if HUD_TEX_SHARED
+			/* (the 3DS: a new HUD picture made and uploaded a third at a time
+			 * over the next three frames, as making it (4.4 ms) and moving
+			 * its 600 KB (35 ns a pixel) took longer than a frame has; in
+			 * between, only the pieces that go on the game screen) */
+			static int bandNext = 3;
+			if (grabbed || !hudShown || hudFrames <= 3) {
+				hud_compose(HB_ALL);
+				hud_upload();
+				bandNext = 3;
+			} else {
+				if (fresh) bandNext = 0;
+				if (bandNext < 3) {
+					hud_compose(bandNext);
+					ui_update_texture_rows(hudTex[0], hudCanvas, HUD_CW * 4, hud_band_y0(bandNext), hud_band_n(bandNext));
+					++bandNext;
+				} else {
+					hud_compose(HB_NONE);
+				}
+			}
+#else
+			(void) fresh;
+			hud_compose(HB_ALL);
+			hud_upload();
+#endif
+			}
 			if (logoForced && !(hudProf->logoIf[0].addr && memprobes_match(hudProf->logoIf, 2, &emu)) &&
 			    !(hudProf->logoIfOr[0].addr && memprobes_match(hudProf->logoIfOr, 2, &emu))) {
 				/* (a new HUD picture: the logo's hold is over) */
@@ -4956,6 +5396,24 @@ static bool tall_line(uint32_t* dst, int row, const TallSrc* src, int n) {
 	if (!tallKeep) for (int x = 0; x < GBA_W; ++x) dst[x] = 0xFF000000;
 	return false;
 }
+/* Whether the game's BG0 has a pixel at screen (x, y) above the score bar
+ * (its map from the profile's msg.map, row0 being the map row of screen row
+ * 0; no horizontal scroll): the catch timer's digits. PP-10: the banner
+ * boxes take only what isn't BG0's, so a banner flying across the timer
+ * doesn't carry part of it to the bottom screen. */
+static bool tall_bg0_pixel(uint32_t map, int row0, int x, int y) {
+	uint16_t cnt = emu_io16(&emu, 0x08);
+	uint32_t chr = 0x06000000 + ((cnt >> 2) & 3) * 0x4000;
+	uint16_t e = emu_read16(&emu, map + (((row0 + (y >> 3)) & 31) * 32 + (x >> 3)) * 2);
+	int px = x & 7, py = y & 7;
+	if (e & 0x400) px = 7 - px;
+	if (e & 0x800) py = 7 - py;
+	uint32_t t = e & 0x3FF;
+	if (cnt & 0x80) return emu_read8(&emu, chr + t * 64 + py * 8 + px) != 0;
+	uint8_t b = emu_read8(&emu, chr + t * 32 + py * 4 + px / 2);
+	return (px & 1 ? b >> 4 : b & 15) != 0;
+}
+
 static void update_tall(void) {
 	const typeof(tallProf->tall)* t = &tallProf->tall;
 	const typeof(t->live)* L = &t->live;
@@ -4967,6 +5425,7 @@ static void update_tall(void) {
 		tallOn = on;
 		copied = false;
 		tallMsg = haveLastTop = false;
+		tallTopLogo = tallFixedBot = false, tallFixedHold = 0;
 		tallLive = false;
 		mapShownIdx = -1;
 		/* (carry: the copies start again from the game's: what they kept,
@@ -5035,12 +5494,20 @@ static void update_tall(void) {
 	 * its own view, which with the lower view is another part of the
 	 * table); the copies' have the table) */
 	int gf = carry && L->carry.gameFrom ? L->carry.gameFrom - 1 : 0;
+	/* (what the top screen showed last frame, for a frame whose rows aren't
+	 * all there: below) */
+	static uint32_t prevTop[GBA_W * GBA_H];
+	memcpy(prevTop, tallTop, sizeof(prevTop));
+	bool havePrevTop = tallLive && !firstLive;
+	int topMissing = 0;
 	for (int y = 0; y < GBA_H; ++y) {
 		if (y < gf) memcpy(&tallTop[y * GBA_W], &emu_fb(&emu)[y * GBA_W], sizeof(uint32_t) * GBA_W);
 		else if (gf && y == gf) for (int x = 0; x < GBA_W; ++x) tallTop[y * GBA_W + x] = 0xFF000000u;
-		else missing += !tall_line(&tallTop[y * GBA_W], v + y, topSrc, 3);
+		else topMissing += !tall_line(&tallTop[y * GBA_W], v + y, topSrc, 3);
 		missing += !tall_line(&tallBot[y * GBA_W], v + GBA_H + y, botSrc, 3);
 	}
+	missing += topMissing;
+	if (carry) topMissing = 0; /* (carry keeps its own rows: tallKeep) */
 	/* PP-11: the game dims its screen (paused, the Mart: brightness down)
 	 * or shows a message box: its whole screen on the bottom one */
 	uint16_t bld = emu_io16(&emu, 0x50);
@@ -5052,9 +5519,32 @@ static void update_tall(void) {
 		}
 		msg = n > L->msg.min;
 	}
-	/* (the top screen: the table's rows, or while that would be the game's
-	 * screen again, as they were before it) */
-	if (msg && gameOnTop && haveLastTop) memcpy(tallTop, lastTop, sizeof(tallTop));
+	if (msg && !carry) {
+		/* (the top screen: the table's rows just above the game's screen,
+		 * from twins[0] held there (twin_step); none above it (the game's
+		 * view near the table's top): the logo, as the rows it would show
+		 * are the game's own again. Until the copy is there, what the top
+		 * screen showed last) */
+		if (s - k - GBA_H < top) {
+			for (int i = 0; i < GBA_W * GBA_H; ++i) tallTop[i] = SCREEN_GREY;
+			logo_draw(tallTop, GBA_W, GBA_H, 1, 0, 128 /* LOGO_IDLE */);
+			tallTopLogo = true;
+		} else {
+			int off = 0;
+			for (int y = 0; y < GBA_H; ++y) off += !tall_line(&tallTop[y * GBA_W], s - GBA_H + y, &a, 1);
+			if (off) memcpy(tallTop, prevTop, sizeof(tallTop));
+			else tallTopLogo = false;
+		}
+	} else {
+		/* (the top screen: the table's rows, or while that would be the game's
+		 * screen again, as they were before it) */
+		if (msg && gameOnTop && haveLastTop) memcpy(tallTop, lastTop, sizeof(tallTop));
+		/* (a copy not yet back at its place (just after PP-11's screen, which
+		 * held it elsewhere): what the top screen showed last, for the frame
+		 * or two it takes) */
+		if (!msg && topMissing && havePrevTop) memcpy(tallTop, prevTop, sizeof(tallTop));
+		else if (!msg) tallTopLogo = false;
+	}
 	if (msg) memcpy(tallBot, emu_fb(&emu), sizeof(tallBot)); /* (and its score bar, below) */
 	if (msg != tallMsg && debug) fprintf(stderr, "frame %llu: %s\n", (unsigned long long) frameCount, msg ? "the game's screen on the bottom one (dimmed or a message)" : "the table on both screens again");
 	tallMsg = msg;
@@ -5070,8 +5560,44 @@ static void update_tall(void) {
 		 * run_frame). (Drawn on their own: the copies' pictures can differ
 		 * a little from the game's, so it can't be found by comparing.) */
 		uint32_t clear = emu_hud_clear();
+		/* (the game's sprites among it (banners such as BALL SAVE): on the
+		 * screen with the ball, at their place on the game's screen. Which
+		 * screen is settled as they come up, from where the ball is then,
+		 * and kept while they're up: they never move between the screens) */
+		static uint8_t box[GBA_W * GBA_H];
+		bool anyFixed = false;
+		if (!carry) {
+			memset(box, 0, sizeof(box));
+			for (int f = 0; f < nTallFixed; ++f) {
+				uint16_t a0 = tallFixed[f][0], a1 = tallFixed[f][1];
+				int y0 = a0 & 0xFF, x0 = a1 & 0x1FF, h = obj_height(a0, a1), w = obj_width(a0, a1);
+				if (y0 >= GBA_H) y0 -= 256;
+				if (x0 >= GBA_W) x0 -= 512;
+				for (int y = SDL_max(y0, 0); y < SDL_min(y0 + h, t->hudRow); ++y)
+					for (int x = SDL_max(x0, 0); x < SDL_min(x0 + w, GBA_W); ++x) {
+						if ((hudPx[y * GBA_W + x] & 0xFFFFFF) == clear) continue;
+						if (L->msg.map && tall_bg0_pixel(L->msg.map, L->msg.row0, x, y)) continue; /* (BG0's: the timer) */
+						box[y * GBA_W + x] = 1, anyFixed = true;
+					}
+			}
+			if (anyFixed) {
+				if (!tallFixedHold) {
+					uint32_t S = emu_read32(&emu, L->state);
+					int32_t bx, by;
+					bool bot = twin_ball(&emu, S, &bx, &by) && (by >> 8) >= v + GBA_H - k;
+					if (bot != tallFixedBot && debug) fprintf(stderr, "frame %llu: banners on the %s screen (the ball's there)\n", (unsigned long long) frameCount, bot ? "bottom" : "top");
+					tallFixedBot = bot;
+				}
+				tallFixedHold = 20;
+			} else if (tallFixedHold) {
+				--tallFixedHold;
+			}
+		}
 		for (int i = 0; i < GBA_W * t->hudRow; ++i) {
-			if ((hudPx[i] & 0xFFFFFF) != clear) tallTop[i] = hudPx[i] | 0xFF000000, ++laid;
+			if ((hudPx[i] & 0xFFFFFF) == clear) continue;
+			if (!carry && box[i] && tallFixedBot) tallBot[i] = hudPx[i] | 0xFF000000;
+			else tallTop[i] = hudPx[i] | 0xFF000000;
+			++laid;
 		}
 	}
 	if (carry) {
@@ -5152,10 +5678,11 @@ static void update_tall(void) {
 		}
 	}
 	char* tl = tallLog[tallLogN++ % TALL_LOG];
-	snprintf(tl, sizeof(tallLog[0]), "T %llu s %d v %d top %s a %d%s%s b %d%s%s hid %d/%d missing %d laid %d band %d-%d fixed %d/%d same %d noobj %d",
+	snprintf(tl, sizeof(tallLog[0]), "T %llu s %d v %d top %s a %d%s%s b %d%s%s hid %d/%d missing %d laid %d band %d-%d fixed %d/%d same %d noobj %d%s%s",
 	         (unsigned long long) frameCount, s, v, gameOnTop ? "game" : "copy", twins[0].picRow, twins[0].havePic ? "" : " away",
 	         twins[0].up ? "" : " down", twins[1].picRow, twins[1].havePic ? "" : " away", twins[1].up ? "" : " down", twins[0].hidden,
-	         twins[1].hidden, missing, laid, tallBandY0, tallBandY1, nTallBandFixed, nTallFixed, same, (int) twinNoObj);
+	         twins[1].hidden, missing, laid, tallBandY0, tallBandY1, nTallBandFixed, nTallFixed, same, (int) twinNoObj,
+	         tallFixedHold && tallFixedBot ? " banners below" : "", msg && tallTopLogo ? " logo above" : "");
 	if (tallTrace) fprintf(stderr, "%s\n", tl);
 	if (!tallLive) fprintf(stderr, "frame %llu: live view\n", (unsigned long long) frameCount);
 	tallLive = true;
@@ -5457,13 +5984,37 @@ static void* screen_blob(size_t* n) {
 	*n = b.n;
 	return b.p;
 }
+/* a slot or the automatic state in RetroArch's folder (shared with it: issue #39) */
+static bool state_is_retroarch(const char* path) {
+	size_t n = strlen(gp.raDir);
+	return n && !strncmp(path, gp.raDir, n) && path[n] == '/';
+}
+/* RetroArch's thumbnail beside a state (<state>.png, for its menu): the
+ * game's picture as it is now, at the GBA's size */
+static void state_thumbnail(const char* path) {
+	uint8_t* px = malloc((size_t) GBA_W * GBA_H * 4);
+	if (!px) return;
+	memcpy(px, emu_fb(&emu), (size_t) GBA_W * GBA_H * 4); /* (bytes R, G, B, X) */
+	for (size_t i = 0; i < (size_t) GBA_W * GBA_H; ++i) px[i * 4 + 3] = 255;
+	char png[1100], tmp[1110];
+	snprintf(png, sizeof(png), "%s.png", path);
+	snprintf(tmp, sizeof(tmp), "%s.tmp.png", path);
+	if (!stbi_write_png(tmp, GBA_W, GBA_H, 4, px, GBA_W * 4) || rename(tmp, png) != 0) {
+		remove(tmp);
+		fprintf(stderr, "save state: no thumbnail %s\n", png);
+	}
+	free(px);
+}
 static bool state_file_save(const char* path) {
-	if (!emu_state_save_file(&emu, path)) return false;
 	size_t n;
 	void* blob = screen_blob(&n);
-	if (blob && !emu_state_file_put_extra(&emu, path, blob, n)) fprintf(stderr, "save state: the second screen not kept with it\n");
+	bool ra = state_is_retroarch(path);
+	StateFormat fmt = !ra ? STATE_FORMAT_MGBA : gp.raCompress ? STATE_FORMAT_RETROARCH_RZIP : STATE_FORMAT_RETROARCH;
+	if (ra) mkdirs(gp.raDir);
+	bool ok = emu_state_save_file_as(&emu, path, blob, blob ? n : 0, fmt);
 	free(blob);
-	return true;
+	if (ok && ra) state_thumbnail(path);
+	return ok;
 }
 static uint8_t* screenRestore; /* a loaded state's block, put back at the next frame */
 static size_t screenRestoreN;
@@ -5545,10 +6096,19 @@ static void screen_restore_apply(void) {
 	                   blob_find(b, n, "HELD", &sz) ? " held" : "");
 }
 
-/* Save states, with the RetroAchievements progress beside them. */
+/* Save states, with the RetroAchievements progress beside them (<state>.ra;
+ * for one in RetroArch's folder, in GBA DS's own: <state_dir>/retroarch/) */
+static const char* state_ra_side(const char* path) {
+	static char side[1200];
+	if (!state_is_retroarch(path)) return path;
+	snprintf(side, sizeof(side), "%s/retroarch", cfg->stateDir);
+	mkdirs(side);
+	snprintf(side, sizeof(side), "%s/retroarch/%s", cfg->stateDir, strrchr(path, '/') + 1);
+	return side;
+}
 static bool state_save(const char* path) {
 	bool ok = state_file_save(path);
-	if (ok) ra_state_saved(path);
+	if (ok) ra_state_saved(state_ra_side(path));
 	return ok;
 }
 
@@ -5578,11 +6138,29 @@ static void state_rom_check(const char* path) {
 	stateWarned = true;
 }
 
+static StateFileKind stateLoadKind; /* (what the last state_load found: why it failed) */
 static bool state_load(const char* path) {
+	bool fromGbads = false;
+	stateLoadKind = emu_state_file_kind(&emu, path, &fromGbads);
 	bool ok = emu_state_load_file(&emu, path);
+	{
+		static const char* const kinds[] = { "no file", "GBA DS's / mGBA's", "RetroArch's", "another emulator's", "unreadable" };
+		fprintf(stderr, "load state: %s: %s (%s%s)\n", path, ok ? "loaded" : "not loaded", kinds[stateLoadKind],
+		        stateLoadKind == STATE_FILE_RETROARCH ? (fromGbads ? ", saved by GBA DS" : ", saved by RetroArch") : "");
+	}
 	stateWarned = false;
 	if (ok && !stateNoCheck) state_rom_check(path);
-	if (ok) ra_state_loaded(path);
+	if (ok) {
+		/* (saved by RetroArch over one of GBA DS's: the progress kept with
+		 * that one is another moment's, so achievements start over) */
+		const char* side = state_ra_side(path);
+		if (side != path && !fromGbads) {
+			char ra[1210];
+			snprintf(ra, sizeof(ra), "%s.ra", side);
+			remove(ra);
+		}
+		ra_state_loaded(side);
+	}
 	/* (the second screen kept with it: put back at the next frame) */
 	if (ok) {
 		free(screenRestore);
@@ -5881,6 +6459,13 @@ static void bug_info(Text* t, const char* date, uint64_t back) {
 	text_add(t, "Controls: %s. Cheats on: %d. RetroAchievements: %s\n", ctlProf ? ctl_name(ctlMode) : "GBA", cheats_on(&cheats),
 	         ra_enabled() ? "signed in" : "off");
 	text_add(t, "The rewound state is %llu frames before the other\n", (unsigned long long) back);
+	/* (issue #39: slots 0-9 and the resume point shared with RetroArch, and where) */
+	if (gp.raDir[0])
+		text_add(t, "Save states: shared with RetroArch in %s (%s, %s); slot %d\n", gp.raDir, cfg->raStateDir[0] ? "chosen by hand" : "from its settings",
+		         gp.raCompress ? "compressed" : "uncompressed", stateSlot);
+	else
+		text_add(t, "Save states: GBA DS's own%s; slot %d\n", !strcmp(cfg->stateFolder, "retroarch") ? " (shared with RetroArch, but its folder wasn't found)" : "",
+		         stateSlot);
 
 	text_add(t, "\n== Settings\n");
 	text_add(t, "layout %s, swap %d, scale %s, map_scale %s, shader %s, color_correction %d, lcd_ghosting %d, smooth %d, overlays %d (screens %d, logo %d, %s / %s), border_color %s\n", cfg->layout,
@@ -6565,14 +7150,173 @@ static double frameSec = 1.0 / GBA_FPS;
 static double pacedHz;    /* the display's rate when matched, else 0 */
 static double audioSpeed = 1.0; /* emulated time per real time */
 
+/* ---- Keeping the game and its sound going while a frame's present is held
+ * up (issue #50). On one player's RG DS Plus (ROCKNIX, a second SD card),
+ * presenting a frame stalled for half a second every few seconds: the
+ * graphics driver waiting for sway to give a buffer back. Nothing in GBA DS
+ * can make the screen take the frame sooner, but the emulator isn't needed
+ * for presenting: once a present has taken 1.5 frames, this thread runs the
+ * game's frames on time with the last keys held (run_frame, as the frame
+ * buffer's worker does, so the bug log keeps every frame's keys) and hands
+ * their sound over, until the present returns. The picture freezes for the
+ * stall and then carries on from where the game is; the sound doesn't
+ * break and the game doesn't fall behind. Not run: RetroAchievements'
+ * frame check (main thread only), the rewind buffer's states, the map's
+ * room checks; those carry on with the next frame. keep_sound = 0: off. */
+#ifndef __wasi__
+static struct {
+	pthread_t thread;
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	bool started, quit, armed, running;
+	Uint64 armedAt;
+	uint32_t keys;
+	int ran;      /* frames run while armed */
+	int ahead;    /* frames already emulated ahead when armed (the frame buffer's) */
+	double ms;    /* how long the present took, as the keeper saw it */
+	SDL_AudioDeviceID audio;
+	int outRate, maxQueued;
+	SDL_AudioStream* conv;
+	int convFrom;
+} keeper = { .lock = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER };
+
+/* the frames' sound, converted as the main loop does (not fast-forwarding,
+ * not matched: none of its other adjustments apply) */
+static void keeper_audio(void) {
+	static int16_t in[4096 * 2], out[8192 * 2];
+	size_t got;
+	while ((got = emu_audio_read(&emu, in, 4096)) > 0) {
+		if (!keeper.audio) continue;
+		if ((int) (SDL_GetQueuedAudioSize(keeper.audio) / 4) > keeper.maxQueued) continue;
+		int rate = (int) lround(emu_audio_rate(&emu) * audioSpeed);
+		if (rate != keeper.convFrom || !keeper.conv) {
+			if (keeper.conv) SDL_FreeAudioStream(keeper.conv);
+			keeper.conv = SDL_NewAudioStream(AUDIO_S16SYS, 2, rate, AUDIO_S16SYS, 2, keeper.outRate);
+			keeper.convFrom = rate;
+		}
+		if (!keeper.conv) continue;
+		SDL_AudioStreamPut(keeper.conv, in, (int) got * 4);
+		int bytes;
+		while ((bytes = SDL_AudioStreamGet(keeper.conv, out, sizeof(out))) > 0) {
+			int vol = ui_volume();
+			if (vol < 100) {
+				int gain = vol * vol * 65536 / 10000;
+				for (int k = 0; k < bytes / 2; ++k) out[k] = (int16_t) (out[k] * gain >> 16);
+			}
+			SDL_QueueAudio(keeper.audio, out, bytes);
+		}
+	}
+}
+
+static void* keeper_worker(void* arg) {
+	(void) arg;
+	const double freq = (double) SDL_GetPerformanceFrequency();
+	pthread_mutex_lock(&keeper.lock);
+	for (;;) {
+		while (!keeper.armed && !keeper.quit) pthread_cond_wait(&keeper.cond, &keeper.lock);
+		if (keeper.quit) break;
+		Uint64 t0 = keeper.armedAt;
+		int n = 0;
+		while (keeper.armed && !keeper.quit) {
+			/* the first frame once the present has taken 1.5 frames (one more if the
+			 * frame buffer's worker already ran the next), then one a frame */
+			double due = (1.5 + keeper.ahead + n) * frameSec, now = (double) (SDL_GetPerformanceCounter() - t0) / freq;
+			if (now < due) {
+				struct timespec ts;
+				clock_gettime(CLOCK_REALTIME, &ts);
+				long ns = (long) ((due - now) * 1e9);
+				ts.tv_sec += (ts.tv_nsec + ns) / 1000000000L;
+				ts.tv_nsec = (ts.tv_nsec + ns) % 1000000000L;
+				pthread_cond_timedwait(&keeper.cond, &keeper.lock, &ts);
+				continue;
+			}
+			keeper.running = true;
+			uint32_t keys = keeper.keys;
+			pthread_mutex_unlock(&keeper.lock);
+			/* (a frame the frame buffer's worker is running comes first) */
+			pthread_mutex_lock(&ahead.lock);
+			while (ahead.busy) pthread_cond_wait(&ahead.cond, &ahead.lock);
+			pthread_mutex_unlock(&ahead.lock);
+			run_frame(keys);
+			keeper_audio();
+			pthread_mutex_lock(&keeper.lock);
+			keeper.running = false;
+			++keeper.ran;
+			++n;
+			pthread_cond_broadcast(&keeper.cond);
+		}
+	}
+	pthread_mutex_unlock(&keeper.lock);
+	return NULL;
+}
+
+/* Before a present: the keeper may run frames until keeper_disarm. */
+static void keeper_arm(uint32_t keys, SDL_AudioDeviceID audio, int outRate, int maxQueued, int ahead) {
+	pthread_mutex_lock(&keeper.lock);
+	if (!keeper.started) {
+		keeper.quit = false;
+		keeper.started = pthread_create(&keeper.thread, NULL, keeper_worker, NULL) == 0;
+	}
+	if (keeper.started) {
+		keeper.keys = keys;
+		keeper.audio = audio, keeper.outRate = outRate, keeper.maxQueued = maxQueued;
+		keeper.armedAt = SDL_GetPerformanceCounter();
+		keeper.ran = 0;
+		keeper.ahead = ahead;
+		keeper.armed = true;
+		pthread_cond_broadcast(&keeper.cond);
+	}
+	pthread_mutex_unlock(&keeper.lock);
+}
+
+/* After the present: the emulator is the loop's again; the frames run meanwhile. */
+static int keeper_disarm(void) {
+	pthread_mutex_lock(&keeper.lock);
+	keeper.armed = false;
+	pthread_cond_broadcast(&keeper.cond);
+	while (keeper.running) pthread_cond_wait(&keeper.cond, &keeper.lock);
+	int n = keeper.ran;
+	keeper.ran = 0;
+	pthread_mutex_unlock(&keeper.lock);
+	return n;
+}
+
+static void keeper_stop(void) {
+	pthread_mutex_lock(&keeper.lock);
+	bool started = keeper.started;
+	keeper.armed = false;
+	keeper.quit = true;
+	pthread_cond_broadcast(&keeper.cond);
+	pthread_mutex_unlock(&keeper.lock);
+	if (started) pthread_join(keeper.thread, NULL);
+	keeper.started = false;
+	if (keeper.conv) SDL_FreeAudioStream(keeper.conv);
+	keeper.conv = NULL, keeper.convFrom = 0;
+}
+#else
+static void keeper_arm(uint32_t keys, SDL_AudioDeviceID audio, int outRate, int maxQueued, int ahead) {
+	(void) keys, (void) audio, (void) outRate, (void) maxQueued, (void) ahead;
+}
+static int keeper_disarm(void) { return 0; }
+static void keeper_stop(void) {}
+#endif
+/* Matched, a frame that misses its refresh waits for the next one, and the
+ * time is never made up: the game slows down (the GBA's rate catches up
+ * after a slow frame). A game that keeps missing (three seconds in a row
+ * with 3 or more) goes back to the GBA's rate until the setting is turned
+ * on again or the game is started again (pacedFallback). */
+static int pacedMisses, pacedMissSecs;
+
 static void pacing_update(void) {
 	double hz = nScreens > 0 ? ui_display_hz(screens[game_screen()].view) : 0;
 	pacedHz = 0;
-	if (cfg->matchDisplay && hz > 0 && fabs(hz / GBA_FPS - 1) <= 0.015) pacedHz = hz;
+	pacedMisses = pacedMissSecs = 0;
+	if (cfg->matchDisplay && !pacedFallback && hz > 0 && fabs(hz / GBA_FPS - 1) <= 0.015) pacedHz = hz;
 	frameSec = 1.0 / (pacedHz > 0 ? pacedHz : GBA_FPS);
 	audioSpeed = pacedHz > 0 ? pacedHz / GBA_FPS : 1.0;
 	fprintf(stderr, "frame pacing: display %.3f Hz, game %.3f frames a second (%s)\n", hz, 1.0 / frameSec,
-	        pacedHz > 0 ? "matched to the display" : cfg->matchDisplay ? "display too far off to match" : "the GBA's rate");
+	        pacedHz > 0 ? "matched to the display" : cfg->matchDisplay && pacedFallback ? "the GBA's rate: frames kept missing the display's refresh" :
+	        cfg->matchDisplay ? "display too far off to match" : "the GBA's rate");
 }
 
 /* Rewind (hold L2): mGBA's rewind buffer, a state every second frame,
@@ -6585,7 +7329,7 @@ static void rewind_setup(void) {
 	emu_rewind_deinit();
 	rewindTick = 0;
 #ifdef __3DS__
-	cfg->rewind = false; /* (see M_REWIND) */
+	cfg->rewind = false; /* (each step back a state of 0.8 MiB: 30 seconds of them are the console's memory many times over) */
 #endif
 	if (!cfg->rewind || !emu.core) return;
 	int secs = cfg->rewindSeconds < 5 ? 5 : cfg->rewindSeconds > 300 ? 300 : cfg->rewindSeconds;
@@ -6593,25 +7337,34 @@ static void rewind_setup(void) {
 	fprintf(stderr, "rewind: %d s (%d states)\n", secs, secs * 30);
 }
 
-/* Display choices made in the menu are remembered for next time. */
+/* ff_speed as gba-ds.cfg writes it: a number, or max (0, as atoi reads it) */
+static const char* ff_speed_name(const Config* c) {
+	static char s[12];
+	if (c->ffSpeed <= 0) return "max";
+	snprintf(s, sizeof(s), "%d", c->ffSpeed);
+	return s;
+}
+
+/* Display choices made in the menu are remembered for next time (and the
+ * game list's Performance setting: prefs_save from library.c). */
 static void save_prefs(void) {
+	prefs_save(cfg);
+}
+
+void prefs_save(Config* cfg) {
+	/* what the settings table doesn't hold (it writes its own lines: the game
+	 * list's Settings, the pause menu): the quick bar's pin, the shader the
+	 * hotkey turns back on, the generated bezel's colours. Every other line
+	 * stays (config_kv_update). */
 	char prefs[1100];
 	snprintf(prefs, sizeof(prefs), "%s/prefs.cfg", cfg->stateDir);
-	FILE* f = fopen(prefs, "w");
-	if (f) {
-		fprintf(f, "# written by gba-ds's pause menu; overrides gba-ds.cfg\n");
-		fprintf(f, "swap = %d\nscale = %s\nmap_scale = %s\nshader = %s\ncolor_correction = %d\nlcd_ghosting = %d\noverlays = %s\nframe_buffer = %d\nmatch_display = %d\nrewind = %d\nfast_forward = %d\nsave_on_quit = %d\nauto_load = %d\nquick_bar_pinned = %d\n",
-		        cfg->swap ? 1 : 0, cfg->scale, cfg->mapScale, shaderNames[cfg->shader], cfg->colorCorrection ? 1 : 0, cfg->ghosting ? 1 : 0,
-		        (const char* const[]) { "off", "generated", "custom" }[SDL_clamp(cfg->overlayMode, 0, 2)],
-		        cfg->frameBuffer ? 1 : 0, cfg->matchDisplay ? 1 : 0, cfg->rewind ? 1 : 0, cfg->fastForward ? 1 : 0,
-		        cfg->autoSave ? 1 : 0, cfg->autoLoad ? 1 : 0, cfg->barPinned ? 1 : 0);
-		fprintf(f, "screen_match = %s\n", cfg->screenMatch);
-		fprintf(f, "custom_logos = %s\n", cfg->customLogos == CL_OFF ? "off" : cfg->customLogos == CL_FULL ? "full" : "pixelated");
-		fprintf(f, "overlay_screens = %s\nbezel_logo = %d\nbezel_inner = %s\nbezel_outer = %s\n",
-		        cfg->overlays == OVL_TOP ? "top" : cfg->overlays == OVL_BOTTOM ? "bottom" : "both", cfg->bezelLogo, cfg->bezelInner, cfg->bezelOuter);
-		fprintf(f, "shader_last = %s\n", shaderNames[cfg->shaderLast > SH_OFF && cfg->shaderLast < SH_COUNT ? cfg->shaderLast : SH_GRID]);
-		fclose(f);
-	}
+	const char* kv[4][2] = {
+		{ "quick_bar_pinned", cfg->barPinned ? "1" : "0" },
+		{ "shader_last", shaderNames[cfg->shaderLast > SH_OFF && cfg->shaderLast < SH_COUNT ? cfg->shaderLast : SH_GRID] },
+		{ "bezel_inner", cfg->bezelInner },
+		{ "bezel_outer", cfg->bezelOuter },
+	};
+	config_kv_update(prefs, "# written by gba-ds's menus; overrides gba-ds.cfg", 4, kv);
 }
 
 static bool gameTexAll = true; /* upload the game's frame to every view next time */
@@ -6658,7 +7411,7 @@ static void swap_screens(void) {
 		return;
 	}
 	cfg->swap = !cfg->swap;
-	save_prefs();
+	commit_current("swap"); /* (the layer in force: this game's own, or all games') */
 }
 
 /* Display > Shader, or the shader hotkey: the pattern over the pixels */
@@ -6668,6 +7421,7 @@ static void set_shader(int sh) {
 	if (sh != SH_OFF) cfg->shaderLast = sh;
 	ui_shader(cfg->shader);
 	if (subBefore || cfg->shader >= SH_SUB_LIGHT) rebuild_textures(); /* (the subpixels' brightening is in the colour table) */
+	commit_current("shader");
 	save_prefs();
 }
 
@@ -6699,7 +7453,8 @@ static SDL_Color borderColor;
  *   <CODE>-<screen>-<scale>, <CODE>-<screen>,
  *   (the second screen only, older names: <CODE>-<scale>, <CODE>)
  *   <screen>-<scale>-<match>, <screen>-<match>, <screen>-<scale>, <screen>
- * wiki/Overlays.md explains them for players (top and bottom only). */
+ * each with "-no_gap" after it while Screen Placement moves the picture
+ * (load_overlay). wiki/Overlays.md explains them for players (top and bottom only). */
 static void overlays_reload(void) {
 	overlayMode[0][0] = overlayMode[1][0] = 0;
 	bezelKey[0][0] = bezelKey[1][0] = 0;
@@ -6709,8 +7464,13 @@ static void overlays_reload(void) {
 static void load_overlay(int s, int which) {
 	const char* scale = which ? cfg->mapScale : cfg->scale;
 	const char* match = strcmp(cfg->screenMatch, "keep") && ui_screens_differ() ? cfg->screenMatch : NULL;
+	/* Screen Placement: Closest to Gap moves the picture where it doesn't
+	 * fill the screen's height (Pixel Perfect, Full Width): an overlay made
+	 * for it has "-no_gap" at the end of its name, and ones without it are left
+	 * alone (their hole is where a centred picture goes) */
+	const char* place = nScreens == 2 && !strcmp(cfg->screenPlace, "no_gap") && (!strcmp(scale, "integer") || !strcmp(scale, "fit")) ? "-no_gap" : "";
 	char key[sizeof(overlayMode[0])];
-	snprintf(key, sizeof(key), "%d|%s|%s", which, scale, match ? match : "");
+	snprintf(key, sizeof(key), "%d|%s|%s|%s", which, scale, match ? match : "", place);
 	if (!strcmp(overlayMode[s], key)) return;
 	snprintf(overlayMode[s], sizeof(overlayMode[s]), "%s", key);
 	ui_free_image(overlayTex[s]);
@@ -6731,7 +7491,7 @@ static void load_overlay(int s, int which) {
 	}
 	char path[1200];
 	for (int i = 0; i < n; ++i) {
-		snprintf(path, sizeof(path), "%s/overlays/%s.png", cfg->assetDir, names[i]);
+		snprintf(path, sizeof(path), "%s/overlays/%s%s.png", cfg->assetDir, names[i], place);
 		if (ui_load_image(path, overlayTex[s], &overlayW[s], &overlayH[s], true)) {
 			if (debug) fprintf(stderr, "overlay (%s screen): %s\n", sides[0], path);
 			return;
@@ -6758,13 +7518,21 @@ static void draw_bezel(int s, const char* mode, bool defaults) {
 		if (pickWhich == 1) out = pick_rgb();
 	}
 	bool bottom = s == 1 && nScreens == 2;
+	/* the logo by the hinge (below the top screen's picture, above the
+	 * bottom one's); Screen Placement: Closest to Gap leaves no room there,
+	 * so it's on the bottom screen only, below the picture (GEN-12) */
+	bool above = bottom;
+	if (nScreens == 2 && !strcmp(cfg->screenPlace, "no_gap")) {
+		if (!bottom) logo = false;
+		above = false;
+	}
 	char key[96];
-	snprintf(key, sizeof(key), "%dx%d %d,%d,%d,%d %d %06X %06X %d", sr.w, sr.h, r.x, r.y, r.w, r.h, bottom, (unsigned) in, (unsigned) out, logo);
+	snprintf(key, sizeof(key), "%dx%d %d,%d,%d,%d %d%d %06X %06X %d", sr.w, sr.h, r.x, r.y, r.w, r.h, bottom, above, (unsigned) in, (unsigned) out, logo);
 	if (strcmp(key, bezelKey[s])) {
 		snprintf(bezelKey[s], sizeof(bezelKey[s]), "%s", key);
 		ui_free_image(bezelTex[s]);
 		Uint64 t0 = SDL_GetPerformanceCounter();
-		SDL_Surface* srf = bezel_surface(sr.w, sr.h, r, bottom, in, out, logo);
+		SDL_Surface* srf = bezel_surface(sr.w, sr.h, r, above, in, out, logo);
 		if (srf) ui_load_surface(srf, bezelTex[s], &bezelW[s], &bezelH[s], false);
 		if (debug) fprintf(stderr, "bezel (%s screen): %s, %.1f ms\n", bottom ? "bottom" : "top", key,
 		                   (SDL_GetPerformanceCounter() - t0) * 1000.0 / SDL_GetPerformanceFrequency());
@@ -7022,15 +7790,211 @@ static void open_menu(void) {
 	barShown = 0;
 	cheatsOpen = false;
 	patchesOpen = false;
-	btnsOpen = false;
 	ovl_close_all();
 	close_ach();
+	scopeAll = false;
 	set_page(0);
 	menuOpen = true;
 	menuSel = 0;
 	menuPressed = -1;
 	menuNote[0] = 0;
 	armedItem = -1;
+}
+
+/* ---- settings in layers (docs/MENUS.md): states/prefs.cfg for all games,
+ * states/<game>.cfg over it for this one. uniCfg holds the settings for all
+ * games while the game runs (cfg has this game's put over them). */
+static Config uniCfg;
+static const char* const gameHeader = "# this game's own settings: they win over the ones for all games";
+static const char* const prefsHeader = "# written by gba-ds's menus; overrides gba-ds.cfg";
+
+static void game_keys_reload(void) {
+	nGameKeys = config_kv_keys(gp.settings, 48, gameKeys);
+}
+
+static void write_setting(const char* path, const char* header, const Config* c, const Setting* st) {
+	char lines[2][2][24];
+	const char* kv[2][2];
+	int n = config_setting_lines(c, st, lines);
+	for (int i = 0; i < n; ++i) kv[i][0] = lines[i][0], kv[i][1] = lines[i][1];
+	config_kv_update(path, header, n, kv);
+}
+static void prefs_file(char* out, size_t n) {
+	snprintf(out, n, "%s/prefs.cfg", cfg->stateDir);
+}
+
+/* a choice made some other way (the hotkeys, the overlay page): kept in the layer
+ * in force, this game's own file if it has a value there, else all games' */
+static void commit_current(const char* key) {
+	const Setting* st = config_setting(key);
+	if (!st) return;
+	if (game_has(st)) {
+		write_setting(gp.settings, gameHeader, cfg, st);
+	} else {
+		char path[1100];
+		prefs_file(path, sizeof(path));
+		config_setting_copy(&uniCfg, cfg, st);
+		write_setting(path, prefsHeader, &uniCfg, st);
+	}
+}
+
+/* put a changed setting to use in the game now */
+static void setting_applied(const Setting* st) {
+	const char* k = st->key;
+	if (!strcmp(k, "shader") || !strcmp(k, "lcd_strength")) {
+		if (cfg->shader != SH_OFF) cfg->shaderLast = cfg->shader;
+		ui_shader(cfg->shader);
+		rebuild_textures();
+	} else if (!strcmp(k, "color_correction")) {
+		ui_color_correction(cfg->colorCorrection);
+		rebuild_textures(); /* (every picture given again, through it or not) */
+	} else if (!strcmp(k, "lcd_ghosting")) {
+		ghostHave = false;
+	} else if (!strcmp(k, "swap")) {
+		if (emu.fb) {
+			for (int i = 0; i < nViews; ++i) game_upload(i, NULL);
+		}
+	} else if (!strcmp(k, "screen_match") || !strcmp(k, "screen_placement")) {
+		ui_layout_pictures();
+		overlays_reload(); /* (overlays can be made for each: overlay files) */
+		gameTexAll = true;
+	} else if (!strcmp(k, "brightness_top") || !strcmp(k, "brightness_bottom")) {
+		ui_brightness(cfg->brightTop, cfg->brightBottom);
+	} else if (!strcmp(k, "match_display")) {
+		pacedFallback = false;
+		pacing_update();
+	} else if (!strcmp(k, "rewind") || !strcmp(k, "rewind_seconds")) {
+		rewind_setup();
+	} else if (!strcmp(k, "custom_logos")) {
+		logo_refresh();
+	} else if (!strcmp(k, "ab_swap") || !strncmp(k, "button_", 7)) {
+		fb_default();
+	} else if (!strcmp(k, "pinball_live")) {
+		snprintf(menuNote, sizeof(menuNote), "Takes effect when the game starts again");
+	}
+}
+
+static void rows_note(const char* what, bool all, bool kept) {
+	if (menuNote[0] && !strncmp(menuNote, "Takes", 5)) return;
+	snprintf(menuNote, sizeof(menuNote), "%s%s", all ? "Saved for all games" : "Saved for this game", kept ? ": this game keeps its own value" : "");
+	(void) what;
+}
+
+/* where a setting stands on its list (or its number), to tell when a step wrapped round */
+static int step_pos(const Config* c, const Setting* st) {
+	if (st->nChoices) return config_setting_index(c, st);
+	return *(const int*) ((const char*) c + st->off);
+}
+
+/* step row `key` by dir, for all games or this game. For this game the list has
+ * one more place, "same as all games": stepping past either end of the list
+ * from a value of this game's own takes it away (row_reset) */
+
+static void row_reset(const char* key);
+static void row_change(const char* key, int dir, bool all) {
+	menuNote[0] = 0;
+	if (!strcmp(key, "@overlay")) {
+		ovlOpen = true;
+		ovlSel = 0;
+		ovlPress = -1;
+		return;
+	}
+	const Setting* st = config_setting(key);
+	if (!st) return;
+	const char* off = row_disabled(key);
+	if (off) {
+		snprintf(menuNote, sizeof(menuNote), "%s", off);
+		return;
+	}
+	char path[1100];
+	if (all) {
+		if (!config_setting_step(&uniCfg, st, dir)) return;
+		prefs_file(path, sizeof(path));
+		write_setting(path, prefsHeader, &uniCfg, st);
+		bool kept = game_has(st);
+		if (!kept) {
+			config_setting_copy(cfg, &uniCfg, st);
+			setting_applied(st);
+		}
+		rows_note(key, true, kept);
+	} else {
+		int before = step_pos(cfg, st);
+		bool had = game_has(st);
+		if (!config_setting_step(cfg, st, dir)) return;
+		int after = step_pos(cfg, st);
+		if (had && (dir > 0 ? after < before : after > before)) {
+			row_reset(key); /* (round the end of the list: back to the value for all games) */
+			return;
+		}
+		write_setting(gp.settings, gameHeader, cfg, st);
+		game_keys_reload();
+		setting_applied(st);
+		rows_note(key, false, false);
+	}
+	fprintf(stderr, "setting: %s = %s (%s)\n", key, st->choices ? st->choices[config_setting_index(cfg, st) < 0 ? 0 : config_setting_index(cfg, st)].value : "?", all ? "all games" : "this game");
+}
+
+/* X: this game goes back to the value for all games */
+static void row_reset(const char* key) {
+	menuNote[0] = 0;
+	const Setting* st = config_setting(key);
+	if (!st) return;
+	if (!game_has(st)) {
+		snprintf(menuNote, sizeof(menuNote), "Already the value for all games");
+		return;
+	}
+	char lines[2][2][24];
+	const char* keys[2];
+	int n = config_setting_lines(cfg, st, lines);
+	for (int i = 0; i < n; ++i) keys[i] = lines[i][0];
+	config_kv_remove(gp.settings, n, keys);
+	game_keys_reload();
+	config_setting_copy(cfg, &uniCfg, st);
+	setting_applied(st);
+	snprintf(menuNote, sizeof(menuNote), "Same as all games again");
+}
+
+/* the controller on a settings page (the bar, then the rows) */
+static void rows_input(void) {
+	int n = rowN[curPage];
+	if (btn_pressed(B_DOWN)) rowSel = (rowSel + 1) % (n + 1), menuNote[0] = 0;
+	if (btn_pressed(B_UP)) rowSel = (rowSel + n) % (n + 1), menuNote[0] = 0;
+	if (rowSel == 0) {
+		if (btn_pressed(B_LEFT)) scopeAll = false;
+		if (btn_pressed(B_RIGHT)) scopeAll = true;
+		if (btn_pressed(B_A)) scopeAll = !scopeAll;
+		return;
+	}
+	const char* key = rowKeys[curPage][rowSel - 1];
+	bool all = scopeAll || btnNow[B_Y]; /* (Y held with a button: all games) */
+	int dir = btn_pressed(B_LEFT) ? -1 : (btn_pressed(B_RIGHT) || btn_pressed(B_A)) ? 1 : 0;
+	if (!dir && btn_pressed(B_Y)) dir = 1, all = true;
+	if (dir) row_change(key, dir, all);
+	if (btn_pressed(B_X) && key[0] != '@') row_reset(key);
+}
+
+/* a touch on a settings page, on its own: the bar sets which it changes, a row is
+ * changed when the finger lifts on it (the left arrow steps back, the Game tag
+ * takes this game's value away, the rest steps forward) */
+static void rows_touch(const Pointer* p) {
+	int n = rowN[curPage];
+	if (p->kind == 1) {
+		ignorePointerUp = false;
+		rowPressed = -1;
+		for (int h = 0; h < 2; ++h)
+			if (in_rect(scope_rect(p->screen, h), p->x, p->y)) scopeAll = h == 1, rowSel = 0, menuNote[0] = 0, ignorePointerUp = true;
+		for (int i = 1; i <= n; ++i)
+			if (in_rect(srow_rect(p->screen, i), p->x, p->y)) rowPressed = i, rowSel = i;
+	} else if (p->kind == 2) {
+		int i = rowPressed;
+		if (!ignorePointerUp && i >= 1 && in_rect(srow_rect(p->screen, i), p->x, p->y)) {
+			const char* key = rowKeys[curPage][i - 1];
+			if (key[0] != '@' && rowTagOn[i] && in_rect(rowTag[i], p->x, p->y)) row_reset(key);
+			else row_change(key, key[0] != '@' && in_rect(rowBack[i], p->x, p->y) ? -1 : 1, scopeAll);
+		}
+		rowPressed = -1;
+		ignorePointerUp = false;
+	}
 }
 
 /* Returns true if the session should end (*exitTo set). */
@@ -7063,42 +8027,6 @@ static bool activate(int item, enum GameExit* exitTo) {
 	case M_PATCHES:
 		open_patches();
 		break;
-	case M_BUTTONS:
-		/* its own screen: Extras > Buttons (GEN-10) */
-		btnsOpen = true;
-		btnsSel = 0;
-		btnsPress = -1;
-		break;
-	case M_SWAP:
-		swap_screens();
-		snprintf(menuNote, sizeof(menuNote), "Screens swapped");
-		break;
-	case M_SCALE: {
-		/* Pixel Perfect, Full Width, Zoom, Stretch */
-		const char* next = !strcmp(cfg->scale, "integer") ? "fit" : !strcmp(cfg->scale, "fit") ? "zoom" :
-		                   !strcmp(cfg->scale, "zoom")    ? "stretch" : "integer";
-		snprintf(cfg->scale, sizeof(cfg->scale), "%s", next);
-		snprintf(cfg->mapScale, sizeof(cfg->mapScale), "%s", next);
-		save_prefs();
-		break;
-	}
-	case M_LCD:
-		set_shader((cfg->shader + 1) % SH_COUNT);
-		snprintf(menuNote, sizeof(menuNote), "%s", shaderNotes[cfg->shader]);
-		break;
-	case M_GHOST:
-		cfg->ghosting = !cfg->ghosting;
-		ghostHave = false;
-		snprintf(menuNote, sizeof(menuNote), "%s", cfg->ghosting ? "Moving things leave a short trail, as on a GBA" : "Each frame shown on its own");
-		save_prefs();
-		break;
-	case M_COLOR:
-		cfg->colorCorrection = !cfg->colorCorrection;
-		ui_color_correction(cfg->colorCorrection);
-		rebuild_textures(); /* (every picture given again, through it or not) */
-		snprintf(menuNote, sizeof(menuNote), "%s", cfg->colorCorrection ? "Colors as on a Game Boy Advance's screen" : "The game's colors as they are");
-		save_prefs();
-		break;
 	case M_SLOT:
 		slot_step(1);
 		break;
@@ -7121,6 +8049,12 @@ static bool activate(int item, enum GameExit* exitTo) {
 			if (!stateWarned) ui_osd(m);
 			menuOpen = false;
 			return false;
+		} else if (stateLoadKind == STATE_FILE_OTHER_CORE) {
+			/* (RetroArch's, from another of its GBA cores: issue #39) */
+			/* (Settings > Save States says RetroArch's core has to be mGBA) */
+			snprintf(menuNote, sizeof(menuNote), "Saved by another emulator: can't load it");
+		} else if (stateLoadKind == STATE_FILE_UNREADABLE) {
+			snprintf(menuNote, sizeof(menuNote), "This state can't be read");
 		} else {
 			snprintf(menuNote, sizeof(menuNote), "Load failed");
 		}
@@ -7132,92 +8066,6 @@ static bool activate(int item, enum GameExit* exitTo) {
 		else snprintf(menuNote, sizeof(menuNote), "%s", what);
 		break;
 	}
-	case M_AUTOSAVE:
-		cfg->autoSave = !cfg->autoSave;
-		snprintf(menuNote, sizeof(menuNote), "%s", cfg->autoSave ? "Closing the game saves where you are" : "Closing the game doesn't save a state");
-		save_prefs();
-		break;
-	case M_AUTOLOAD:
-		cfg->autoLoad = !cfg->autoLoad;
-		snprintf(menuNote, sizeof(menuNote), "%s", cfg->autoLoad ? "Starting the game picks up where you closed it" : "The game starts from its title screen");
-		save_prefs();
-		break;
-	case M_OVERLAY:
-		/* its own screen: Display > Overlays */
-		ovlOpen = true;
-		ovlSel = 0;
-		ovlPress = -1;
-		break;
-	case M_FPS:
-		cfg->showFps = !cfg->showFps;
-		save_prefs();
-		break;
-	case M_FRAMEBUF:
-		if (!item_enabled(M_FRAMEBUF)) {
-			/* (greyed out: the setting, for the other games, stays as it is) */
-			snprintf(menuNote, sizeof(menuNote), "Always on in this game: it needs it for full speed");
-			break;
-		}
-		cfg->frameBuffer = !cfg->frameBuffer;
-		snprintf(menuNote, sizeof(menuNote), "%s", cfg->frameBuffer ? "Smoother, one frame more input delay" : "Least input delay");
-		save_prefs();
-		break;
-	case M_REWIND:
-#ifdef __3DS__
-		/* (each step back is a state of 0.8 MiB: 30 seconds of them are the console's memory many times over) */
-		cfg->rewind = false;
-		snprintf(menuNote, sizeof(menuNote), "Not on the 3DS: there's no memory for it");
-		break;
-#endif
-		cfg->rewind = !cfg->rewind;
-		rewind_setup();
-		snprintf(menuNote, sizeof(menuNote), "%s", cfg->rewind ? "Hold L2 to go back in time" : "No rewind buffer: a little less work");
-		save_prefs();
-		break;
-	case M_FF:
-		cfg->fastForward = !cfg->fastForward;
-		if (cfg->fastForward) snprintf(menuNote, sizeof(menuNote), "Hold R2 to play %dx as fast%s", SDL_max(1, cfg->ffSpeed), cfg->ffMute ? ", without sound" : "");
-		else snprintf(menuNote, sizeof(menuNote), "R2 does nothing: no skipping ahead by mistake");
-		save_prefs();
-		break;
-	case M_SHAPES: {
-		if (!item_enabled(M_SHAPES)) {
-			snprintf(menuNote, sizeof(menuNote), "Your screens are the same shape: nothing to match");
-			break;
-		}
-		/* keep, aspect, size (experimental: not tried on a widescreen device yet) */
-		const char* next = !strcmp(cfg->screenMatch, "keep") ? "aspect" : !strcmp(cfg->screenMatch, "aspect") ? "size" : "keep";
-		snprintf(cfg->screenMatch, sizeof(cfg->screenMatch), "%s", next);
-		ui_layout_pictures();
-		overlays_reload(); /* (overlays can be made for each: overlay files) */
-		gameTexAll = true;
-		if (!strcmp(next, "size") && !(ui_screen_ppi(0) > 0 && ui_screen_ppi(1) > 0)) snprintf(menuNote, sizeof(menuNote), "The screens' sizes aren't known here: shapes only");
-		else snprintf(menuNote, sizeof(menuNote), "%s", !strcmp(next, "keep") ? "Each screen as it is" : "Experimental: tell us how it looks on your device");
-		save_prefs();
-		break;
-	}
-	case M_MATCH:
-		cfg->matchDisplay = !cfg->matchDisplay;
-		pacing_update();
-		if (!cfg->matchDisplay) snprintf(menuNote, sizeof(menuNote), "The GBA's own %.2f frames a second", GBA_FPS);
-		else if (pacedHz > 0) snprintf(menuNote, sizeof(menuNote), "%.2f frames a second, %.1f%% faster", pacedHz, (pacedHz / GBA_FPS - 1) * 100);
-		else snprintf(menuNote, sizeof(menuNote), "The display's rate isn't close enough to match");
-		save_prefs();
-		break;
-	case M_PIXLOGO:
-		/* GEN-11: the player's own or a scraped logo at GBA pixels, at full
-		 * detail, or not used (the game's own) */
-		cfg->customLogos = (cfg->customLogos + 1) % 3;
-		snprintf(menuNote, sizeof(menuNote), "%s",
-		         cfg->customLogos == CL_OFF  ? "The logo GBA DS takes from the game" :
-		         cfg->customLogos == CL_FULL ? "With all its detail, at the same size" : "Shrunk to the GBA's pixels");
-		logo_refresh();
-		save_prefs();
-		break;
-	case M_LOGO:
-		cfg->showLogo = !cfg->showLogo;
-		save_prefs();
-		break;
 	case M_RESTART:
 		emu_reset(&emu);
 		aheadReady = false;
@@ -7298,6 +8146,11 @@ static void ss_setup(const char* rom, const char* code) {
 		logoOnly = lp && lp->logoOnly;
 		snapProf = logoOnly && lp->snap.showMin ? lp : NULL;
 		tallProf = logoOnly && lp->tall.on[0].addr && cfg->tallLive ? lp : NULL;
+#ifdef __3DS__
+		/* (never on the 3DS, whatever pinball_live says: up to three copies of
+		 * the game a frame are far beyond a New 3DS; PP-9) */
+		tallProf = NULL;
+#endif
 		if (tallProf && nScreens > 1) twin_open(rom, tallProf);
 		else twin_close();
 		/* the HUD moves only when there's another screen to put it on */
@@ -7349,6 +8202,7 @@ static void ss_setup(const char* rom, const char* code) {
 			hideWhenProf = prof && nRules && prof->hideWhen[0].addr ? prof : NULL;
 			hideWhenN = nRules, hideWhenOn = false;
 			emu_hide_sprites(&emu, prof && !hideWhenProf ? prof->hideSprites : NULL, hideWhenProf ? 0 : nRules);
+			emu_hide_grouped(&emu, prof && prof->hideGrouped);
 		} else if (!logoOnly) {
 			fprintf(stderr, "no map profile for %s\n", code);
 		}
@@ -7386,11 +8240,11 @@ static void ss_textures(void) {
 	for (int i = 0; i < nViews; ++i) {
 		if (mapTex[i]) SDL_DestroyTexture(mapTex[i]);
 		if (combatTex[i]) SDL_DestroyTexture(combatTex[i]);
-		if (hudTex[i]) SDL_DestroyTexture(hudTex[i]);
+		if (hudTex[i] && (i == 0 || hudTex[i] != hudTex[0])) SDL_DestroyTexture(hudTex[i]);
 		mapTex[i] = SDL_CreateTexture(views[i].ren, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, mapW, mapH);
 		combatTex[i] = combatProf ? SDL_CreateTexture(views[i].ren, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, mapW, mapH) : NULL;
 		if (combatTex[i]) SDL_SetTextureBlendMode(combatTex[i], SDL_BLENDMODE_NONE);
-		hudTex[i] = hudProf && !hudLayered ? SDL_CreateTexture(views[i].ren, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, HUD_CW, HUD_CH) : NULL;
+		hudTex[i] = hudProf && !hudLayered ? (HUD_TEX_SHARED && i > 0 ? hudTex[0] : SDL_CreateTexture(views[i].ren, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, HUD_CW, HUD_CH)) : NULL;
 		if (hudTex[i]) SDL_SetTextureBlendMode(hudTex[i], SDL_BLENDMODE_NONE);
 		SDL_SetTextureBlendMode(mapTex[i], SDL_BLENDMODE_NONE);
 	}
@@ -7423,7 +8277,7 @@ static void rebuild_textures(void) {
 	}
 	if (combatMade) make_combat_canvas();
 	if (hudProf && hudLayered) hud_stale_all();
-	else if (hudProf) for (int i = 0; i < nViews; ++i) ui_update_texture(hudTex[i], hudCanvas, HUD_CW * 4);
+	else if (hudProf) hud_upload();
 	ui_free_image(logoTex);
 	if (romPath && ui_load_logo(cfg, romPath, emu.gameCode, logoTex, &logoW, &logoH, &logoPixel)) make_logo_canvas();
 	else make_logo_canvas();
@@ -7504,13 +8358,48 @@ static void logo_refresh(void) {
 	}
 }
 
+static enum GameExit game_run_inner(Config* c, const char* rom, bool fromLibrary);
+
+/* A game's own settings (issue #53, states/<game>.cfg) are put over the
+ * settings for the length of the game: what the file changed goes back to
+ * what it was when the game ends, unless it was changed again meanwhile
+ * (a menu choice for all games, which is saved already). */
 enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
+	GamePaths p;
+	game_paths(c, rom, &p);
+	Config before = *c;
+	int n = config_load_game_file(c, p.settings);
+	Config after = *c;
+	uniCfg = before;
+	if (n) {
+		fprintf(stderr, "game settings: %d from %s\n", n, p.settings);
+		ui_layout_pictures();
+	}
+	enum GameExit x = game_run_inner(c, rom, fromLibrary);
+	ui_stick_dpad(true);
+	/* back to the settings for all games (with what was changed for them meanwhile) */
+	const unsigned char *b = (const unsigned char*) &before, *a = (const unsigned char*) &after;
+	unsigned char* cur = (unsigned char*) c;
+	for (size_t i = 0; i < sizeof(Config); ++i)
+		if (a[i] != b[i] && cur[i] == a[i]) cur[i] = b[i];
+	for (int i = 0; i < config_setting_count(); ++i) {
+		const Setting* st = config_setting_at(i);
+		if (config_key_per_game(st->key)) config_setting_copy(c, &uniCfg, st);
+	}
+	ui_layout_pictures();
+	ui_brightness(c->brightTop, c->brightBottom);
+	return x;
+}
+
+static enum GameExit game_run_inner(Config* c, const char* rom, bool fromLibrary) {
 	cfg = c;
 	lateness = 1;
 	config_apply_core_env(c);
 	debug = getenv("GBADS_DEBUG") != NULL;
 	romPath = rom, lastLoop = 0;
 	game_paths(cfg, rom, &gp);
+	ui_brightness(cfg->brightTop, cfg->brightBottom); /* (this game's own, if it has them) */
+	game_keys_reload();
 	patches_setup(rom); /* GEN-9: the patches folder, what's on, and the plan every core opens the ROM with */
 	profile_set_rom(NULL, 0);
 	emu_idle_loops(cfg->idleLoops);
@@ -7521,6 +8410,20 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 	emu_threaded_video(cfg->threadedVideo && isNew3ds()); /* (mGBA's drawing thread on the New 3DS's third core) */
 #else
 	emu_threaded_video(cfg->threadedVideo);
+#endif
+	emuRenderWorkers = cfg->renderWorkers == 2 ? 2 : 1;
+#ifdef __3DS__
+	{
+		/* the second drawing thread is on the fourth core, a step above the
+		 * hidden copy there: with one, Yoshi's Island's status screen took
+		 * 6-11 s to capture (50 ms on its own), caught half drawn. So two only
+		 * for a game without a hidden copy (Mario Kart: logo only, a HUD) */
+		uint8_t hdr[0xB0];
+		char code[5] = "";
+		if (emu_rom_header(rom, hdr, sizeof(hdr))) memcpy(code, hdr + 0xAC, 4);
+		const MapProfile* wp = code[0] ? profile_find(code) : NULL;
+		if (cfg->map && wp && !wp->logoOnly) emuRenderWorkers = 1;
+	}
 #endif
 #ifdef COLOR_16_BIT
 	emu_picture_linear(true);
@@ -7551,7 +8454,6 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 	if (cheats_on(&cheats)) cheats_apply(&cheats, &emu);
 	cheatsOpen = false;
 	patchesOpen = false;
-	btnsOpen = false;
 	ovl_close_all();
 	ui_on_background(on_background);
 	ui_on_foreground(on_foreground);
@@ -7588,38 +8490,59 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 	logoProvisional = ui_logo_provisional();
 
 	memset(pageLen, 0, sizeof(pageLen));
-	pages[0][pageLen[0]++] = M_RESUME;
-	pages[0][pageLen[0]++] = M_RESTART;
-	pages[0][pageLen[0]++] = M_SAVE;
-	pages[0][pageLen[0]++] = M_LOAD;
-	pages[0][pageLen[0]++] = M_SLOT;
-	pages[2][pageLen[2]++] = M_SWAP; /* (on Extras since v1.4.6: Display has Screen shapes) */
-	pages[2][pageLen[2]++] = M_CHEATS;
-	pages[2][pageLen[2]++] = M_PATCHES;
-	pages[2][pageLen[2]++] = M_BUTTONS; /* GEN-10 */
-	if (ra_enabled()) pages[2][pageLen[2]++] = M_ACH;
-	pages[2][pageLen[2]++] = M_SHOT;
-	if (fromLibrary) pages[0][pageLen[0]++] = M_LIBRARY;
-	pages[0][pageLen[0]++] = M_EXIT;
+	memset(rowN, 0, sizeof(rowN));
+	pages[PG_GAME][pageLen[PG_GAME]++] = M_RESUME;
+	pages[PG_GAME][pageLen[PG_GAME]++] = M_RESTART;
+	pages[PG_GAME][pageLen[PG_GAME]++] = M_SAVE;
+	pages[PG_GAME][pageLen[PG_GAME]++] = M_LOAD;
+	pages[PG_GAME][pageLen[PG_GAME]++] = M_SLOT;
+	if (fromLibrary) pages[PG_GAME][pageLen[PG_GAME]++] = M_LIBRARY;
+	pages[PG_GAME][pageLen[PG_GAME]++] = M_EXIT;
+	pages[PG_TOOLS][pageLen[PG_TOOLS]++] = M_CHEATS;
+	pages[PG_TOOLS][pageLen[PG_TOOLS]++] = M_PATCHES;
+	if (ra_enabled()) pages[PG_TOOLS][pageLen[PG_TOOLS]++] = M_ACH;
+	pages[PG_TOOLS][pageLen[PG_TOOLS]++] = M_SHOT;
+	pages[PG_TOOLS][pageLen[PG_TOOLS]++] = M_BUG;
 	ui_color_correction(cfg->colorCorrection); /* (Display > Color Correction, for this session's pictures) */
 	ui_shader(cfg->shader);
-	pages[1][pageLen[1]++] = M_SCALE;
-	pages[1][pageLen[1]++] = M_LCD;
-	pages[1][pageLen[1]++] = M_COLOR;
-	pages[1][pageLen[1]++] = M_GHOST;
-	pages[1][pageLen[1]++] = M_OVERLAY;
-	pages[1][pageLen[1]++] = M_FRAMEBUF;
-	pages[1][pageLen[1]++] = M_MATCH;
-	pages[1][pageLen[1]++] = M_SHAPES;
-	{
-		/* the game has the player's own or a scraped logo (GEN-11) */
-		if (ui_logo_custom(cfg, romPath, emu.gameCode)) pages[1][pageLen[1]++] = M_PIXLOGO;
-	}
-	pages[2][pageLen[2]++] = M_REWIND;
-	pages[2][pageLen[2]++] = M_FF;
-	pages[2][pageLen[2]++] = M_AUTOSAVE;
-	pages[2][pageLen[2]++] = M_AUTOLOAD;
-	pages[2][pageLen[2]++] = M_BUG;
+#define ROW(pg, key) rowKeys[pg][rowN[pg]++] = key
+	ROW(PG_DISPLAY, "scale");
+	ROW(PG_DISPLAY, "map_scale");
+	ROW(PG_DISPLAY, "shader");
+	ROW(PG_DISPLAY, "lcd_strength");
+	ROW(PG_DISPLAY, "color_correction");
+	ROW(PG_DISPLAY, "lcd_ghosting");
+	if (ui_logo_custom(cfg, romPath, emu.gameCode)) ROW(PG_DISPLAY, "custom_logos"); /* the game has the player's own or a scraped logo (GEN-11) */
+	if (nScreens >= 2) ROW(PG_SCREENS, "swap");
+	ROW(PG_SCREENS, "screen_match");
+	ROW(PG_SCREENS, "screen_placement");
+	ROW(PG_SCREENS, "overlays");
+	ROW(PG_SCREENS, "overlay_screens");
+	ROW(PG_SCREENS, "@overlay");
+	ROW(PG_SCREENS, "brightness_top");
+	if (nScreens >= 2) ROW(PG_SCREENS, "brightness_bottom");
+	ROW(PG_SCREENS, "show_fps");
+	ROW(PG_CONTROLS, "left_stick_dpad");
+	ROW(PG_CONTROLS, "ab_swap");
+	ROW(PG_CONTROLS, "button_right");
+	ROW(PG_CONTROLS, "button_bottom");
+	ROW(PG_CONTROLS, "button_top");
+	ROW(PG_CONTROLS, "button_left");
+	ROW(PG_CONTROLS, "turbo_rate");
+	ROW(PG_SPEED, "match_display");
+	ROW(PG_SPEED, "frame_buffer");
+	ROW(PG_SPEED, "rewind");
+	ROW(PG_SPEED, "rewind_seconds");
+	ROW(PG_SPEED, "fast_forward");
+	ROW(PG_SPEED, "save_on_quit");
+	ROW(PG_SPEED, "auto_load");
+	ROW(PG_MAP, "map");
+	ROW(PG_MAP, "map_interval");
+	ROW(PG_MAP, "map_crop");
+	ROW(PG_MAP, "map_animations");
+	ROW(PG_MAP, "show_logo");
+	ROW(PG_MAP, "pinball_live");
+#undef ROW
 	set_page(0);
 	slot_pick_newest();
 
@@ -7637,6 +8560,9 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 	} else if (cfg->autoLoad && !patchReload && file_exists(gp.autoState)) { /* (not right after switching a patch) */
 		if (state_load(gp.autoState)) {
 			if (!stateWarned) ui_osd("Resumed. Tap or HOME for the menu");
+		} else if (stateLoadKind == STATE_FILE_OTHER_CORE) {
+			/* (RetroArch's automatic state, from another of its GBA cores) */
+			ui_osd_long("Not resumed: RetroArch's automatic state is from another of its GBA cores. To share states, set RetroArch's GBA core to mGBA.");
 		}
 	} else {
 		ui_osd("Tap the screen or press HOME for the menu");
@@ -7710,7 +8636,7 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 	/* SELECT or START as the hotkey: a GBA button, held back from the game
 	 * while it's down and handed over if it comes up with nothing pressed */
 	const bool modIsGame = modBtn == B_SELECT || modBtn == B_START;
-	bool comboUsed = false;
+	bool comboUsed = false, ffModUsed = false; /* (ffModUsed: hotkey + R2 fast-forwarded) */
 	int comboHold = -1, comboFrames = 0; /* menu combo: the button held back, frames since */
 	int comboPulse[2] = { 0, 0 };        /* SELECT, START handed to the game late */
 	int modPulse = 0; /* the hotkey button (SELECT or START), tapped alone: handed to the game */
@@ -7720,6 +8646,7 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 	bool done = false;
 	bool wasMenu = false;
 
+	pacedFallback = false; /* (a new game: matched again, if it's on) */
 	pacing_update();
 	const double freq = (double) SDL_GetPerformanceFrequency();
 	double next = SDL_GetPerformanceCounter() / freq;
@@ -7737,7 +8664,36 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 #endif
 	while (!done) {
 		Uint64 loopT0 = SDL_GetPerformanceCounter(); /* (before the wait for the frame buffer's thread: capture_throttle counts it) */
+		{
+			/* the last iteration, if it was a stall (issue #50) */
+			Uint64 t = SDL_GetPerformanceCounter();
+			const double msPer = 1000.0 / (double) SDL_GetPerformanceFrequency();
+			const LoopMarks* p = &loopCur;
+			int queueMs = audio ? (int) (SDL_GetQueuedAudioSize(audio) / 4 * 1000 / want.freq) : 0;
+			double gap = p->valid ? (double) (t - p->top) * msPer : 0;
+			if (gap > STALL_MS && gap < 5000) {
+				++stallCount;
+				if (gap > stallWorst) stallWorst = gap;
+				if (stallLogged < STALL_LINES) {
+					++stallLogged;
+					char keptNote[96] = "";
+					if (p->kept) snprintf(keptNote, sizeof(keptNote), "; the game and its sound went on meanwhile (%d frame(s))", p->kept);
+					fprintf(stderr,
+					        "frame %llu: stall: %.0f ms between frames: waiting for the frame buffer %.1f, input and menu %.1f, emulating %.1f "
+					        "(sound hand-off %.1f), second screen %.1f, drawing %.1f (top screen %.1f, bottom %.1f), after drawing %.1f, "
+					        "sleeping %.1f (of %.1f asked); ran %.1f ms of it, preempted %ld time(s); sound queue %d -> %d ms; "
+					        "ended at %.3f s on the system clock (as the kernel's and the journal's)%s\n",
+					        p->frame, gap, (double) (p->synced - p->top) * msPer, (double) (p->emu0 - p->synced) * msPer,
+					        (double) (p->emu1 - p->emu0) * msPer, p->audio, (double) (p->draw0 - p->emu1) * msPer,
+					        (double) (p->draw1 - p->draw0) * msPer, p->presentTop, p->presentBottom, (double) (p->sleep0 - p->draw1) * msPer,
+					        (double) (p->end - p->sleep0) * msPer, p->sleepWant * 1000.0, thread_cpu_ms() - p->cpuMs,
+					        thread_preemptions() - p->preempt, p->queueMs, queueMs, mono_seconds(), p->kept ? keptNote : "");
+				}
+			}
+			loopCur = (LoopMarks) { .top = t, .cpuMs = thread_cpu_ms(), .preempt = thread_preemptions(), .queueMs = queueMs, .frame = (unsigned long long) frameCount };
+		}
 		ahead_sync(); /* the core is the loop's again */
+		loopCur.synced = SDL_GetPerformanceCounter();
 		screen_restore_apply();
 		bug_tick();
 		Uint64 workT0 = SDL_GetPerformanceCounter(); /* this frame's work, without the wait at the end */
@@ -7761,6 +8717,7 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 			}
 			lastLoop = SDL_GetTicks();
 		}
+		ui_stick_dpad(cfg->leftStickDpad || menuOpen || barShown > 0); /* (#57: off for the game only) */
 		if (!ui_events()) {
 			exitTo = GAME_QUIT_APP;
 			break;
@@ -7996,25 +8953,6 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 				}
 				continue;
 			}
-			if (btnsOpen) {
-				if (p.kind == 1) {
-					ignorePointerUp = false;
-					btnsPress = -1;
-					if (tab_at(p.screen, p.x, p.y, 2) == 0) {
-						btnsOpen = false; /* Back */
-						ignorePointerUp = true;
-						continue;
-					}
-					for (int i = 0; i < BTNS_ROWS; ++i)
-						if (in_rect(btns_row_rect(p.screen, i), p.x, p.y)) btnsPress = i, btnsSel = i;
-				} else if (p.kind == 2) {
-					for (int i = 0; i < BTNS_ROWS; ++i)
-						if (!ignorePointerUp && i == btnsPress && in_rect(btns_row_rect(p.screen, i), p.x, p.y)) btns_activate(i, 1);
-					btnsPress = -1;
-					ignorePointerUp = false;
-				}
-				continue;
-			}
 			if (ovlOpen) {
 				if (p.kind == 1) {
 					ignorePointerUp = false;
@@ -8075,6 +9013,10 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 					continue;
 				}
 			}
+			if (page_is_rows(curPage)) {
+				rows_touch(&p);
+				continue;
+			}
 			int it = item_at(p.screen, p.x, p.y);
 			if (p.kind == 1) {
 				ignorePointerUp = false;
@@ -8126,7 +9068,17 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 
 		/* ---- HOME (or the hotkey modifier) alone toggles the menu; with a button it's a hotkey */
 		bool mod = btnNow[modBtn];
-		if (mod && !menuOpen) {
+		/* Hotkey + R2 (R2 no action's button): fast-forward, as R2 alone,
+		 * with the game's buttons going through, so text can still be
+		 * skipped (RetroArch's habit; issue #44). No hotkeys meanwhile,
+		 * and letting go of the hotkey doesn't open the menu. */
+		bool ffMod = false;
+		if (mod && !menuOpen && cfg->fastForward && btnNow[B_R2] && !(cfg->rewind && btnNow[B_L2])) {
+			ffMod = true;
+			for (int i = 0; i < HK_COUNT; ++i) ffMod = ffMod && hkBtn[i] != B_R2;
+			if (ffMod) comboUsed = ffModUsed = true;
+		}
+		if (mod && !menuOpen && !ffMod) {
 			for (int i = 0; i < HK_COUNT; ++i) {
 				if (hkBtn[i] < 0 || !btn_pressed(hkBtn[i])) continue;
 				comboUsed = true;
@@ -8154,10 +9106,10 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 			else open_menu();
 		}
 		if (btn_released(modBtn)) {
-			if (comboUsed) suppress_held();
+			if (comboUsed && !ffModUsed) suppress_held(); /* (not after hotkey + R2: the game had them) */
 			else if (!menuOpen && modIsGame) modPulse = 4; /* tapped alone: the game gets it */
 			else if (!menuOpen && modBtn == B_L3) bar_toggle();
-			comboUsed = false;
+			comboUsed = ffModUsed = false;
 		}
 		if (done) break;
 
@@ -8248,15 +9200,6 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 			else if (btn_pressed(B_A)) pick_close(true);
 			else if (btn_pressed(B_B)) pick_close(false);
 			else if (btn_pressed(B_START)) pick_close(true), ovl_close_all(), menuOpen = false;
-		} else if (menuOpen && btnsOpen) {
-			if (btn_pressed(B_DOWN)) btnsSel = SDL_min(BTNS_ROWS - 1, btnsSel + 1);
-			if (btn_pressed(B_UP)) btnsSel = SDL_max(0, btnsSel - 1);
-			bool cycles = btnsSel < FB_COUNT;
-			if (cycles && btn_pressed(B_LEFT)) btns_activate(btnsSel, -1);
-			else if (cycles && btn_pressed(B_RIGHT)) btns_activate(btnsSel, 1);
-			else if (btn_pressed(B_A)) btns_activate(btnsSel, 1);
-			else if (btn_pressed(B_B)) btnsOpen = false;
-			else if (btn_pressed(B_START)) btnsOpen = false, menuOpen = false;
 		} else if (menuOpen && ovlOpen) {
 			int rows[8], n = ovl_rows(rows);
 			if (btn_pressed(B_DOWN)) ovlSel = SDL_min(n - 1, ovlSel + 1);
@@ -8286,6 +9229,10 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 			if (!comboOpened) { /* (START just opened it: not also a close) */
 				if (btn_pressed(B_L) && curPage > 0) set_page(curPage - 1);
 				if (btn_pressed(B_R) && curPage < N_PAGES - 1) set_page(curPage + 1);
+				if (page_is_rows(curPage)) {
+					rows_input();
+					if (btn_pressed(B_B) || btn_pressed(B_START)) menuOpen = false;
+				} else {
 				if (btn_pressed(B_DOWN)) menu_move(1);
 				if (btn_pressed(B_UP)) menu_move(-1);
 				if (menuItems[menuSel] == M_SLOT && (btn_pressed(B_LEFT) || btn_pressed(B_RIGHT))) slot_step(btn_pressed(B_LEFT) ? -1 : 1);
@@ -8297,6 +9244,7 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 				}
 				if (btn_pressed(B_B) || btn_pressed(B_START)) menuOpen = false;
 				else if (btn_pressed(B_A) && activate(menuItems[menuSel], &exitTo)) break;
+				}
 			}
 			if (menuOpen && !wasMenu && audio) {
 				SDL_PauseAudioDevice(audio, 1);
@@ -8311,6 +9259,7 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 			next = SDL_GetPerformanceCounter() / freq;
 			fpsT0 = next;
 			fpsFrames = 0;
+			pacedMisses = pacedMissSecs = 0; /* (the menu's time isn't the game's) */
 			forceMap = true;
 		}
 		wasMenu = menuOpen;
@@ -8340,7 +9289,7 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 				if (hkBtn[i] >= 0 && btnNow[hkBtn[i]]) suppress[hkBtn[i]] = true;
 			}
 		}
-		if (!btnNow[modBtn] || modIsGame) {
+		if (!btnNow[modBtn] || modIsGame || ffMod) {
 			/* the SNES layout only where it applies (Super Mario Advance 2: in
 			 * a level; on the world map R switches Mario and Luigi, and only A
 			 * enters a level) */
@@ -8398,7 +9347,13 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 		bool rewinding = cfg->rewind && btnNow[B_L2];
 		bool ff = cfg->fastForward && btnNow[B_R2] && !rewinding;
 		ffBox = ff;
-		int runs = ff ? SDL_max(1, cfg->ffSpeed) : 1;
+		/* Max (ff_speed 0): as many frames as fit in about 70% of a display
+		 * frame (the rest for drawing it), up to FF_MAX_RUNS; the sound
+		 * thinned out by the last count */
+		const bool ffMax = ff && cfg->ffSpeed <= 0;
+		static int maxRan = 4;
+		int runs = ffMax ? FF_MAX_RUNS : ff ? cfg->ffSpeed : 1;
+		int thin = ffMax ? maxRan : runs; /* every thin-th sound sample kept */
 		/* Audio keeps flowing during fast-forward: every runs-th sample is kept,
 		 * so the device gets real-time worth of (sped-up) sound. Starving it
 		 * makes PulseAudio/PipeWire grow their buffers after each underrun,
@@ -8409,7 +9364,7 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 		 * underruns (the queue ran dry = a crackle), slow loop iterations, and
 		 * how often the background map capture was running. */
 		{
-			static int underruns, slow, captureBusy, n;
+			static int underruns, slow, captureBusy, dropped, n;
 			static long preemptT0 = -1;
 			if (preemptT0 < 0) preemptT0 = thread_preemptions();
 			static Uint64 lastIter;
@@ -8418,20 +9373,27 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 			lastIter = nowT;
 			if (audio && frameCount > 120 && queuedNow == 0 && !ff) ++underruns;
 			if (mc && mapcap_busy(mc)) ++captureBusy;
+			if (dropAudio && !ff) ++dropped; /* (the queue over 3x its target: this frame's sound thrown away, a gap) */
 			if (++n >= 300) {
 #ifdef __ANDROID__
 				const bool report = true; /* performance on Android devices is still being measured */
 #else
-				const bool report = underruns || slow || debug;
+				const bool report = underruns || slow || dropped || stallCount || keptTotal || debug;
 #endif
 				if (report) {
 					double ms = 1000.0 / SDL_GetPerformanceFrequency() / n;
 					fprintf(stderr, "frame %llu: last 5 s: %.1f fps, %d audio underrun(s), %d slow frame(s), map capture busy %d%%, "
-					                "audio queue %d ms; per frame: emulating %.2f ms, drawing %.2f ms; game thread preempted %ld time(s)\n",
+					                "audio queue %d ms; per frame: emulating %.2f ms, drawing %.2f ms; game thread preempted %ld time(s)",
 					        (unsigned long long) frameCount, fps, underruns, slow, captureBusy * 100 / n,
 					        queuedNow * 1000 / want.freq, emuTicks * ms, drawTicks * ms, thread_preemptions() - preemptT0);
+					if (stallCount) fprintf(stderr, "; %d stall(s) over %d ms, the longest %.0f ms", stallCount, STALL_MS, stallWorst);
+					if (dropped) fprintf(stderr, "; sound thrown away on %d frame(s) (queue too long)", dropped);
+					if (keptTotal) fprintf(stderr, "; %u frame(s) run while the screen held a frame up", keptTotal);
+					fputc('\n', stderr);
 				}
-				underruns = slow = captureBusy = n = 0;
+				underruns = slow = captureBusy = dropped = n = 0;
+				stallCount = stallLogged = 0, stallWorst = 0;
+				keptTotal = 0;
 				preemptT0 = thread_preemptions();
 				emuTicks = drawTicks = 0;
 			}
@@ -8462,7 +9424,10 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 			rewindBox = 0;
 			forceMap = true; /* the map, as of where the rewind stopped */
 		}
+		int ran = 0;
 		for (int i = 0; i < (rewinding ? 0 : runs); ++i) {
+			if (ffMax && i > 0 && (SDL_GetPerformanceCounter() - emuT0) / freq > frameSec * 0.7) break;
+			++ran;
 			if (i == 0 && aheadReady) aheadReady = false; /* emulated by the worker while the last frame was shown */
 			else run_frame(keys);
 			Uint64 raT0 = SDL_GetPerformanceCounter();
@@ -8472,10 +9437,10 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 			size_t got;
 			while ((got = emu_audio_read(&emu, samples, 4096)) > 0) {
 				if (!audio || dropAudio || (ff && cfg->ffMute)) continue;
-				if (runs > 1) {
+				if (thin > 1) {
 					size_t outN = 0;
 					for (size_t f = 0; f < got; ++f) {
-						if (ffPhase++ % runs == 0) {
+						if (ffPhase++ % thin == 0) {
 							samples[outN * 2] = samples[f * 2];
 							samples[outN * 2 + 1] = samples[f * 2 + 1];
 							++outN;
@@ -8521,6 +9486,8 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 			}
 			audT += SDL_GetPerformanceCounter() - audT0;
 		}
+		if (ffMax) maxRan = SDL_max(1, ran);
+		runs = rewinding ? runs : SDL_max(1, ran); /* (the frames run, for the rewind buffer and the speed) */
 		Uint64 emuT1 = SDL_GetPerformanceCounter();
 		double emuCpu1 = thread_cpu_ms();
 		emuTicks += emuT1 - emuT0;
@@ -8731,7 +9698,22 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 			draw_rewind();
 			draw_hint(); /* (under the bar, as it comes up) */
 			draw_bar();
+			/* (the keeper: the game and its sound go on if this is held up; not
+			 * for tests, whose frames are counted exactly) */
+			const bool keep = cfg->keepSound && audio && !ff && !rewinding && !noPace && !ui_scripted();
+			if (keep) keeper_arm(keys, audio, want.freq, targetQueued * 3, aheadInFlight ? 1 : 0);
 			ui_present();
+			if (keep) {
+				int kept = keeper_disarm();
+				if (kept) {
+					/* those frames are the game's time since: the next one is
+					 * due a frame after the last of them */
+					next += kept * (pacedHz > 0 ? frameSec / 1.005 : frameSec);
+					frameCount += (unsigned) kept;
+					loopCur.kept = kept;
+					keptTotal += kept;
+				}
+			}
 		}
 		Uint64 drawT1 = SDL_GetPerformanceCounter();
 		drawTicks += drawT1 - drawT0;
@@ -8744,10 +9726,20 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 			lateness += (SDL_max(over, 1.0) - lateness) / 32;
 		}
 		{
+			const double msPer = 1000.0 / (double) SDL_GetPerformanceFrequency();
+			int vTop = screens[0].view, vBot = nScreens > 1 ? screens[1].view : vTop;
+			loopCur.emu0 = emuT0, loopCur.emu1 = emuT1, loopCur.draw0 = drawT0, loopCur.draw1 = drawT1;
+			loopCur.audio = (double) audT * msPer;
+			loopCur.presentTop = ui_last_present_ms(vTop);
+			loopCur.presentBottom = vBot != vTop ? ui_last_present_ms(vBot) : 0;
+			loopCur.valid = !ff && !rewinding; /* (fast-forward and rewind run their own way) */
+		}
+		{
 			double msPer = 1000.0 / (double) SDL_GetPerformanceFrequency();
 			double total = (double) (drawT1 - workT0) * msPer;
 			/* matched, each frame includes the wait for the display's refresh:
 			 * only one that missed its refresh (about two frames long) is slow */
+			if (!ff && !rewinding && pacedHz > 0 && total > frameSec * 1000.0 * 1.4) ++pacedMisses;
 			if (!ff && total > frameSec * 1000.0 * (pacedHz > 0 ? 1.4 : 1.0)) {
 				SlowFrame f = { total, (double) (emuT0 - workT0) * msPer, (double) (emuT1 - emuT0 - raT) * msPer, (double) raT * msPer,
 					            (double) (drawT0 - emuT1) * msPer, (double) (drawT1 - drawT0) * msPer, 0, 0, 0,
@@ -8788,6 +9780,16 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 			if (debug) fprintf(stderr, "speed %.1f fps (%.0f%%)\n", fps, speedPct);
 			fpsFrames = 0;
 			fpsT0 = now;
+			if (pacedHz > 0) {
+				pacedMissSecs = pacedMisses >= 3 ? pacedMissSecs + 1 : 0;
+				if (pacedMisses >= 3) fprintf(stderr, "frame %llu: %d frame(s) missed the display's refresh in the last second\n", (unsigned long long) frameCount, pacedMisses);
+				pacedMisses = 0;
+				if (pacedMissSecs >= 3) {
+					pacedFallback = true;
+					pacing_update(); /* (logs the "frame pacing:" line again) */
+					next = now;
+				}
+			}
 		}
 		/* fast-forward is paced too: ff_speed frames per real frame. Matched to
 		 * the display, presenting in step with it sets the pace; the clock runs
@@ -8804,17 +9806,26 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 		android_perf_report((int64_t) ((SDL_GetPerformanceCounter() - workT0) * 1e9 / freq));
 #endif
 		double wait = next - now;
+		loopCur.sleep0 = SDL_GetPerformanceCounter();
+		loopCur.sleepWant = wait > 0 ? wait : 0;
 #ifdef __wasi__
 		/* the web build: back to the page every frame, for the wait or not */
 		web_sleep(wait > 0 ? (unsigned) (wait * 1000) : 0);
+		logo_step(); /* (a logo a frame: the game's own, started without the game list) */
 #else
+		/* the core's spare-time work, while a millisecond is left */
+		if (!ff && !rewinding) {
+			while (wait > 0.001 && emu_idle_step(&emu)) wait = next - SDL_GetPerformanceCounter() / freq;
+		}
 		if (wait > 0) {
 			struct timespec ts = { 0, (long) (wait * 1e9) };
 			nanosleep(&ts, NULL);
 		}
 #endif
+		loopCur.end = SDL_GetPerformanceCounter();
 	}
 
+	keeper_stop();
 	ahead_stop(); /* before anything else touches the core */
 	ui_on_background(NULL);
 	ui_on_foreground(NULL);
@@ -8853,7 +9864,7 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 		gameTex16[i] = NULL;
 #endif
 		SDL_DestroyTexture(mapTex[i]);
-		if (hudTex[i]) SDL_DestroyTexture(hudTex[i]);
+		if (hudTex[i] && (i == 0 || hudTex[i] != hudTex[0])) SDL_DestroyTexture(hudTex[i]);
 		gameTex[i] = mapTex[i] = hudTex[i] = NULL;
 		if (hudOverTex[i]) SDL_DestroyTexture(hudOverTex[i]);
 		if (hudMapTex[i]) SDL_DestroyTexture(hudMapTex[i]);

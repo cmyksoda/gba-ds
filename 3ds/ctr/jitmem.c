@@ -108,7 +108,9 @@ enum {
 	// Kept for what is made after the game's code memory: the machines themselves and their render
 	// and sound threads' copies, the map pictures, and
 	// the hidden copy with its code.
-	HEAP_LATER = 20 << 20,
+	// (20 MiB left the game 10 MiB of code memory, which Mario Kart filled in two minutes of a
+	// race; the heap still had 13-16 MiB free in it: 15 gives it about 14)
+	HEAP_LATER = 15 << 20,
 };
 
 bool jitHostMemoryLow(void) {
@@ -252,12 +254,15 @@ bool renderThreadHostCreate(pthread_t* thread, void* (*function)(void*), void* a
 	return true;
 }
 
-// GBA DS keeps the fourth core for the hidden copy of the game, so one render worker draws every line, unless
-// gba-ds.cfg says armgba_render_workers = 2: a second one there, each drawing every other line (as armGBA's own app does).
+// A second render worker (gba-ds.cfg render_workers = 2, the default; armgba_render_workers sets it for
+// one run): on the fourth core, at the game thread's priority, a step above the hidden copy's thread
+// there. Each worker then draws every other line.
 bool renderThreadHostCreateSecond(pthread_t* thread, void* (*function)(void*), void* argument) {
 	renderThreadSecond = false;
+	// (armGBA asks on the 3DS whatever it was started with: the setting is GBA DS's, emu.h)
+	extern int emuRenderWorkers;
 	const char* workers = getenv("GBADS_ARMGBA_RENDER_WORKERS");
-	if (!workers || atoi(workers) < 2 || renderThreadCore != 2) {
+	if (renderThreadCore != 2 || (workers ? atoi(workers) : emuRenderWorkers) < 2) {
 		return false;
 	}
 	s32 priority = 0x30;

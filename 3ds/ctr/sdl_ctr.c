@@ -184,7 +184,7 @@ SDL_Surface* SDL_DuplicateSurface(SDL_Surface* s) {
 	if (!s) return NULL;
 	SDL_Surface* d = SDL_CreateRGBSurfaceWithFormat(0, s->w, s->h, 32, s->format->format);
 	if (!d) return NULL;
-	for (int y = 0; y < s->h; ++y) memcpy((Uint8*) d->pixels + y * d->pitch, (Uint8*) s->pixels + y * s->pitch, (size_t) s->w * 4);
+	for (int y = 0; y < s->h; ++y) memcpy((Uint8*) d->pixels + y * d->pitch, (const Uint8*) s->pixels + y * s->pitch, (size_t) s->w * 4);
 	return d;
 }
 
@@ -666,6 +666,9 @@ static int pow2(int v) {
 	return p;
 }
 
+static u32* stage; /* (whole pictures on their way to the GPU's copy engine) */
+static size_t stageSize;
+
 /* Texel (x, y) of a w-wide texture in the GPU's layout: 8x8 tiles, row by
  * row, Morton order inside a tile; the first row is the picture's top. */
 /* Memory the GPU or the DSP reads, written back from the CPU's cache: by the kernel itself (the GPU and
@@ -977,6 +980,59 @@ static int update_by_cpu(SDL_Texture* t, const SDL_Rect* rect, const void* pixel
 	if (step < 1) step = 1;
 	bool argb = t->format == SDL_PIXELFORMAT_ARGB8888;
 	bool opaque = t->format == SDL_PIXELFORMAT_XBGR8888;
+	if (step == 1 && rect->x == 0 && rect->w == t->tw && rect->y >= 0 && !(rect->y & 7) && rect->h > 0 && rect->y + rect->h <= t->th &&
+	    (!(rect->h & 7) || rect->y + rect->h == t->th) &&
+	    texW >= 64 && !inFrame) {
+		/* whole rows (whole bands of 8, or the picture's last): written
+		 * straight into a plain buffer in the GPU's colour order, and the
+		 * GPU's copy engine (the display transfer) lays them out in tiles,
+		 * which took the CPU 35 ns a pixel. Not inside a frame being drawn
+		 * (the transfer would land in its command list) */
+		u32 h8 = (u32) (rect->h + 7) & ~7u;
+		size_t need = (size_t) texW * h8 * 4;
+		if (need > stageSize) {
+			if (stage) linearFree(stage);
+			stage = linearAlloc(need);
+			stageSize = stage ? need : 0;
+		}
+		if (stage) {
+			for (int y = 0; y < rect->h; ++y) {
+				const Uint32* src = (const Uint32*) ((const Uint8*) pixels + (size_t) y * pitch);
+				u32* o = stage + (size_t) y * texW;
+				int x = 0;
+				if (argb) for (; x < t->tw; ++x) o[x] = src[x] << 8 | src[x] >> 24;
+				else if (opaque) for (; x < t->tw; ++x) o[x] = __builtin_bswap32(src[x] | 0xFF000000u);
+				else for (; x < t->tw; ++x) o[x] = __builtin_bswap32(src[x]);
+			}
+			GSPGPU_FlushDataCache(stage, (u32) texW * (u32) rect->h * 4);
+			C3D_SyncDisplayTransfer(stage, GX_BUFFER_DIM(texW, h8), out + (size_t) rect->y * texW, GX_BUFFER_DIM(texW, h8),
+			                        GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(1) | GX_TRANSFER_RAW_COPY(0) |
+			                        GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
+			                        GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
+			return 0;
+		}
+	}
+	if (step == 1) {
+		/* (the usual case: no division (the ARM11 has none: two a pixel
+		 * were most of a 480x320 picture's 20 ms), each row's tiles worked
+		 * out once) */
+		static const u8 xbits[8] = { 0, 1, 4, 5, 16, 17, 20, 21 };
+		int w = SDL_min(rect->w, t->tw - rect->x), h = SDL_min(rect->h, t->th - rect->y);
+		for (int y = 0; y < h; ++y) {
+			const Uint32* src = (const Uint32*) ((const Uint8*) pixels + (size_t) y * pitch);
+			u32 ty = (u32) (rect->y + y);
+			u32* row = out + ((((ty >> 3) * (texW >> 3)) << 6) | ((ty & 1) << 1) | ((ty & 2) << 2) | ((ty & 4) << 3));
+			for (int x = 0; x < w; ++x) {
+				u32 tx = (u32) (rect->x + x);
+				Uint32 p = src[x];
+				if (argb) p = p << 8 | p >> 24;
+				else p = __builtin_bswap32(opaque ? p | 0xFF000000u : p);
+				row[((tx >> 3) << 6) | xbits[tx & 7]] = p;
+			}
+		}
+		GSPGPU_FlushDataCache(t->tex.data, t->tex.size);
+		return 0;
+	}
 	for (int y = 0; y < rect->h; y += step) {
 		const Uint32* src = (const Uint32*) ((const Uint8*) pixels + (size_t) y * pitch);
 		u32 ty = (u32) ((rect->y + y) / step);

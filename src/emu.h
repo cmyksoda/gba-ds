@@ -123,6 +123,9 @@ void emu_pic_dump_shown(Emu* e, const uint32_t* shown);
 
 /* savePath may be NULL (no battery save attached). */
 bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio);
+/* armGBA (the 3DS): how many threads draw the game opened with sound next, 1 or 2
+ * (render_workers); libmgba draws on the emulator's thread and leaves it be. */
+extern int emuRenderWorkers;
 /* ROMs may also be in a .zip or .7z (the first GBA ROM inside is used). */
 bool emu_is_rom_name(const char* name);   /* .gba, .zip, .7z */
 bool emu_is_archive_name(const char* name); /* .zip, .7z */
@@ -159,16 +162,32 @@ void emu_rewind_append(Emu* e);
 bool emu_rewind_step(Emu* e);
 size_t emu_rewind_count(void);
 
-/* Persist full savestates (including battery data) to disk. */
-bool emu_state_save_file(Emu* e, const char* path);
+/* Full savestates (including battery data) on disk. Loading (and the
+ * functions below) take GBA DS's / mGBA's own files and RetroArch's (and
+ * BananaFront's: RASTATE, compressed or not) with its mGBA core's state. */
+typedef enum {
+	STATE_FORMAT_MGBA,           /* mGBA's own (GBA DS's states) */
+	STATE_FORMAT_RETROARCH,      /* RetroArch's, uncompressed */
+	STATE_FORMAT_RETROARCH_RZIP, /* RetroArch's, compressed (its savestate_file_compression) */
+} StateFormat;
+typedef enum {
+	STATE_FILE_NONE,       /* no such file */
+	STATE_FILE_MGBA,       /* mGBA's own */
+	STATE_FILE_RETROARCH,  /* RetroArch's, with its mGBA core's state */
+	STATE_FILE_OTHER_CORE, /* another emulator's (RetroArch's gpSP, VBA-M...): not loadable */
+	STATE_FILE_UNREADABLE, /* compressed in a way GBA DS can't read, or damaged */
+} StateFileKind;
+bool emu_state_save_file(Emu* e, const char* path); /* (mGBA's format, nothing of GBA DS's own) */
+/* extra: GBA DS's own data kept inside it (mGBA's extra data, a tag of
+ * its own: other emulators skip it), or NULL */
+bool emu_state_save_file_as(Emu* e, const char* path, const void* extra, size_t extraN, StateFormat fmt);
 bool emu_state_load_file(Emu* e, const char* path);
+/* what's in a state file; *fromGbads (may be NULL): it has GBA DS's own data (saved by GBA DS) */
+StateFileKind emu_state_file_kind(Emu* e, const char* path, bool* fromGbads);
 /* The CRC32 of the ROM a state file was saved with (mGBA keeps it in the
  * state's header); false if it isn't a GBA state */
 bool emu_state_file_rom_crc(const char* path, uint32_t* crc);
-/* GBA DS's own data kept inside a state file (mGBA's extra data, a tag of
- * its own: other emulators skip it): written after the state (path saved
- * just before), read back as a malloc'd copy (NULL: none) */
-bool emu_state_file_put_extra(Emu* e, const char* path, const void* data, size_t n);
+/* GBA DS's own data kept inside a state file, as a malloc'd copy (NULL: none) */
 void* emu_state_file_get_extra(Emu* e, const char* path, size_t* n);
 
 /* The whole ROM file (inside a .zip / .7z too), malloc'd; NULL on failure. */
@@ -205,12 +224,26 @@ bool write_png(const char* path, const uint32_t* px, int w, int h, int stride);
 /* Hide sprites matching any of the n rules (n = 0 turns it off). Display only:
  * the game's memory and state are untouched. One emulator at a time. */
 void emu_hide_sprites(Emu* e, const SpriteRule* rules, int n);
+void emu_keep_sprites(Emu* e, const SpriteRule* rules, int n);
+void emu_hide_grouped(Emu* e, bool on);
 /* Also hide the sprites whose attributes 0-2 are exactly one of these
  * (Pokemon Pinball's live view: what the other copy draws on its screen). */
 void emu_hide_exact(Emu* e, const uint16_t (*attrs)[3], int n);
 /* Which layers are drawn: bits 0-3 BG0-3, bit 4 sprites (0x1F = all). Takes
  * effect when the display registers are next written (e.g. a state load). */
 void emu_layers(Emu* e, unsigned mask);
+/* Pictures compared pixel by pixel as a whole (a layer's picture against
+ * the backdrop's, emu_layers 0): the fourth byte of each pixel tells the
+ * backdrop's from a layer's or sprite's, so a pixel drawn the backdrop's
+ * colour still differs. mGBA's pictures always have it (its renderer's
+ * flags); armGBA's only between on and off (each frame drawn twice). */
+#ifdef GBADS_ARMGBA
+void emu_mark_backdrop(Emu* e, bool on);
+#else
+static inline void emu_mark_backdrop(Emu* e, bool on) {
+	(void) e, (void) on;
+}
+#endif
 /* HUD split (Mario Kart): while on, the BG layers in bgMask (bit 0 = BG0)
  * and the sprites matching any of objs are left out of the game picture and
  * drawn alone into hud (GBA_W x GBA_H, kept by the caller while the core is
@@ -279,6 +312,22 @@ void emu_vram_write(Emu* e, uint32_t off, const void* src, size_t n);
 void emu_oam_read(Emu* e, uint16_t* out);
 void emu_oam_write(Emu* e, const uint16_t* src);
 bool emu_hud_grabbed(void);
+/* Whether a new HUD picture came in since the last ask (armGBA on the 3DS
+ * draws it one frame in five; libmgba every frame). */
+bool emu_hud_fresh(void);
+/* One frame in how many the HUD picture is drawn (1: every frame). */
+int emu_hud_every(void);
+/* How many frames behind the game the core's picture (e->fb) is: armGBA on
+ * the 3DS draws a frame late (1); libmgba 0. */
+int emu_frame_lag(Emu* e);
+/* Work the core can do in a frame's spare time, one piece a call (armGBA on
+ * the 3DS: compiling the code an earlier run of the game ran, before the game
+ * gets to it); false when there's none. */
+bool emu_idle_step(Emu* e);
+/* A moment where a hitch doesn't matter (Mario Kart: off the race): the core
+ * may tidy up (armGBA: its code memory emptied if it's over 40% full, rather
+ * than when it fills in a race). */
+void emu_tidy(Emu* e);
 
 /* Cheats. emu_cheats_clear removes them all; emu_cheats_add adds one set
  * (applied every frame) from codes in RetroArch's .cht form: hex words

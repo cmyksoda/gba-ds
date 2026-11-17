@@ -8,6 +8,7 @@
  */
 #include "android.h"
 #include "config.h"
+#include "esde.h"
 #include "esinteg.h"
 #include "bench.h"
 #include "game.h"
@@ -17,6 +18,7 @@
 #include "ui.h"
 #include "ra.h"
 #include "update.h"
+#include "clocks.h"
 #ifdef __wasi__
 #include "mapcap.h"
 #endif
@@ -162,19 +164,9 @@ int main(int argc, char** argv) {
 	if (!cfg.stateDir[0]) snprintf(cfg.stateDir, sizeof(cfg.stateDir), "%s/states", dataDir);
 	mkdirs(cfg.stateDir);
 	snprintf(path, sizeof(path), "%s/prefs.cfg", cfg.stateDir);
-	{
-		/* map_animations, map_interval, show_fps and show_logo are no longer in the pause menu:
-		 * gba-ds.cfg decides, whatever an older prefs.cfg says */
-		bool mapAnim = cfg.mapAnim;
-		int mapInterval = cfg.mapInterval;
-		bool showFps = cfg.showFps; /* (and show_fps, since v1.4.1: the quick bar shows the FPS) */
-		bool showLogo = cfg.showLogo; /* (and show_logo, since v1.4.1) */
-		config_load_file(&cfg, path);
-		cfg.mapAnim = mapAnim;
-		cfg.mapInterval = mapInterval;
-		cfg.showFps = showFps;
-		cfg.showLogo = showLogo;
-	}
+	/* (map_animations, map_interval, show_fps and show_logo were left to gba-ds.cfg
+	 * until v1.5.3.1; the game list's Settings can change them now) */
+	config_load_file(&cfg, path);
 	/* the game list's Settings (Android: the ROM folder) */
 	snprintf(path, sizeof(path), "%s/library.cfg", cfg.stateDir);
 	config_load_file(&cfg, path);
@@ -194,6 +186,9 @@ int main(int argc, char** argv) {
 	/* keep EmulationStation's entry for GBA DS current, if it's switched on */
 	es_integration_refresh(&cfg);
 	banana_integration_refresh();
+#else
+	/* and ES-DE's, on Android (ES-DE's RetroArch SAF mode may have changed) */
+	esde_integration_refresh();
 #endif
 
 #if defined(__linux__) && !defined(__ANDROID__) && defined(__GLIBC__)
@@ -203,6 +198,8 @@ int main(int argc, char** argv) {
 	signal(SIGFPE, on_crash);
 	signal(SIGABRT, on_crash);
 #endif
+	/* the Performance setting (clocks.c; the game list's Settings) */
+	if (cfg.perfMax || clocks_available()) clocks_set(cfg.perfMax);
 	signal(SIGTERM, on_signal);
 	signal(SIGINT, on_signal);
 	signal(SIGHUP, on_signal);
@@ -211,6 +208,8 @@ int main(int argc, char** argv) {
 	host_set_cores(cfg.sideCore, cfg.captureCore, cfg.aheadCore, cfg.videoCore, cfg.core1Limit, cfg.coreProbe);
 #endif
 	if (!ui_init(&cfg, true)) return 1;
+	ui_theme(cfg.lightTheme);
+	ui_brightness(cfg.brightTop, cfg.brightBottom);
 	ra_init(&cfg); /* signs in to RetroAchievements in the background */
 	update_init(&cfg, exeDir, argc, argv);
 #ifdef __ANDROID__
@@ -234,6 +233,6 @@ int main(int argc, char** argv) {
 	logo_shutdown();
 	ra_shutdown();
 	ui_shutdown();
-	update_restart_if_installed(); /* an update was installed: start it */
-	return 0;
+	if (cfg.perfMax) clocks_set(false); /* (the governors as they were) */
+	return update_restart_if_installed(); /* an update was installed: start it */
 }

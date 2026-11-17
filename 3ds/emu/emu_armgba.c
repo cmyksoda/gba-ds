@@ -43,6 +43,8 @@ typedef struct ArmCore {
 	 * have been quiet */
 	char* savePath;
 	int saveQuiet;
+	char warmPath[64]; /* (the game itself: its warm list's file) */
+	bool late; /* (drawn on a render thread a frame late) */
 	bool savePending;
 #ifdef __3DS__
 	int codeCore; /* the core that last wrote this machine's code: its shared routines are written where it is opened */
@@ -63,9 +65,13 @@ typedef struct ArmCore {
 	SpriteRule rules[12];
 	int nRules;
 	bool keepOnly; /* hide every sprite that matches none of the rules instead */
+	bool grouped;  /* a matching sprite hidden only as part of a group (emu_hide_grouped) */
 	uint16_t exact[128][3];
 	int nExact;
 	bool exactKeep;
+	/* emu_mark_backdrop: the same picture drawn again on a backdrop of
+	 * MARK_555, where every pixel no layer or sprite drew stays MARK_555 */
+	uint16_t* markFrame;
 } ArmCore;
 
 static ArmCore* AC(const Emu* e) {
@@ -447,6 +453,7 @@ static void shared_key(const char* romPath, const char* patchName, char* key, si
 
 static void split_release(ArmCore* c);
 static void split_frame(ArmCore* c);
+static bool hudFresh; /* (a new HUD picture since emu_hud_fresh last asked) */
 
 /* ---------------------------------------------- battery save */
 
@@ -468,7 +475,7 @@ static void save_read(ArmCore* c) {
  * half-way would leave half old, half new. */
 static int save_mode(void) {
 	const char* v = getenv("GBADS_ARMGBA_SAVE");
-	return v ? atoi(v) & 1 : 0;
+	return v ? atoi(v) & 1 : 1;
 }
 
 static double ms_since(const struct timespec* t0) {
@@ -618,6 +625,61 @@ static void save_tick(ArmCore* c) {
 	}
 }
 
+/* ---------------------------------------------- the warm list */
+
+/* armGBA's list of the cartridge code the game ran compiled, kept between
+ * runs (as armGBA-3DS keeps it): the next run compiles it in the frames'
+ * spare time before the game gets there, not in a burst when it does (a race
+ * in Mario Kart reached new code for minutes: 50-150 ms frames). */
+#ifdef __3DS__
+#define WARM_DIR "/3ds/gba-ds/warm"
+#define WARM_MAGIC 0x4D524157u /* "WARM" */
+#define WARM_MOST (1 << 16)
+
+static void warm_load(ArmCore* c, uint32_t romCrc) {
+	snprintf(c->warmPath, sizeof(c->warmPath), WARM_DIR "/%08lX.warm", (unsigned long) romCrc);
+	FILE* f = fopen(c->warmPath, "rb");
+	if (!f) return;
+	uint32_t head[2];
+	uint32_t* pairs = NULL;
+	if (fread(head, 4, 2, f) == 2 && head[0] == WARM_MAGIC && head[1] <= WARM_MOST) {
+		pairs = malloc((size_t) head[1] * 8 + 8);
+		if (pairs && fread(pairs, 8, head[1], f) == head[1]) {
+			jitWarmGive(c->gba, pairs, head[1]);
+			fprintf(stderr, "warm list: %lu blocks from %s\n", (unsigned long) head[1], c->warmPath);
+		}
+	}
+	free(pairs);
+	fclose(f);
+}
+
+static void warm_save(ArmCore* c) {
+	if (!c->warmPath[0] || !c->gba->jit) return;
+	uint32_t* data = malloc(8 + (size_t) WARM_MOST * 8);
+	if (!data) return;
+	size_t n = jitWarmTake(c->gba, data + 2, WARM_MOST);
+	data[0] = WARM_MAGIC;
+	data[1] = (uint32_t) n;
+	if (n) {
+		mkdir(WARM_DIR, 0777);
+		char tmp[80];
+		snprintf(tmp, sizeof(tmp), "%s.new", c->warmPath);
+		FILE* f = fopen(tmp, "wb");
+		bool ok = f && fwrite(data, 1, 8 + n * 8, f) == 8 + n * 8;
+		if (f) ok = fclose(f) == 0 && ok;
+		if (ok) {
+			remove(c->warmPath);
+			ok = rename(tmp, c->warmPath) == 0;
+		}
+		if (!ok) remove(tmp);
+		fprintf(stderr, "warm list: %lu blocks to %s%s\n", (unsigned long) n, c->warmPath, ok ? "" : " (couldn't write it)");
+	}
+	free(data);
+}
+#else
+static void warm_save(ArmCore* c) { (void) c; }
+#endif
+
 /* ---------------------------------------------- open, close, frames */
 
 /* gba-ds.cfg armgba_stats = N: every N frames of the game (of a copy: of those it ran) and as a machine closes, a log
@@ -704,6 +766,7 @@ static void close_core(ArmCore* c) {
 	if (c->gba && c->seen) jit_stats(c, c->game ? c->gba->video.frameCounter : c->ran, c->game, true);
 #endif
 	if (c->gba) {
+		warm_save(c);
 		if (c->savePath) saver_stop(); /* (what it has in hand lands before the last write) */
 		if (c->savePath && (c->savePending || c->gba->savedata.dirty)) save_write(c);
 		if (c->cheatsOn) cheatsClear(&c->cheats, c->gba);
@@ -728,6 +791,7 @@ static void close_core(ArmCore* c) {
 		renderSetHooks(c->gba, NULL);
 		gbaDestroy(c->gba);
 	}
+	free(c->markFrame);
 	free(c->savePath);
 #ifdef __3DS__
 	free(c->seen);
@@ -738,6 +802,7 @@ static void close_core(ArmCore* c) {
 
 static uint32_t colour_8888(uint16_t v);
 static void widen_tables(void);
+int emuRenderWorkers = 1;
 
 bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 	memset(e, 0, sizeof(*e));
@@ -749,6 +814,12 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 	/* (the game's own core is the one with sound: the large share of the
 	 * recompiler's memory, and the console's other cores to draw and mix on) */
 	pthread_mutex_lock(&sharedLock);
+	/* (the ROM's buffer, set aside before the recompiler's code memory and
+	 * the machine are made, and given back just before the ROM is read into
+	 * it: after a while in the game list (the logos' copies coming and going)
+	 * the heap had 30 MiB free but not 8 in one piece once the game's code
+	 * memory was placed, and Pokémon Pinball didn't start) */
+	void* romRoom = NULL;
 	{
 		/* (the ROM is read after the machine is made: its size, so that the
 		 * recompiler leaves it room; a .zip's isn't known, taken as 16 MiB) */
@@ -757,7 +828,11 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 		for (int i = 0; i < SHARED_MAX; ++i) held |= sharedRoms[i].users && !strcmp(sharedRoms[i].path, romPath);
 		struct stat rst;
 		if (!held) toLoad = emu_is_archive_name(romPath) || stat(romPath, &rst) ? 16u << 20 : (size_t) rst.st_size;
-		host_jit_main(audio, toLoad);
+		/* (a plain file goes to the top of the heap's range, which a hole of its size in the heap would push out of reach) */
+		if (toLoad && emu_is_archive_name(romPath)) romRoom = malloc(gbaRomBufferSize(toLoad));
+		/* (set aside already: the heap free doesn't count it, so nothing more
+		 * is kept for it) */
+		host_jit_main(audio, romRoom ? 0 : toLoad);
 	}
 	c->gba = gbaCreate();
 	pthread_mutex_unlock(&sharedLock);
@@ -772,6 +847,16 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 	c->hooks.context = c;
 	renderSetHooks(gba, &c->hooks);
 	gbaLoadBios(gba, armgbaBios, SIZE_BIOS);
+#ifndef __3DS__
+	{
+		/* GBADS_BIOS=<a GBA BIOS> (tests: the same BIOS on libmgba and armGBA, 3ds/test/dualrun.py) */
+		static uint8_t file[SIZE_BIOS];
+		FILE* bf = getenv("GBADS_BIOS") ? fopen(getenv("GBADS_BIOS"), "rb") : NULL;
+		if (bf && fread(file, 1, sizeof(file), bf) == sizeof(file)) gbaLoadBios(gba, file, SIZE_BIOS);
+		else if (getenv("GBADS_BIOS")) fprintf(stderr, "GBADS_BIOS: can't load %s\n", getenv("GBADS_BIOS"));
+		if (bf) fclose(bf);
+	}
+#endif
 
 	size_t size = 0;
 	uint8_t* rom = NULL;
@@ -811,6 +896,9 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 	}
 #endif
 	if (!s) {
+#ifdef __3DS__
+		free(romRoom), romRoom = NULL;
+#endif
 		rom = read_played(romPath, &size, &e->patch, e->patchName, &e->fileCrc, true);
 		{
 			/* (the names of the ones left out, as src/emu.c reports them) */
@@ -886,6 +974,9 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 		}
 	}
 
+#ifdef __3DS__
+	free(romRoom), romRoom = NULL; /* (a cartridge borrowed from another core: not needed) */
+#endif
 	gba->savedata.backed = true;
 	if (savePath) {
 		c->savePath = strdup(savePath);
@@ -899,12 +990,21 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 	gba->savedata.dirty = false;
 #ifdef __3DS__
 	if (audio) {
-		if (renderThreadStart(gba, false, false)) renderSetHooks(gba, &c->hooks);
+		/* (render_workers = 2: a second thread draws every other line, on the
+		 * fourth core beside the hidden copy. Late: each frame is shown one
+		 * frame after it's made, so the game never waits for the drawing; the
+		 * HUD picture, drawn one frame in hooks.secondEvery (6), with it) */
+		if (renderThreadStart(gba, true, emuRenderWorkers == 2)) renderSetHooks(gba, &c->hooks), c->late = true;
 		audioThreadStart(gba);
+		warm_load(c, e->romCrc);
 	}
 #else
-	/* (GBADS_RENDER_THREAD=1, tests: drawn on a thread as the console's game is) */
-	if (getenv("GBADS_RENDER_THREAD") && renderThreadStart(gba, false, false)) renderSetHooks(gba, &c->hooks);
+	/* (GBADS_RENDER_THREAD=1, tests: drawn on a thread as the console's game is;
+	 * 2: on two, each drawing every other line) */
+	/* (GBADS_RENDER_LATE=1: the game itself a frame late, as on the 3DS; its
+	 * hidden copies aren't) */
+	if (getenv("GBADS_RENDER_THREAD") && renderThreadStart(gba, audio && getenv("GBADS_RENDER_LATE") != NULL, atoi(getenv("GBADS_RENDER_THREAD")) == 2))
+		renderSetHooks(gba, &c->hooks), c->late = audio && getenv("GBADS_RENDER_LATE") != NULL;
 	if (getenv("GBADS_AUDIO_THREAD")) audioThreadStart(gba);
 #endif
 
@@ -926,6 +1026,9 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 #endif
 	return true;
 fail:
+#ifdef __3DS__
+	free(romRoom);
+#endif
 	close_core(c);
 	e->core = NULL;
 	free(e->fb);
@@ -987,8 +1090,14 @@ static void widen_picture(uint32_t* dst, const uint16_t* src) {
 
 /* armGBA's picture is the GBA's own 15-bit colours; GBA DS wants mGBA's
  * 32-bit ones (bytes R, G, B, X), widened the way mGBA widens them. */
+#define MARK_555 0x7C1F
 static void take_picture(Emu* e) {
 	widen_picture(e->fb, (const uint16_t*) AC(e)->gba->renderer.frame);
+	/* (emu_mark_backdrop: the backdrop's pixels told apart by their fourth byte, as mGBA's flags there tell them apart) */
+	const uint16_t* mark = AC(e)->markFrame;
+	for (int i = 0; mark && i < GBA_W * GBA_H; ++i) {
+		if (mark[i] == MARK_555) e->fb[i] = (e->fb[i] & 0x00FFFFFFu) | 0xFC000000u;
+	}
 }
 
 static void run_frame(Emu* e, uint32_t keys, bool draw) {
@@ -1009,6 +1118,18 @@ static void run_frame(Emu* e, uint32_t keys, bool draw) {
 	gbaSetKeys(gba, (uint16_t) keys);
 	videoDrawSkipped = !draw;
 	uint32_t const frame = gba->video.frameCounter;
+#ifdef __3DS__
+	if (c->ring) {
+		/* (the game: past 1.5 ms of compiling in a frame, code met for the
+		 * first times is stepped through a few times more before it's
+		 * compiled, and compiled in a later frame if it doesn't come round
+		 * again; a Mario Kart race frame has about that much to spare: 4 ms
+		 * made 18-22 ms frames) */
+		extern uint64_t jitCompileTicks, jitCompileBudget, jitCompileFrameStart;
+		jitCompileFrameStart = jitCompileTicks;
+		jitCompileBudget = 268111 * 3 / 2;
+	}
+#endif
 	do {
 		gbaRunPart(gba);
 	} while (gba->video.frameCounter == frame);
@@ -1050,6 +1171,39 @@ static void run_frame(Emu* e, uint32_t keys, bool draw) {
 	}
 	gba->audio.outCount = 0;
 	save_tick(c);
+}
+
+void emu_tidy(Emu* e) {
+	ArmCore* c = AC(e);
+	size_t size = 0;
+	size_t used = c && c->gba ? jitCodeUsed(c->gba, &size) : 0;
+	if (size && (used > size / 10 * 4 || getenv("GBADS_TIDY_ALWAYS"))) { /* (GBADS_TIDY_ALWAYS: tests) */
+		/* (what it had compiled goes back on the warm list, for the frames'
+		 * spare time to compile again before the race) */
+		enum { MOST = 1 << 16 };
+		uint32_t* list = malloc((size_t) MOST * 8);
+		size_t n = list ? jitWarmTake(c->gba, list, MOST) : 0;
+		jitFlush(c->gba);
+		if (n) jitWarmGive(c->gba, list, n);
+		free(list);
+		fprintf(stderr, "code memory emptied off the race: %lu of %lu KiB used, %lu blocks to compile again\n", (unsigned long) (used >> 10),
+		        (unsigned long) (size >> 10), (unsigned long) n);
+	}
+}
+
+bool emu_idle_step(Emu* e) {
+#ifdef __3DS__
+	ArmCore* c = AC(e);
+	size_t size = 0;
+	/* (the list into at most 20% of the code memory: the rest for what the
+	 * game compiles as it goes, 7-9 MiB in a race of Mario Kart's; armGBA's
+	 * own limit is half) */
+	if (c && c->gba && c->ring && jitCodeUsed(c->gba, &size) > size / 10 * 2) return false;
+	return c && c->gba && c->ring && jitWarmStep(c->gba);
+#else
+	(void) e;
+	return false;
+#endif
 }
 
 void emu_frame(Emu* e, uint32_t keys) {
@@ -1134,7 +1288,7 @@ bool emu_state_load(Emu* e, const void* buf) {
 }
 
 /* A state file: a header, armGBA's state (which holds the battery save as it
- * was), then GBA DS's own data (emu_state_file_put_extra). Not mGBA's
+ * was), then GBA DS's own data (emu_state_save_file_as's extra). Not mGBA's
  * format: the other builds' states don't load here, nor these there. */
 #define STATE_FILE_MAGIC 0x33534447u /* "GDS3" */
 typedef struct {
@@ -1144,17 +1298,42 @@ typedef struct {
 	uint32_t extraSize;
 } StateFileHeader;
 
-bool emu_state_save_file(Emu* e, const char* path) {
+/* (fmt: only armGBA's own here; a RetroArch state would hold an mGBA core's
+ * state, which this isn't) */
+bool emu_state_save_file_as(Emu* e, const char* path, const void* extra, size_t extraN, StateFormat fmt) {
+	if (fmt != STATE_FORMAT_MGBA) {
+		fprintf(stderr, "state %s: RetroArch's format isn't made on the 3DS (armGBA's states aren't mGBA's)\n", path);
+		return false;
+	}
 	size_t n = gbaStateSize();
 	void* buf = malloc(n);
 	if (!buf) return false;
 	gbaSaveState(AC(e)->gba, buf);
-	StateFileHeader h = { STATE_FILE_MAGIC, e->romCrc, (uint32_t) n, 0 };
+	StateFileHeader h = { STATE_FILE_MAGIC, e->romCrc, (uint32_t) n, extra ? (uint32_t) extraN : 0 };
 	FILE* f = fopen(path, "wb");
-	bool ok = f && fwrite(&h, sizeof(h), 1, f) == 1 && fwrite(buf, 1, n, f) == n;
+	bool ok = f && fwrite(&h, sizeof(h), 1, f) == 1 && fwrite(buf, 1, n, f) == n && (!extra || !extraN || fwrite(extra, 1, extraN, f) == extraN);
 	if (f) ok = fclose(f) == 0 && ok;
 	free(buf);
 	return ok;
+}
+
+bool emu_state_save_file(Emu* e, const char* path) {
+	return emu_state_save_file_as(e, path, NULL, 0, STATE_FORMAT_MGBA);
+}
+
+/* armGBA's own states (GBA DS 3DS's) load; any other file is another
+ * emulator's to this build */
+StateFileKind emu_state_file_kind(Emu* e, const char* path, bool* fromGbads) {
+	(void) e;
+	if (fromGbads) *fromGbads = false;
+	FILE* f = fopen(path, "rb");
+	if (!f) return STATE_FILE_NONE;
+	StateFileHeader h;
+	bool ours = fread(&h, sizeof(h), 1, f) == 1 && h.magic == STATE_FILE_MAGIC;
+	fclose(f);
+	if (!ours) return STATE_FILE_OTHER_CORE;
+	if (fromGbads) *fromGbads = h.extraSize > 0;
+	return h.stateSize == gbaStateSize() ? STATE_FILE_MGBA : STATE_FILE_UNREADABLE;
 }
 
 bool emu_state_load_file(Emu* e, const char* path) {
@@ -1197,21 +1376,6 @@ bool emu_state_file_rom_crc(const char* path, uint32_t* crc) {
 	bool ok = fread(&h, sizeof(h), 1, f) == 1 && h.magic == STATE_FILE_MAGIC;
 	fclose(f);
 	if (ok) *crc = h.romCrc;
-	return ok;
-}
-
-bool emu_state_file_put_extra(Emu* e, const char* path, const void* data, size_t n) {
-	(void) e;
-	StateFileHeader h;
-	FILE* f = fopen(path, "r+b");
-	if (!f) return false;
-	bool ok = fread(&h, sizeof(h), 1, f) == 1 && h.magic == STATE_FILE_MAGIC;
-	if (ok) {
-		h.extraSize = (uint32_t) n;
-		ok = fseek(f, 0, SEEK_SET) == 0 && fwrite(&h, sizeof(h), 1, f) == 1 &&
-		     fseek(f, (long) (sizeof(h) + h.stateSize), SEEK_SET) == 0 && fwrite(data, 1, n, f) == n;
-	}
-	ok = fclose(f) == 0 && ok;
 	return ok;
 }
 
@@ -1314,9 +1478,21 @@ uint8_t* emu_memory(Emu* e, int region, size_t* size) {
 
 /* Reads see memory as it is, with no side effects (the save memory's chips
  * aren't driven: its bytes are read where they lie). */
+/* The write-only I/O registers (the backgrounds' offsets and affine
+ * parameters, the windows, mosaic, the blend's fade, the DMA addresses),
+ * which a read on the bus gives the open bus for. */
+static bool io_write_only(uint32_t off) {
+	return (off >= 0x010 && off <= 0x046) || off == 0x04C || off == 0x054 || (off >= 0x0A0 && off <= 0x0A7) ||
+	       (off >= 0x0B0 && off <= 0x0B7) || (off >= 0x0BC && off <= 0x0C3) || (off >= 0x0C8 && off <= 0x0CF) ||
+	       (off >= 0x0D4 && off <= 0x0DB);
+}
+
 uint8_t emu_read8(Emu* e, uint32_t a) {
 	struct GBA* gba = AC(e)->gba;
 	if (a >> 24 == 0xE) return gba->savedata.storage[a & (SIZE_FLASH1M - 1)];
+	/* Profiles read registers as mGBA's debug view gives them (src/emu.c's
+	 * rawRead): a write-only one as last written, not the open bus. */
+	if (a >> 24 == 0x4 && io_write_only(a & 0xFFFFFF)) return (uint8_t) (gba->io[(a & 0x3FE) >> 1] >> ((a & 1) * 8));
 	return (uint8_t) (memoryView32(gba, a & ~3u) >> ((a & 3) * 8));
 }
 uint16_t emu_read16(Emu* e, uint32_t a) {
@@ -1398,10 +1574,32 @@ const uint16_t* emu_vram(Emu* e) {
 	return (const uint16_t*) AC(e)->gba->vram;
 }
 
+/* As mGBA's (src/emu.c): the bytes as they are. Through the bus a halfword at
+ * a time: a byte stored to background VRAM is written to both halves of its
+ * halfword, as on the GBA, which garbled the tiles Sonic Pinball Party's
+ * copies carry over (tall.live.carry). An odd byte at either end keeps its
+ * neighbour. */
 void emu_vram_write(Emu* e, uint32_t off, const void* src, size_t n) {
+	struct GBA* gba = AC(e)->gba;
 	const uint8_t* p = src;
 	int cycles = 0;
-	for (size_t i = 0; i < n && off + i < SIZE_VRAM; ++i) memoryStore8(AC(e)->gba, 0x06000000 + off + (uint32_t) i, p[i], &cycles);
+	if (off >= SIZE_VRAM) return;
+	if (n > SIZE_VRAM - off) n = SIZE_VRAM - off;
+	for (size_t i = 0; i < n;) {
+		uint32_t const a = off + (uint32_t) i;
+		uint16_t half = (uint16_t) (gba->vram[a & ~1u] | gba->vram[(a & ~1u) + 1] << 8);
+		if (a & 1) {
+			half = (uint16_t) ((half & 0x00FF) | p[i] << 8);
+			i += 1;
+		} else if (i + 1 < n) {
+			half = (uint16_t) (p[i] | p[i + 1] << 8);
+			i += 2;
+		} else {
+			half = (uint16_t) ((half & 0xFF00) | p[i]);
+			i += 1;
+		}
+		memoryStore16(gba, 0x06000000 + (a & ~1u), half, &cycles);
+	}
 }
 
 void emu_oam_read(Emu* e, uint16_t* out) {
@@ -1417,12 +1615,7 @@ void emu_oam_write(Emu* e, const uint16_t* src) {
 
 /* armGBA's renderer asks this of each sprite as it lists them (its
  * RenderHooks, third_party/armgba src/video/render.h). */
-static bool sprite_hidden(void* context, uint16_t a, uint16_t b, uint16_t attrC) {
-	const ArmCore* c = context;
-	for (int i = 0; i < c->nExact; ++i) {
-		if (c->exact[i][0] == a && c->exact[i][1] == b && c->exact[i][2] == attrC) return !c->exactKeep;
-	}
-	if (!c->nRules && !c->keepOnly) return false;
+static bool rules_match(const ArmCore* c, uint16_t a, uint16_t b, uint16_t attrC) {
 	int x = (int) ((uint32_t) (b & 0x1FF) << 23) >> 23;
 	int y = a & 0xFF;
 	if (y >= 160) y -= 256;
@@ -1436,14 +1629,101 @@ static bool sprite_hidden(void* context, uint16_t a, uint16_t b, uint16_t attrC)
 		if (x >= r->x0 && x <= r->x1 && y >= r->y0 && y <= r->y1 && tile >= r->tileMin && tile <= r->tileMax &&
 		    (r->prio < 0 || prio == r->prio) && (!r->palMask || (r->palMask >> pal & 1)) &&
 		    (!r->tagged || (!transformed && (b & r->tagged))) && (!r->shapes || (r->shapes >> (shape * 4 + size) & 1))) {
-			return !c->keepOnly;
+			return true;
 		}
 	}
-	return c->keepOnly;
+	return false;
+}
+
+/* emu_hide_grouped (src/emu.c's hide_grouped; Lady Sia): of the sprites the
+ * rules match, only those in the run of matching sprites at the start of the
+ * table, or in a run of sprites in one palette that all match, are hidden.
+ * armGBA tells the frontend the table as the game picture's sprites are listed
+ * (spriteTable, on the thread that draws), then asks about each listed sprite
+ * in order (sprite_hidden): the list and its choices are made here as armGBA
+ * will list them, kept per thread. */
+static const uint8_t objSizes[16][2] = { { 8, 8 }, { 16, 16 }, { 32, 32 }, { 64, 64 }, { 16, 8 }, { 32, 8 }, { 32, 16 }, { 64, 32 },
+	                                     { 8, 16 }, { 8, 32 }, { 16, 32 }, { 32, 64 }, { 0, 0 }, { 0, 0 }, { 0, 0 }, { 0, 0 } };
+static _Thread_local struct {
+	const ArmCore* core;
+	int n, next;
+	uint16_t attr[128][3];
+	bool hide[128];
+} groups;
+
+static void sprite_table(void* context, const uint8_t* oam) {
+	const ArmCore* c = context;
+	groups.core = c;
+	groups.n = groups.next = 0;
+	if (!c->grouped || c->keepOnly || !c->nRules) return;
+	bool match[128];
+	int pal[128];
+	/* the sprites armGBA lists (render.c cleanOam): switched on, and on the
+	 * screen's lines and columns */
+	for (int i = 0; i < 128; ++i) {
+		uint16_t a = (uint16_t) (oam[i * 8] | oam[i * 8 + 1] << 8);
+		uint16_t b = (uint16_t) (oam[i * 8 + 2] | oam[i * 8 + 3] << 8);
+		uint16_t cc = (uint16_t) (oam[i * 8 + 4] | oam[i * 8 + 5] << 8);
+		bool transformed = (a >> 8) & 1;
+		if (!transformed && ((a >> 9) & 1)) continue;
+		int w = objSizes[((a >> 14) & 3) * 4 + ((b >> 14) & 3)][0];
+		int h = objSizes[((a >> 14) & 3) * 4 + ((b >> 14) & 3)][1];
+		int x = (int) ((uint32_t) (b & 0x1FF) << 23) >> 23;
+		if (transformed) {
+			int dbl = (a >> 9) & 1;
+			w <<= dbl;
+			h <<= dbl;
+		} else if (x < 0 && x + w < 0) {
+			continue;
+		}
+		if ((a & 0xFF) >= 160 && (a & 0xFF) + h < 228) continue;
+		if ((b & 0x1FF) >= 240 && (b & 0x1FF) + w < 512) continue;
+		int k = groups.n++;
+		groups.attr[k][0] = a, groups.attr[k][1] = b, groups.attr[k][2] = cc;
+		match[k] = rules_match(c, a, b, cc);
+		pal[k] = cc >> 12;
+		groups.hide[k] = false;
+	}
+	/* the run at the start */
+	for (int k = 0; k < groups.n && match[k]; ++k) groups.hide[k] = true;
+	/* runs in one palette */
+	for (int k = 0; k < groups.n;) {
+		int j = k;
+		bool all = true;
+		for (; j < groups.n && pal[j] == pal[k]; ++j) all = all && match[j];
+		for (int m = k; m < j; ++m) groups.hide[m] = groups.hide[m] || all;
+		k = j;
+	}
+}
+
+/* armGBA's renderer asks this of each sprite as it lists them (its
+ * RenderHooks, third_party/armgba src/video/render.h). */
+static bool sprite_hidden(void* context, uint16_t a, uint16_t b, uint16_t attrC) {
+	const ArmCore* c = context;
+	for (int i = 0; i < c->nExact; ++i) {
+		if (c->exact[i][0] == a && c->exact[i][1] == b && c->exact[i][2] == attrC) return !c->exactKeep;
+	}
+	if (!c->nRules && !c->keepOnly) return false;
+	if (c->grouped && !c->keepOnly && groups.core == c) {
+		/* the next listed sprite: found from where the last one was */
+		for (int t = 0; t < groups.n; ++t) {
+			int k = (groups.next + t) % groups.n;
+			if (groups.attr[k][0] == a && groups.attr[k][1] == b && groups.attr[k][2] == attrC) {
+				groups.next = k + 1;
+				return groups.hide[k];
+			}
+		}
+	}
+	return rules_match(c, a, b, attrC) != c->keepOnly;
 }
 
 static void hooks_changed(ArmCore* c) {
 	c->hooks.hideSprite = c->nRules || c->keepOnly || c->nExact ? sprite_hidden : NULL;
+	if (c->markFrame) {
+		c->hooks.secondHideLayers = c->hooks.hideLayers;
+		c->hooks.secondHideSprite = c->hooks.hideSprite;
+	}
+	c->hooks.spriteTable = c->grouped ? sprite_table : NULL;
 	c->hooks.context = c;
 	++c->hooks.generation;
 }
@@ -1468,6 +1748,23 @@ void emu_hide_sprites(Emu* e, const SpriteRule* rules, int n) {
 	hooks_changed(c);
 }
 
+/* The opposite: only the sprites that match one of the rules are drawn (Lady
+ * Sia's pause screen, src/emu.c). */
+void emu_keep_sprites(Emu* e, const SpriteRule* rules, int n) {
+	ArmCore* c = AC(e);
+	c->nRules = n > 12 ? 12 : n;
+	if (c->nRules) memcpy(c->rules, rules, sizeof(*rules) * c->nRules);
+	c->keepOnly = n > 0;
+	hooks_changed(c);
+}
+
+/* A matching sprite hidden only as part of a group (sprite_table above). */
+void emu_hide_grouped(Emu* e, bool on) {
+	ArmCore* c = AC(e);
+	c->grouped = on;
+	hooks_changed(c);
+}
+
 void emu_hide_exact(Emu* e, const uint16_t (*attrs)[3], int n) {
 	ArmCore* c = AC(e);
 	c->nExact = n > 128 ? 128 : n;
@@ -1485,6 +1782,13 @@ void emu_hide_exact(Emu* e, const uint16_t (*attrs)[3], int n) {
  * are decided line by line (split_line, called by whichever thread draws)
  * from the video registers as that line has them. */
 #define HUD_CLEAR_555 0x0401
+/* (the 3DS draws on threads a frame late: renderThreadStart's late) */
+#ifdef __3DS__
+#define SPLIT_LATE 1
+#else
+/* (GBADS_RENDER_LATE=1, tests: drawn a frame late as the console's game is) */
+#define SPLIT_LATE (getenv("GBADS_RENDER_LATE") != NULL) /* (the HUD split is the game's own core's) */
+#endif
 
 static struct {
 	ArmCore* core; /* the core it's on (NULL: not installed) */
@@ -1502,6 +1806,8 @@ static struct {
 	unsigned grabMask;
 	uint16_t grabCnt;
 	bool grabbing, grabbed;
+	uint32_t grabNeed; /* (hooks.secondCount the grab's picture has) */
+	uint32_t hudNeed; /* (and the first HUD picture after the split changed) */
 	int prioBelow;
 	unsigned keepBgs;
 	unsigned baseMask, memLayers;
@@ -1514,6 +1820,47 @@ static struct {
 	int bandY0, bandY1;
 	uint16_t frame[GBA_W * GBA_H];
 } split;
+
+/* Logo extraction (src/logo.c) tells the logo's layer from the backdrop
+ * behind it by comparing two pictures' pixels as a whole: on mGBA their
+ * fourth byte holds the software renderer's flags (FLAG_UNWRITTEN, 0xFC, on
+ * the backdrop; the layer, priority and blend targets where a layer drew),
+ * so a layer's pixel the colour of the backdrop (Sonic Advance 3's white
+ * glow on a white backdrop) still counts as the logo's. armGBA's picture
+ * has no such byte: with this on, each frame is drawn a second time (the
+ * renderer's second picture, the same layers and sprites) on a backdrop of
+ * MARK_555, never brightened or darkened, and the pixels left that colour
+ * there get 0xFC in their fourth byte, the others 0xFF. Not for a core with
+ * the HUD split (it has the second picture). On for the few frames a
+ * capture compares (src/logo.c, profiles.c's aw_clean...), as it doubles
+ * the drawing. */
+void emu_mark_backdrop(Emu* e, bool on) {
+	ArmCore* c = AC(e);
+	if (!c || split.core == c || on == (c->markFrame != NULL)) return;
+	if (on) {
+		c->markFrame = malloc(GBA_W * GBA_H * sizeof(uint16_t));
+		if (!c->markFrame) return;
+		for (int i = 0; i < GBA_W * GBA_H; ++i) c->markFrame[i] = MARK_555;
+		c->hooks.secondFrame = c->markFrame;
+		c->hooks.secondBackdropSet = true;
+		c->hooks.secondBackdrop = MARK_555;
+		c->hooks.secondEvery = 1;
+		c->hooks.second = true;
+	} else {
+		c->hooks.second = false;
+		c->hooks.secondBackdropSet = false;
+		c->hooks.secondFrame = NULL;
+		c->hooks.secondHideSprite = NULL;
+		c->hooks.secondHideLayers = 0;
+		free(c->markFrame);
+		c->markFrame = NULL;
+		/* (the second picture's machine, about 770 KiB, given back: hooks
+		 * set again on this core and its render thread's copies) */
+		renderSetHooks(c->gba, NULL);
+		renderSetHooks(c->gba, &c->hooks);
+	}
+	hooks_changed(c);
+}
 static uint32_t gameRegAddr;
 static uint16_t gameRegBits;
 static bool bandOn, bandCopy, bandWatch;
@@ -1660,6 +2007,10 @@ static void split_line(void* context, struct RenderLine* l) {
 	if (y == 0 && split.grabBuf) {
 		if (split.grabCnt) split.grabMask = bgs_with_cnt(io, split.grabCnt);
 		/* this frame: the grab layers into grabBuf, no sprites */
+		/* (the first picture drawn wholly from here: drawn late, the one
+		 * finished before this frame may not be counted yet; set once, as
+		 * this line comes round each frame until the grab has its picture) */
+		if (!split.grabbing) split.grabNeed = split.core->hooks.secondCount + (SPLIT_LATE ? 2 : 1);
 		split.grabbing = true;
 		split_layers(split.grabMask, false);
 	}
@@ -1702,9 +2053,17 @@ static void split_line(void* context, struct RenderLine* l) {
  * buffer (or, once, the grab's). */
 static void split_frame(ArmCore* c) {
 	if (c != split.core || !split.active) return;
+	/* (only a new picture: armGBA draws it one frame in hooks.secondEvery;
+	 * a grab waits for the next one) */
+	static uint32_t lastCount;
+	if (c->hooks.secondEvery > 1 && c->hooks.secondCount == lastCount) return;
+	lastCount = c->hooks.secondCount;
+	if (split.grabbing && c->hooks.secondEvery > 1 && (int32_t) (c->hooks.secondCount - split.grabNeed) < 0) return;
+	if (!split.grabbing && (int32_t) (c->hooks.secondCount - split.hudNeed) < 0) return;
 	if (bandOn) lastBandY0 = split.bandY0, lastBandY1 = split.bandY1;
 	uint32_t* dst = split.grabbing ? split.grabBuf : split.hudBuf;
 	if (dst) widen_picture(dst, split.frame);
+	if (!split.grabbing) hudFresh = true;
 	if (split.grabbing) {
 		split.grabbing = false;
 		split.grabBuf = NULL;
@@ -1741,8 +2100,29 @@ bool emu_hud_split(Emu* e, bool on, unsigned bgMask, const SpriteRule* objs, int
 		c->hooks.secondBackdropSet = true;
 		c->hooks.secondBackdrop = HUD_CLEAR_555;
 		c->hooks.line = split_line;
+#ifdef __3DS__
+		/* the HUD drawn 12 times a second, not 60: the second screen
+		 * doesn't need more, and the game does the time (the HUD's
+		 * picture took the drawing thread about 3 ms a frame, and GBA DS
+		 * 4.4 ms to make it and 3.2 to upload it each time). One frame in
+		 * an odd number: F-Zero draws its map every other frame, and with
+		 * 6 every picture fell on the same kind (after a state was loaded,
+		 * the frames without it: no map) */
+		c->hooks.secondEvery = 5;
+#else
+		/* (GBADS_SECOND_EVERY=6, tests: as the console draws it) */
+		if (getenv("GBADS_SECOND_EVERY")) c->hooks.secondEvery = (uint8_t) atoi(getenv("GBADS_SECOND_EVERY"));
+#endif
 	}
 	if (split.core != c) return false;
+	if (on && (!split.active || bgMask != split.bgMask) && (SPLIT_LATE || c->hooks.secondEvery > 1)) {
+		/* (switched on, or other layers: a picture drawn before this, or
+		 * being drawn, isn't the HUD's; until the first drawn wholly after,
+		 * the HUD is clear) */
+		split.hudNeed = c->hooks.secondCount + (SPLIT_LATE ? 2 : 1);
+		uint32_t clear = colour_8888(HUD_CLEAR_555);
+		for (int i = 0; hud && i < GBA_W * GBA_H; ++i) hud[i] = clear;
+	}
 	split.hudBuf = hud;
 	split.bgMask = split.baseMask = bgMask;
 	split.lineHud = split.lineGame = bgMask;
@@ -1839,6 +2219,21 @@ void emu_hud_grab(Emu* e, unsigned bgMask, uint32_t* buf) {
 void emu_hud_grab_cnt(Emu* e, uint16_t cnt, uint32_t* buf) {
 	emu_hud_grab(e, 0, buf);
 	split.grabCnt = cnt;
+}
+
+int emu_frame_lag(Emu* e) {
+	ArmCore* c = AC(e);
+	return c && c->late ? 1 : 0;
+}
+
+int emu_hud_every(void) {
+	return split.core && split.core->hooks.secondEvery > 1 ? split.core->hooks.secondEvery : 1;
+}
+
+bool emu_hud_fresh(void) {
+	bool f = hudFresh || !split.core || split.core->hooks.secondEvery <= 1;
+	hudFresh = false;
+	return f;
 }
 
 bool emu_hud_grabbed(void) {

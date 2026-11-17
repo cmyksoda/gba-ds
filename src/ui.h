@@ -29,6 +29,10 @@ typedef struct {
 	 * whole screen, or with screen_match the part matching the other
 	 * screen (local coordinates) */
 	SDL_Rect pic;
+	/* where in pic a picture that doesn't fill it goes, top to bottom:
+	 * 0 centred, 1 against pic's bottom, -1 against its top
+	 * (screen_placement = gap: each screen's against the other) */
+	int align;
 } Screen;
 
 extern View views[2];
@@ -70,8 +74,11 @@ uint64_t ui_ticks(void);
 /* The two screens' shapes differ (by more than 2%): screen_match can do
  * something. */
 bool ui_screens_differ(void);
-/* Works out the screens' picture areas again (screen_match changed). */
+/* Works out the screens' picture areas again (screen_match or
+ * screen_placement changed). */
 void ui_layout_pictures(void);
+/* the left stick as the D-pad (issue #57); on in the menus whatever the setting */
+void ui_stick_dpad(bool on);
 /* The pixels per inch of each screen, if known (0 if not). */
 float ui_screen_ppi(int screen);
 int ui_touch_screen(void); /* index into screens[] */
@@ -107,6 +114,8 @@ void ui_sync_view(int view);
 void ui_script_restart(const char* path);
 void ui_logo_prepare(const Config* c, const char* rom);
 bool ui_script_quiet(void);
+/* an input script is running (tests: frame-exact, so nothing may run frames on its own) */
+bool ui_scripted(void);
 /* The refresh rate (Hz) of the display a view is on; 0 if unknown. */
 double ui_display_hz(int view);
 
@@ -162,6 +171,14 @@ uint32_t ui_color_correct(uint32_t abgr);
 bool ui_color_correct_on(void);
 /* Filled box with rounded corners (radius in pixels). */
 void ui_fill_round(int screen, SDL_Rect local, SDL_Color c, int radius);
+/* the menus' buttons: a raised key (see ui.c), in the dark or light theme */
+enum { KEY_PLAIN, KEY_SEL, KEY_LIT };
+void ui_key(int screen, SDL_Rect local, int radius, int state);
+void ui_theme(int light);
+void ui_brightness(int top, int bottom); /* each screen's brightness, 20..100: dims this app's picture only */
+bool ui_theme_light(void);
+SDL_Color ui_key_ink(void);          /* text and icons on a key */
+SDL_Color ui_key_mid(int state);    /* about the key's colour (for cut-outs) */
 /* Text in Jost (textfont.h: TF_BOLD for labels and headings, TF_BODY for
  * longer text), any UTF-8 string, capitals capPx tall and centred on cy.
  * align: -1 starts at x, 0 is centred on x, 1 ends at x. */
