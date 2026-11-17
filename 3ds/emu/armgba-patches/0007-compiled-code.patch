@@ -1,15 +1,8 @@
-From 5604e9759c1d7496d228b98953f297295e279b18 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: armGBA speedups <none@example.invalid>
-Date: Tue, 17 Nov 2026 12:49:05 -0500
-Subject: [PATCH] armGBA: events inside blocks spill only the cycle counter and
- prefetch base, r0-r4 move with one LDM or STM, the idle head test is a
- bitmask
+Date: Tue, 17 Nov 2026 15:00:00 -0500
+Subject: armGBA: events inside blocks spill only the cycle counter and prefetch base, r0-r4 move with one LDM or STM, the idle head test is a bitmask
 
----
- src/cpu/a32/backend.c  | 49 +++++++++++++++++++++++++++++++-----------
- src/cpu/jit-internal.h |  6 ++++++
- src/cpu/jit.c          | 29 +++++++++++++++++++++++--
- 3 files changed, 70 insertions(+), 14 deletions(-)
 
 diff --git a/src/cpu/a32/backend.c b/src/cpu/a32/backend.c
 index 6138b1c..d1fdf04 100644
@@ -235,6 +228,3 @@ index 308c894..13c74f8 100644
  	jit->lookup = calloc(LOOKUP_SIZE, sizeof(*jit->lookup));
  	if (!jit->lookup) {
  		jitDeinit(gba);
--- 
-2.56.0
-
