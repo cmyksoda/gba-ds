@@ -255,8 +255,8 @@ frame in armGBA itself. What cut it, with the same pictures, RAM and sound
 - `make PGO=use` builds armGBA's files from a profile (`3ds/emu/pgo/`, made
   with `PGO=gen` and `3ds/emu/pgo-train.py`; BUILD must stay relative, GCC
   names the files by it): about 6% less to emulate in Azahar. A function
-  whose code changed since the profile was made loses its profile: redo it
-  after armGBA changes. `HOTCOLD=1` also keeps the profile's hot code together.
+  whose code or line number changed since the profile was made loses its
+  profile (`PGO_QUIET=` lists them): redo it after armGBA changes. `HOTCOLD=1` also keeps the profile's hot code together.
 
 ## Speed (Yoshi's Island)
 

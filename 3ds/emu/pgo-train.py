@@ -8,7 +8,7 @@
 2. This script: plays the stretches of pgo/training.txt (bench_jobs.py's probe syntax) in Azahar; the app writes its
    .gcda files to /gcov on the SD card when the bench ends; they replace pgo/*.gcda.
 3. make PGO=use then builds armGBA's files from them. Redo all of it after armGBA's code changes (a function whose
-   code changed loses its profile; the rest keeps it)."""
+   code or line number changed loses its profile, so anything above it in its file counts; make PGO_QUIET= shows them)."""
 import glob
 import os
 import re
