@@ -1,12 +1,11 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: armGBA speedups <none@example.invalid>
-Date: Tue, 17 Nov 2026 14:00:00 -0500
-Subject: armGBA: CPU writes to IE, IF and IME take effect at once when no event is
- due, and a 32-bit write to IE and IF is one write
+Date: Tue, 17 Nov 2026 15:00:00 -0500
+Subject: armGBA: CPU writes to IE, IF and IME take effect at once when no event is due
 
 
 diff --git a/src/gba.c b/src/gba.c
-index 8929a84..3b6a858 100644
+index cdc790d..812412f 100644
 --- a/src/gba.c
 +++ b/src/gba.c
 @@ -65,23 +65,40 @@ static void lineChanged(struct GBA* gba, void* context, uint32_t late) {
@@ -109,7 +108,7 @@ index 8929a84..3b6a858 100644
  
  // The key interrupt: any of the chosen keys, or all of them at once, as KEYCNT says. It is checked
 diff --git a/src/gba.h b/src/gba.h
-index c66ea35..d5bf1d2 100644
+index c5022e5..1811112 100644
 --- a/src/gba.h
 +++ b/src/gba.h
 @@ -912,6 +912,7 @@ void gbaIrqSync(struct GBA*);
@@ -121,10 +120,10 @@ index c66ea35..d5bf1d2 100644
  void gbaTestKeypadIrq(struct GBA*, uint32_t late);
  void gbaHalt(struct GBA*);
 diff --git a/src/io/io.c b/src/io/io.c
-index 60eb922..25ef67a 100644
+index 3dfe632..cd7f0c1 100644
 --- a/src/io/io.c
 +++ b/src/io/io.c
-@@ -488,6 +488,9 @@ void ioWrite32(struct GBA* gba, uint32_t address, uint32_t value) {
+@@ -496,6 +496,9 @@ void ioWrite32(struct GBA* gba, uint32_t address, uint32_t value) {
  	case 0x0D8:
  		value = dmaWriteDest(gba, 3, value);
  		break;
@@ -132,5 +131,5 @@ index 60eb922..25ef67a 100644
 +		gbaWriteIeIf(gba, value & 0xFFFF, value >> 16);
 +		return;
  	default:
- 		ioWrite(gba, address, value & 0xFFFF);
- 		ioWrite(gba, address | 2, value >> 16);
+ 		if (isVideoRegister(address) && isVideoRegister(address | 2)) {
+ 			// No time passes between the halves, so the second sync would find nothing to do.
