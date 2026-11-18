@@ -1,14 +1,14 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: armGBA speedups <none@example.invalid>
-Date: Wed, 18 Nov 2026 03:00:00 -0500
+Date: Wed, 18 Nov 2026 10:00:00 -0500
 Subject: armGBA: MSR, MRS and the BIOS's return from an exception run without the exact CPU, and an IRQ is taken alone so compiled code runs the vector's branch
 
 
 diff --git a/src/cpu/a32/backend.c b/src/cpu/a32/backend.c
-index 22cd230..f8c5233 100644
+index 842bbbf..ef362d7 100644
 --- a/src/cpu/a32/backend.c
 +++ b/src/cpu/a32/backend.c
-@@ -2423,11 +2423,11 @@ static void emitSwap(struct Compiler* c, const struct Inst* in) {
+@@ -2433,11 +2433,11 @@ static void emitSwap(struct Compiler* c, const struct Inst* in) {
  static void emitMrs(struct Compiler* c, const struct Inst* in) {
  	struct Emitter* e = &c->e;
  	clobberFlags(c);
@@ -25,7 +25,7 @@ index 22cd230..f8c5233 100644
  	}
  	storeGuest(c, in->rd, R0);
  }
-@@ -2476,6 +2476,62 @@ static void emitSystem(struct Compiler* c, const struct Inst* in) {
+@@ -2486,6 +2486,62 @@ static void emitSystem(struct Compiler* c, const struct Inst* in) {
  	aB(e, C_AL, c->jit->exitRoutine);
  }
  
@@ -88,7 +88,7 @@ index 22cd230..f8c5233 100644
  // BX to a register.
  static void emitBx(struct Compiler* c, const struct Inst* in) {
  	loadGuest(c, R0, in->rm, in);
-@@ -2516,7 +2572,13 @@ static void emitBody(struct Compiler* c, const struct Inst* in, int index) {
+@@ -2526,7 +2582,13 @@ static void emitBody(struct Compiler* c, const struct Inst* in, int index) {
  		return;
  	}
  	if (jitSystem(in)) {
@@ -146,10 +146,10 @@ index 84cf00f..438291f 100644
 +	cpuWriteCpsr(gba, cpuMsrCpsr(cpu, value, packed));
  }
 diff --git a/src/cpu/jit-internal.h b/src/cpu/jit-internal.h
-index 3a9ce9b..adacae7 100644
+index 1b5399a..8390631 100644
 --- a/src/cpu/jit-internal.h
 +++ b/src/cpu/jit-internal.h
-@@ -552,6 +552,10 @@ uint32_t jitHelperExecute(struct GBA*, uint32_t opcode, uint32_t address);
+@@ -553,6 +553,10 @@ uint32_t jitHelperExecute(struct GBA*, uint32_t opcode, uint32_t address);
  // jitHelperSystem's return value for the exact CPU taking over at the next instruction.
  #define JIT_EXACT (~1u)
  uint32_t jitHelperSystem(struct GBA*, uint32_t opcode, uint32_t address);
@@ -161,10 +161,10 @@ index 3a9ce9b..adacae7 100644
  enum {
  	CAREFUL_RUN,
 diff --git a/src/cpu/jit.c b/src/cpu/jit.c
-index 13c74f8..2c95ff5 100644
+index a10812b..317d8e4 100644
 --- a/src/cpu/jit.c
 +++ b/src/cpu/jit.c
-@@ -1512,6 +1512,21 @@ static bool romEntryOk(struct GBA* gba, uint32_t pc, bool thumb) {
+@@ -1556,6 +1556,21 @@ static bool romEntryOk(struct GBA* gba, uint32_t pc, bool thumb) {
  	return gba->cpu.prefetching && p->head == pc + 2 * width && p->width == width && p->duty == duty && p->full == (thumb ? 8 : 4) * duty;
  }
  
@@ -186,7 +186,7 @@ index 13c74f8..2c95ff5 100644
  // Compiled code assumes the bus is as it leaves it: no DMA waiting or just finished, no IRQ to
  // take, the prefetch holding what memory holds, and the prefetch buffer as compiled for.
  static bool compiledMayRun(struct GBA* gba, uint32_t pc, bool thumb) {
-@@ -2044,10 +2059,15 @@ void jitRunLoop(struct GBA* gba) {
+@@ -2088,10 +2103,15 @@ void jitRunLoop(struct GBA* gba) {
  		}
  		jit->coldLeft = 0;
  		if (jit->steps || jit->stepping || !compiledMayRun(gba, pc, thumb)) {
@@ -202,7 +202,7 @@ index 13c74f8..2c95ff5 100644
  			stepInstruction(gba);
  			continue;
  		}
-@@ -2269,6 +2289,16 @@ bool jitSystem(const struct Inst* in) {
+@@ -2313,6 +2333,16 @@ bool jitSystem(const struct Inst* in) {
  	}
  }
  
@@ -219,7 +219,7 @@ index 13c74f8..2c95ff5 100644
  // Returns the key of the block at the PC in the CPU state.
  static uint32_t currentKey(struct GBA* gba) {
  	bool thumb = gba->cpu.cpsr & PSR_T;
-@@ -2360,6 +2390,39 @@ uint32_t jitHelperSystem(struct GBA* gba, uint32_t opcode, uint32_t address) {
+@@ -2404,6 +2434,39 @@ uint32_t jitHelperSystem(struct GBA* gba, uint32_t opcode, uint32_t address) {
  	return currentKey(gba);
  }
  
@@ -259,7 +259,7 @@ index 13c74f8..2c95ff5 100644
  // Whether compiled code can go on at pc after the exact CPU ran. Like compiledMayRun, except that
  // cartridge code may be entered just after a data access stopped the prefetch buffer, which
  // compiled code then restarts. Also sets up what compiled code relies on.
-@@ -2506,7 +2569,11 @@ uint32_t jitHelperStepOne(struct GBA* gba, uint32_t pc) {
+@@ -2550,7 +2613,11 @@ uint32_t jitHelperStepOne(struct GBA* gba, uint32_t pc) {
  		}
  		timingResetNextEvent(gba);
  		++jit->carefulSteps;
@@ -287,10 +287,10 @@ index 6b4ccc7..1e085d1 100644
 +	takeIrq(gba);
 +}
 diff --git a/src/cpu/x64/backend.c b/src/cpu/x64/backend.c
-index 9e7a7d4..e8c5845 100644
+index 54bf112..0411f37 100644
 --- a/src/cpu/x64/backend.c
 +++ b/src/cpu/x64/backend.c
-@@ -2310,6 +2310,51 @@ static void emitSystem(struct Compiler* c, const struct Inst* in) {
+@@ -2319,6 +2319,51 @@ static void emitSystem(struct Compiler* c, const struct Inst* in) {
  	xJmp(e, c->jit->exitRoutine);
  }
  
@@ -342,7 +342,7 @@ index 9e7a7d4..e8c5845 100644
  // BX to a register.
  static void emitBx(struct Compiler* c, const struct Inst* in) {
  	loadGuest(c, RAX, in->rm, in);
-@@ -2350,7 +2395,13 @@ static void emitBody(struct Compiler* c, const struct Inst* in, int index) {
+@@ -2359,7 +2404,13 @@ static void emitBody(struct Compiler* c, const struct Inst* in, int index) {
  		return;
  	}
  	if (jitSystem(in)) {
