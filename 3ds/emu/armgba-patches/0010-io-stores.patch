@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: armGBA speedups <none@example.invalid>
-Date: Wed, 18 Nov 2026 01:00:00 -0500
+Date: Wed, 18 Nov 2026 10:00:00 -0500
 Subject: armGBA: IE writes that flip the H-blank bit take effect at once, and I/O stores have their own slow path
 
 
