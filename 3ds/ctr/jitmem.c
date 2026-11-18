@@ -272,7 +272,7 @@ bool renderThreadHostCreate(pthread_t* thread, void* (*function)(void*), void* a
 	return true;
 }
 
-// A second render worker (gba-ds.cfg render_workers = 2, the default; armgba_render_workers sets it for
+// A second render worker (gba-ds.cfg render_workers = 2; armgba_render_workers sets it for
 // one run): on the fourth core, at the game thread's priority, a step above the hidden copy's thread
 // there. Each worker then draws every other line.
 bool renderThreadHostCreateSecond(pthread_t* thread, void* (*function)(void*), void* argument) {

@@ -70,11 +70,12 @@ The CIA takes armGBA-3DS's `.rsf` (the 80 MB mode, among others), so `make cia` 
   four-letter code in its header: a translation or romhack that kept the
   original's code is listed (and treated as that release), one with a code of
   its own only with `show_all = 1`, on one screen.
-- The game is drawn on two threads (the third and fourth cores, each every
-  other line), as armGBA-3DS does, one frame behind the game, so the game
-  never waits for the drawing. `render_workers = 1` in `gba-ds.cfg` draws
-  it on one. The fourth core is also the hidden copy's (map captures), a
-  step below.
+- The game is drawn on a thread of its own on the third core, one frame behind the game, so the game never
+  waits for the drawing, and that thread also widens each picture for the screen (`armgba_picture_thread = 1`
+  and `render_workers = 1`, the defaults: on a New 2DS XL they beat two drawing threads without it in 46 of
+  53 games' slowest stretches). `render_workers = 2` in `gba-ds.cfg` draws every other line on the fourth
+  core too, as armGBA-3DS does; `armgba_picture_thread = 0` widens on the game thread. The fourth core is
+  also the hidden copy's (map captures).
 - The HUD pictures on the bottom screen (Mario Kart, Crash Nitro Kart, Sonic Advance, V-Rally 3 and the
   like) can be a backdrop with the HUD's pieces laid over it by the GPU, so a frame sends only the rows
   that changed (`hud_layers = 1`, the default on the 3DS); `hud_layers = 0` makes it a third at a time over
