@@ -4605,6 +4605,7 @@ static void hud_put_pieces(const HudMove* moves, const HudMove* movesIn, int mos
 		const HudMove* mv = &moves[m];
 		if (!moving[m] || !mv->toGame) continue;
 		int dx = moveDx[m], dy = moveDy[m], left = SDL_max(mv->x0, 0), right = SDL_min(mv->x1, GBA_W - 1) + 1;
+		if (left >= right) continue;
 		for (int y = SDL_max(mv->y0, 0); y <= SDL_min(mv->y1, GBA_H - 1); ++y) {
 			int ny = y + dy;
 			if (ny < 0 || ny >= GBA_H) continue;
