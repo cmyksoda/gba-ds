@@ -1033,6 +1033,7 @@ static SDL_Texture* hudFlatTex[2]; /* the layers flattened, where they can't be 
 static uint32_t hudOver[GBA_W * GBA_H];      /* the pieces as the textures have them: alpha 0 where nothing */
 static uint32_t hudOverBuild[GBA_W * GBA_H]; /* this frame's */
 static bool hudOverRow[GBA_H], hudOverUse[GBA_H]; /* rows of hudOver, of hudOverBuild with a piece in them */
+static int16_t hudOverSpan[GBA_H][2], hudBuildSpan[GBA_H][2]; /* the first and last pixel of a piece in those rows */
 static uint32_t hudMapPx[GBA_W * GBA_H], hudMapBuild[GBA_W * GBA_H]; /* the big map's box, rows hudMapTexW apart */
 static int hudMapTexW, hudMapTexH;
 static SDL_Rect hudMapSrc, hudMapDst; /* the map's part of hudMapTex, and its place on the canvas (w 0: no big map) */
@@ -4398,11 +4399,18 @@ static void hud_backdrop_band(const uint32_t* src, uint64_t key, size_t c0, size
 	else memcpy(hudCanvas + c0, src + c0, cn * 4);
 }
 
+/* Pieces from lo to hi are in hudOverBuild's row y (a stretch of pixels going to one row is told once) */
+static void hud_over_span(int y, int lo, int hi) {
+	if (y < 0) return;
+	if (!hudOverUse[y]) hudOverUse[y] = true, hudBuildSpan[y][0] = (int16_t) lo, hudBuildSpan[y][1] = (int16_t) hi;
+	else hudBuildSpan[y][0] = (int16_t) SDL_min(hudBuildSpan[y][0], lo), hudBuildSpan[y][1] = (int16_t) SDL_max(hudBuildSpan[y][1], hi);
+}
+
 /* A frame's pieces are made in hudOverBuild, from a clean sheet */
 static void hud_over_begin(void) {
 	for (int y = 0; y < GBA_H; ++y) {
 		if (!hudOverUse[y]) continue;
-		memset(&hudOverBuild[y * GBA_W], 0, GBA_W * 4);
+		memset(&hudOverBuild[y * GBA_W + hudBuildSpan[y][0]], 0, (size_t) (hudBuildSpan[y][1] - hudBuildSpan[y][0] + 1) * 4);
 		hudOverUse[y] = false;
 	}
 }
@@ -4411,9 +4419,14 @@ static void hud_over_begin(void) {
 static void hud_over_end(void) {
 	for (int y = 0; y < GBA_H; ++y) {
 		if (!hudOverUse[y] && !hudOverRow[y]) continue;
+		/* (only the stretch either row has pieces in: the rest is clear in both) */
+		int x0 = GBA_W, x1 = -1;
+		if (hudOverRow[y]) x0 = hudOverSpan[y][0], x1 = hudOverSpan[y][1];
+		if (hudOverUse[y]) x0 = SDL_min(x0, hudBuildSpan[y][0]), x1 = SDL_max(x1, hudBuildSpan[y][1]);
 		hudOverRow[y] = hudOverUse[y];
-		if (!memcmp(&hudOver[y * GBA_W], &hudOverBuild[y * GBA_W], GBA_W * 4)) continue;
-		memcpy(&hudOver[y * GBA_W], &hudOverBuild[y * GBA_W], GBA_W * 4);
+		hudOverSpan[y][0] = hudBuildSpan[y][0], hudOverSpan[y][1] = hudBuildSpan[y][1];
+		if (!memcmp(&hudOver[y * GBA_W + x0], &hudOverBuild[y * GBA_W + x0], (size_t) (x1 - x0 + 1) * 4)) continue;
+		memcpy(&hudOver[y * GBA_W + x0], &hudOverBuild[y * GBA_W + x0], (size_t) (x1 - x0 + 1) * 4);
 		for (int v = 0; v < 2; ++v) hudOld[v].overStrips |= 1u << (y / 8);
 		++hudLayerGen;
 	}
@@ -4860,14 +4873,31 @@ static void hud_compose(int band) {
 			}
 			if (!may) continue;
 		}
+		if (h->rows && y >= h->rows) continue; /* (hud.rows: the game draws the rest) */
+		/* (the moving boxes this row meets, and where the sign and the map are not shown) */
+		int rowBox[HUD_MOVES], nRowBox = 0;
+		for (int k = 0; k < nMoving; ++k) {
+			const HudMove* mv = &moves[movingIdx[k]];
+			if (y >= mv->y0 && y <= mv->y1) rowBox[nRowBox++] = movingIdx[k];
+		}
+		bool signRow = sign && y >= h->sign.y0 && y <= h->sign.y1, mapRow = bigMap && y >= by0 && y <= by1;
+		int runRow = -1, runLo = 0, runHi = 0;
 		for (int x = 0; (x = next_lit(&hudPx[y * GBA_W], x, GBA_W - 1, clear)) < GBA_W; ++x) {
+			if (signRow && x >= h->sign.x0 && x <= h->sign.x1) {
+				x = h->sign.x1;
+				continue;
+			}
+			if (mapRow && x >= bx0 && x <= bx1) {
+				x = bx1;
+				continue;
+			}
 			uint32_t c = hudPx[y * GBA_W + x];
 			int nx = x, ny = y;
 			bool toGame = false;
-			for (int k = 0; k < nMoving; ++k) {
-				int m = movingIdx[k];
+			for (int k = 0; k < nRowBox; ++k) {
+				int m = rowBox[k];
 				const HudMove* mv = &moves[m];
-				if (x >= mv->x0 && x <= mv->x1 && y >= mv->y0 && y <= mv->y1) {
+				if (x >= mv->x0 && x <= mv->x1) {
 					nx = x + moveDx[m], ny = y + moveDy[m];
 					toGame = mv->toGame;
 					break;
@@ -4875,20 +4905,19 @@ static void hud_compose(int band) {
 			}
 			if (nx < 0 || nx >= GBA_W || ny < 0 || ny >= GBA_H) continue;
 			if (toGame) continue; /* (on the game picture, above) */
-			if (h->rows && y >= h->rows) continue; /* (hud.rows: the game draws the rest) */
-			if (sign && x >= h->sign.x0 && x <= h->sign.x1 && y >= h->sign.y0 && y <= h->sign.y1) continue;
-			if (bigMap && x >= bx0 && x <= bx1 && y >= by0 && y <= by1) continue;
 			ny += titleDy;
 			if (ny >= GBA_H) continue;
 			if (lay) {
 				hudOverBuild[ny * GBA_W + nx] = c | 0xFF000000;
-				hudOverUse[ny] = true;
+				if (ny != runRow) hud_over_span(runRow, runLo, runHi), runRow = ny, runLo = runHi = nx;
+				else runLo = SDL_min(runLo, nx), runHi = SDL_max(runHi, nx);
 				continue;
 			}
 			if (ny * 2 < cr0 || ny * 2 >= cr1) continue;
 			uint32_t* o = &hudCanvas[ny * 2 * HUD_CW + nx * 2];
 			o[0] = o[1] = o[HUD_CW] = o[HUD_CW + 1] = c;
 		}
+		if (lay) hud_over_span(runRow, runLo, runHi);
 	}
 	if (lay) hud_over_end();
 	if (bigMap) {
