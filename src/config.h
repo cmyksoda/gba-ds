@@ -144,7 +144,7 @@ typedef struct Config {
 	char bench[512];     /* bench: a test bench's jobs file (bench.c) */
 	int benchCheck;      /* bench_check: a bench job logs checksums of the picture and memory every N frames (0: off) */
 	/* the armGBA core's own switches (armgba_save, armgba_stats...): config_apply_core_env hands them to the core */
-	char armgba[10][12];
+	char armgba[11][12];
 } Config;
 
 void config_defaults(Config* c);
