@@ -4571,9 +4571,9 @@ static void hud_draw(int s) {
 static int hud_band_y0(int band) { return band * HUD_BAND_ROWS; }
 static int hud_band_n(int band) { return band == 2 ? HUD_CH - 2 * HUD_BAND_ROWS : HUD_BAND_ROWS; }
 
-/* The pieces that go back onto the game picture, from a list made once for each HUD picture and set of moves (the
- * game picture is new every frame, the core makes a HUD picture one frame in five). */
-#define HUD_PUT_MAX 4096
+/* The pieces that go back onto the game picture, from a list of runs made once for each HUD picture and set of moves
+ * (the game picture is new every frame, the core makes a HUD picture one frame in five). */
+#define HUD_PUT_MAX 2048
 static void hud_put_pieces(const HudMove* moves, const HudMove* movesIn, int mosV, uint32_t clear, const bool* moving, const int* moveDx,
                            const int* moveDy) {
 	static struct {
@@ -4582,7 +4582,7 @@ static void hud_put_pieces(const HudMove* moves, const HudMove* movesIn, int mos
 		int mosV, n;
 		bool ok, moving[HUD_MOVES];
 		int dx[HUD_MOVES], dy[HUD_MOVES];
-		struct { uint16_t x, y; uint32_t c; } px[HUD_PUT_MAX];
+		struct { uint16_t x, y, n; uint32_t src; } run[HUD_PUT_MAX]; /* n pixels from hudPx[src] to the picture's row y, from x */
 	} put;
 	bool any = false;
 	for (int m = 0; moves && m < HUD_MOVES; ++m) any |= moving[m] && moves[m].toGame;
@@ -4590,7 +4590,13 @@ static void hud_put_pieces(const HudMove* moves, const HudMove* movesIn, int mos
 	bool same = put.ok && put.pic == hudPicSerial && put.in == movesIn && put.mosV == mosV && put.clear == clear &&
 	            !memcmp(put.moving, moving, sizeof(put.moving)) && !memcmp(put.dx, moveDx, sizeof(put.dx)) && !memcmp(put.dy, moveDy, sizeof(put.dy));
 	if (same) {
-		for (int i = 0; i < put.n; ++i) emu_fb_put(&emu, put.px[i].x, put.px[i].y, put.px[i].c);
+		for (int i = 0; i < put.n; ++i) {
+#ifdef COLOR_16_BIT
+			for (int k = 0; k < put.run[i].n; ++k) emu_fb_put(&emu, put.run[i].x + k, put.run[i].y, hudPx[put.run[i].src + k]);
+#else
+			memcpy(&emu.fb[put.run[i].y * GBA_W + put.run[i].x], &hudPx[put.run[i].src], (size_t) put.run[i].n * 4);
+#endif
+		}
 		return;
 	}
 	put.pic = hudPicSerial, put.in = movesIn, put.mosV = mosV, put.clear = clear, put.n = 0, put.ok = true;
@@ -4598,21 +4604,38 @@ static void hud_put_pieces(const HudMove* moves, const HudMove* movesIn, int mos
 	for (int m = 0; m < HUD_MOVES; ++m) {
 		const HudMove* mv = &moves[m];
 		if (!moving[m] || !mv->toGame) continue;
+		int dx = moveDx[m], dy = moveDy[m], left = SDL_max(mv->x0, 0), right = SDL_min(mv->x1, GBA_W - 1) + 1;
 		for (int y = SDL_max(mv->y0, 0); y <= SDL_min(mv->y1, GBA_H - 1); ++y) {
-			for (int x = SDL_max(mv->x0, 0); x <= SDL_min(mv->x1, GBA_W - 1); ++x) {
-				uint32_t c = hudPx[y * GBA_W + x];
-				if ((c & 0xFFFFFF) == clear) continue;
-				bool earlier = false;
-				for (int k = 0; k < m && !earlier; ++k) {
-					const HudMove* o = &moves[k];
-					earlier = moving[k] && x >= o->x0 && x <= o->x1 && y >= o->y0 && y <= o->y1;
+			int ny = y + dy;
+			if (ny < 0 || ny >= GBA_H) continue;
+			/* (an earlier piece's box owns its pixels: where one meets this row, the row is cut at its edges) */
+			const HudMove* before[HUD_MOVES];
+			int nBefore = 0, cuts[2 * HUD_MOVES + 2], nCuts = 0;
+			cuts[nCuts++] = left, cuts[nCuts++] = right;
+			for (int k = 0; k < m; ++k) {
+				const HudMove* o = &moves[k];
+				if (!moving[k] || y < o->y0 || y > o->y1) continue;
+				before[nBefore++] = o;
+				cuts[nCuts++] = SDL_clamp(o->x0, left, right), cuts[nCuts++] = SDL_clamp(o->x1 + 1, left, right);
+			}
+			for (int i = 1; i < nCuts; ++i) {
+				int v = cuts[i], j = i;
+				for (; j > 0 && cuts[j - 1] > v; --j) cuts[j] = cuts[j - 1];
+				cuts[j] = v;
+			}
+			const uint32_t* row = &hudPx[y * GBA_W];
+			for (int seg = 0; seg + 1 < nCuts; ++seg) {
+				bool taken = false;
+				for (int k = 0; k < nBefore && !taken; ++k) taken = cuts[seg] >= before[k]->x0 && cuts[seg] <= before[k]->x1;
+				int lo = SDL_max(cuts[seg], -dx), hi = SDL_min(cuts[seg + 1], GBA_W - dx);
+				for (int x = lo; !taken && (x = next_lit(row, x, hi - 1, clear)) < hi;) {
+					int e = x + 1;
+					while (e < hi && (row[e] & 0xFFFFFF) != clear) ++e;
+					for (int i = x; i < e; ++i) emu_fb_put(&emu, i + dx, ny, row[i]); /* back onto the game picture */
+					if (put.n < HUD_PUT_MAX) put.run[put.n++] = (typeof(put.run[0])) { (uint16_t) (x + dx), (uint16_t) ny, (uint16_t) (e - x), (uint32_t) (y * GBA_W + x) };
+					else put.ok = false; /* (too many to list: made again each frame) */
+					x = e;
 				}
-				if (earlier) continue;
-				int nx = x + moveDx[m], ny = y + moveDy[m];
-				if (nx < 0 || nx >= GBA_W || ny < 0 || ny >= GBA_H) continue;
-				emu_fb_put(&emu, nx, ny, c); /* back onto the game picture */
-				if (put.n < HUD_PUT_MAX) put.px[put.n++] = (typeof(put.px[0])) { (uint16_t) nx, (uint16_t) ny, c };
-				else put.ok = false; /* (too many to list: made again each frame) */
 			}
 		}
 	}
@@ -4881,43 +4904,57 @@ static void hud_compose(int band) {
 			if (y >= mv->y0 && y <= mv->y1) rowBox[nRowBox++] = movingIdx[k];
 		}
 		bool signRow = sign && y >= h->sign.y0 && y <= h->sign.y1, mapRow = bigMap && y >= by0 && y <= by1;
-		int runRow = -1, runLo = 0, runHi = 0;
-		for (int x = 0; (x = next_lit(&hudPx[y * GBA_W], x, GBA_W - 1, clear)) < GBA_W; ++x) {
-			if (signRow && x >= h->sign.x0 && x <= h->sign.x1) {
-				x = h->sign.x1;
-				continue;
-			}
-			if (mapRow && x >= bx0 && x <= bx1) {
-				x = bx1;
-				continue;
-			}
-			uint32_t c = hudPx[y * GBA_W + x];
-			int nx = x, ny = y;
+		/* (the row cut where a box starts or ends: each stretch has one box, or none, and is placed as it is) */
+		int cuts[2 * HUD_MOVES + 6], nCuts = 0;
+		cuts[nCuts++] = 0;
+		for (int k = 0; k < nRowBox; ++k) cuts[nCuts++] = moves[rowBox[k]].x0, cuts[nCuts++] = moves[rowBox[k]].x1 + 1;
+		if (signRow) cuts[nCuts++] = h->sign.x0, cuts[nCuts++] = h->sign.x1 + 1;
+		if (mapRow) cuts[nCuts++] = bx0, cuts[nCuts++] = bx1 + 1;
+		cuts[nCuts++] = GBA_W;
+		for (int i = 1; i < nCuts; ++i) {
+			int v = cuts[i], j = i;
+			for (; j > 0 && cuts[j - 1] > v; --j) cuts[j] = cuts[j - 1];
+			cuts[j] = v;
+		}
+		const uint32_t* row = &hudPx[y * GBA_W];
+		for (int seg = 0; seg + 1 < nCuts; ++seg) {
+			int a = SDL_clamp(cuts[seg], 0, GBA_W), b = SDL_clamp(cuts[seg + 1], 0, GBA_W);
+			if (a >= b) continue;
+			if (signRow && a >= h->sign.x0 && a <= h->sign.x1) continue;
+			if (mapRow && a >= bx0 && a <= bx1) continue;
+			int dx = 0, dy = 0;
 			bool toGame = false;
 			for (int k = 0; k < nRowBox; ++k) {
-				int m = rowBox[k];
-				const HudMove* mv = &moves[m];
-				if (x >= mv->x0 && x <= mv->x1) {
-					nx = x + moveDx[m], ny = y + moveDy[m];
-					toGame = mv->toGame;
+				const HudMove* mv = &moves[rowBox[k]];
+				if (a >= mv->x0 && a <= mv->x1) {
+					dx = moveDx[rowBox[k]], dy = moveDy[rowBox[k]];
+					toGame = mv->toGame; /* (on the game picture, above) */
 					break;
 				}
 			}
-			if (nx < 0 || nx >= GBA_W || ny < 0 || ny >= GBA_H) continue;
-			if (toGame) continue; /* (on the game picture, above) */
+			int ny = y + dy;
+			if (toGame || ny < 0 || ny >= GBA_H) continue;
 			ny += titleDy;
-			if (ny >= GBA_H) continue;
-			if (lay) {
-				hudOverBuild[ny * GBA_W + nx] = c | 0xFF000000;
-				if (ny != runRow) hud_over_span(runRow, runLo, runHi), runRow = ny, runLo = runHi = nx;
-				else runLo = SDL_min(runLo, nx), runHi = SDL_max(runHi, nx);
-				continue;
+			int lo = SDL_max(a, -dx), hi = SDL_min(b, GBA_W - dx);
+			if (ny >= GBA_H || lo >= hi || (!lay && (ny * 2 < cr0 || ny * 2 >= cr1))) continue;
+			int first = -1, last = 0;
+			for (int x = lo; (x = next_lit(row, x, hi - 1, clear)) < hi;) {
+				int e = x + 1;
+				while (e < hi && (row[e] & 0xFFFFFF) != clear) ++e;
+				for (int i = x; i < e; ++i) {
+					if (lay) {
+						hudOverBuild[ny * GBA_W + i + dx] = row[i] | 0xFF000000;
+					} else {
+						uint32_t* o = &hudCanvas[ny * 2 * HUD_CW + (i + dx) * 2];
+						o[0] = o[1] = o[HUD_CW] = o[HUD_CW + 1] = row[i];
+					}
+				}
+				if (first < 0) first = x;
+				last = e - 1;
+				x = e;
 			}
-			if (ny * 2 < cr0 || ny * 2 >= cr1) continue;
-			uint32_t* o = &hudCanvas[ny * 2 * HUD_CW + nx * 2];
-			o[0] = o[1] = o[HUD_CW] = o[HUD_CW + 1] = c;
+			if (lay && first >= 0) hud_over_span(ny, first + dx, last + dx);
 		}
-		if (lay) hud_over_span(runRow, runLo, runHi);
 	}
 	if (lay) hud_over_end();
 	if (bigMap) {
