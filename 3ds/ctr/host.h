@@ -63,6 +63,10 @@ void host_log_flush(void);
 void host_line_put(const char* line, void (*write)(const char* line));
 /* lines_first: the writer thread at the game's priority instead of a step below it (above the hidden copy's thread). */
 void host_set_lines_first(bool on);
+/* capture_priority: the hidden copy's thread this many steps below the other app threads (3DS), so the line writer, the
+ * save writer and the like run as soon as they're ready; called by the thread itself at its start. */
+void host_set_capture_priority(int steps);
+void host_capture_thread_lower(void);
 void host_line_drain(void);
 void host_line_stop(void);
 double host_line_worst_ms(void);

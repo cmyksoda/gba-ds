@@ -21,5 +21,7 @@ void bench_frame(uint64_t frame, double emuMs, double drawMs, double screenMs, b
  * memory (two builds that print the same lines ran the same game the same way). */
 struct Emu;
 void bench_check(struct Emu* e, uint64_t frame);
+/* A frame that spent 100 ms or more before emulating: a line saying where in the top of the loop it went. */
+void bench_pre_note(uint64_t frame, double preMs, double inputMs, double midMs, double healthMs, double restMs);
 
 #endif

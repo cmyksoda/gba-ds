@@ -168,6 +168,15 @@ void bench_frame(uint64_t frame, double emuMs, double drawMs, double screenMs, b
 	}
 }
 
+void bench_pre_note(uint64_t frame, double preMs, double inputMs, double midMs, double healthMs, double restMs) {
+	if (!active || preMs < 100) return;
+	char note[320];
+	snprintf(note, sizeof(note),
+	         "bench %s pre stall at frame %llu: %.0f ms before emulating = events and buttons %.0f + pointer and keys up to the health report %.0f + health report %.0f + the rest %.0f",
+	         jobId, (unsigned long long) frame, preMs, inputMs, midMs, healthMs, restMs);
+	put(note);
+}
+
 static uint32_t fnv_words(uint32_t h, const uint32_t* w, size_t n) {
 	for (size_t i = 0; i < n; ++i) h = (h ^ w[i]) * 16777619u;
 	return h;

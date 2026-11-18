@@ -273,6 +273,22 @@ static void* writer_main(void* arg) {
 }
 
 static bool linesFirst;
+static int captureSteps;
+
+void host_set_capture_priority(int steps) {
+	captureSteps = steps < 0 ? 0 : steps > 8 ? 8 : steps;
+}
+
+/* The thread was made a step below the game; a thread that has the core keeps it until it waits, so every other core 3
+ * thread of the same priority (the writers) has to wait out a whole capture. */
+void host_capture_thread_lower(void) {
+	if (!captureSteps || !isNew3ds()) return;
+	s32 priority = 0x30;
+	svcGetThreadPriority(&priority, CUR_THREAD_HANDLE);
+	if (priority + captureSteps > 0x3F) priority = 0x3F - captureSteps;
+	Result rc = svcSetThreadPriority(CUR_THREAD_HANDLE, priority + captureSteps);
+	logLine("hidden copy: priority %d, %d step(s) lower (%08lX)", (int) (priority + captureSteps), captureSteps, (unsigned long) rc);
+}
 
 /* Above the hidden copy's thread: a writer that waits out its long blind stretches lets the ring fill, and the game then
  * waits for room. Core 3 also has the second render worker at this priority: read video wait. New 3DS only (the game's core). */

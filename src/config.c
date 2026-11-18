@@ -228,6 +228,8 @@ static bool set_option(Config* c, const char* key, const char* val) {
 	INT("rewind_seconds", rewindSeconds)
 	INT("map_interval", mapInterval)
 	INT("capture_throttle", captureThrottle)
+	INT("capture_priority", capturePriority)
+	INT("capture_duty", captureDuty)
 	CORE("capture_core", captureCore)
 	CORE("ahead_core", aheadCore)
 	CORE("side_core", sideCore)
