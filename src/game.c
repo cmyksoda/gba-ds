@@ -5395,7 +5395,10 @@ static void update_hud(void) {
 		 * renderer) */
 		static bool splitting;
 		bool some = mask || nObjs || h->band;
-		if (some || splitting) emu_hud_split(&emu, race && some, mask, objs, nObjs, hudPx);
+		if (some || splitting) {
+			emu_hud_split(&emu, race && some, mask, objs, nObjs, hudPx);
+			++hudPicSerial; /* (it clears hudPx when the split goes on or its layers change, with no new picture) */
+		}
 		splitting = race && some;
 		if (race && some) emu_hud_copy(&emu, cardObjs); /* (the card stays on the game screen too) */
 		hudCard = card;
