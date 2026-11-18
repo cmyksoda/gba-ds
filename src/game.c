@@ -4262,6 +4262,7 @@ static const uint32_t* card_logo(void) {
 static uint32_t mapHeld[GBA_W * GBA_H];
 static bool mapHeldOk;
 static bool hudPicNew = true; /* (this frame's HUD picture is a new one: emu_hud_fresh) */
+static uint32_t hudPicSerial; /* (goes up with each new HUD picture, so what was found in hudPx is kept till then) */
 static int mapUndrawn; /* frames since the map was last drawn */
 static uint16_t mapDots[32][3];
 static int nMapDots;
@@ -4557,6 +4558,53 @@ static void hud_draw(int s) {
 static int hud_band_y0(int band) { return band * HUD_BAND_ROWS; }
 static int hud_band_n(int band) { return band == 2 ? HUD_CH - 2 * HUD_BAND_ROWS : HUD_BAND_ROWS; }
 
+/* The pieces that go back onto the game picture, from a list made once for each HUD picture and set of moves (the
+ * game picture is new every frame, the core makes a HUD picture one frame in five). */
+#define HUD_PUT_MAX 4096
+static void hud_put_pieces(const HudMove* moves, const HudMove* movesIn, int mosV, uint32_t clear, const bool* moving, const int* moveDx,
+                           const int* moveDy) {
+	static struct {
+		uint32_t pic, clear;
+		const HudMove* in;
+		int mosV, n;
+		bool ok, moving[HUD_MOVES];
+		int dx[HUD_MOVES], dy[HUD_MOVES];
+		struct { uint16_t x, y; uint32_t c; } px[HUD_PUT_MAX];
+	} put;
+	bool any = false;
+	for (int m = 0; moves && m < HUD_MOVES; ++m) any |= moving[m] && moves[m].toGame;
+	if (!any) return;
+	bool same = put.ok && put.pic == hudPicSerial && put.in == movesIn && put.mosV == mosV && put.clear == clear &&
+	            !memcmp(put.moving, moving, sizeof(put.moving)) && !memcmp(put.dx, moveDx, sizeof(put.dx)) && !memcmp(put.dy, moveDy, sizeof(put.dy));
+	if (same) {
+		for (int i = 0; i < put.n; ++i) emu_fb_put(&emu, put.px[i].x, put.px[i].y, put.px[i].c);
+		return;
+	}
+	put.pic = hudPicSerial, put.in = movesIn, put.mosV = mosV, put.clear = clear, put.n = 0, put.ok = true;
+	memcpy(put.moving, moving, sizeof(put.moving)), memcpy(put.dx, moveDx, sizeof(put.dx)), memcpy(put.dy, moveDy, sizeof(put.dy));
+	for (int m = 0; m < HUD_MOVES; ++m) {
+		const HudMove* mv = &moves[m];
+		if (!moving[m] || !mv->toGame) continue;
+		for (int y = SDL_max(mv->y0, 0); y <= SDL_min(mv->y1, GBA_H - 1); ++y) {
+			for (int x = SDL_max(mv->x0, 0); x <= SDL_min(mv->x1, GBA_W - 1); ++x) {
+				uint32_t c = hudPx[y * GBA_W + x];
+				if ((c & 0xFFFFFF) == clear) continue;
+				bool earlier = false;
+				for (int k = 0; k < m && !earlier; ++k) {
+					const HudMove* o = &moves[k];
+					earlier = moving[k] && x >= o->x0 && x <= o->x1 && y >= o->y0 && y <= o->y1;
+				}
+				if (earlier) continue;
+				int nx = x + moveDx[m], ny = y + moveDy[m];
+				if (nx < 0 || nx >= GBA_W || ny < 0 || ny >= GBA_H) continue;
+				emu_fb_put(&emu, nx, ny, c); /* back onto the game picture */
+				if (put.n < HUD_PUT_MAX) put.px[put.n++] = (typeof(put.px[0])) { (uint16_t) nx, (uint16_t) ny, c };
+				else put.ok = false; /* (too many to list: made again each frame) */
+			}
+		}
+	}
+}
+
 static void hud_compose(int band) {
 	const typeof(hudProf->hud)* h = &hudProf->hud;
 	uint32_t clear = emu_hud_clear();
@@ -4738,17 +4786,34 @@ static void hud_compose(int band) {
 	int moveDx[HUD_MOVES] = { 0 }, moveDy[HUD_MOVES] = { 0 };
 	bool moving[HUD_MOVES] = { false };
 	int pieceLo[HUD_MOVES] = { 0 }, pieceTop[HUD_MOVES] = { 0 };
+	/* where each piece's lit pixels lie, found once for each HUD picture, as the core makes one in five frames */
+	static struct {
+		uint32_t pic, clear;
+		const HudMove* in;
+		int mosV;
+		bool have[HUD_MOVES];
+		int lo[HUD_MOVES], hi[HUD_MOVES], top[HUD_MOVES], bot[HUD_MOVES];
+	} found;
+	if (found.pic != hudPicSerial || found.in != movesIn || found.mosV != mosV || found.clear != clear) {
+		memset(&found, 0, sizeof(found));
+		found.pic = hudPicSerial, found.in = movesIn, found.mosV = mosV, found.clear = clear;
+	}
 	for (int m = 0; moves && m < HUD_MOVES; ++m) {
 		const HudMove* mv = &moves[m];
 		if (!mv->how && !mv->vhow && !mv->toGame) continue;
 		if (mv->ifTile && !oam_has_tile(mv->ifTile)) continue;
-		int lo = GBA_W, hi = -1, top = GBA_H, bot = -1;
-		for (int y = SDL_max(mv->y0, 0); y <= SDL_min(mv->y1, GBA_H - 1); ++y) {
-			int x1 = SDL_min(mv->x1, GBA_W - 1);
-			for (int x = SDL_max(mv->x0, 0); (x = next_lit(&hudPx[y * GBA_W], x, x1, clear)) <= x1; ++x) {
-				lo = SDL_min(lo, x), hi = SDL_max(hi, x), top = SDL_min(top, y), bot = SDL_max(bot, y);
+		if (!found.have[m]) {
+			int lo = GBA_W, hi = -1, top = GBA_H, bot = -1;
+			for (int y = SDL_max(mv->y0, 0); y <= SDL_min(mv->y1, GBA_H - 1); ++y) {
+				int x1 = SDL_min(mv->x1, GBA_W - 1);
+				for (int x = SDL_max(mv->x0, 0); (x = next_lit(&hudPx[y * GBA_W], x, x1, clear)) <= x1; ++x) {
+					lo = SDL_min(lo, x), hi = SDL_max(hi, x), top = SDL_min(top, y), bot = SDL_max(bot, y);
+				}
 			}
+			found.have[m] = true;
+			found.lo[m] = lo, found.hi[m] = hi, found.top[m] = top, found.bot[m] = bot;
 		}
+		int lo = found.lo[m], hi = found.hi[m], top = found.top[m], bot = found.bot[m];
 		if (hi < 0) continue;
 		moving[m] = true;
 		moveDx[m] = mv->how == 'C' ? mv->x - (lo + hi) / 2 : mv->how == 'R' ? mv->x - hi : mv->how == 'L' ? mv->x - lo : 0;
@@ -4774,28 +4839,7 @@ static void hud_compose(int band) {
 		}
 		if (ubot >= 0) moveDx[m] = ulo - pieceLo[m], moveDy[m] = ubot + 1 + mv->under - pieceTop[m];
 	}
-	/* the pieces that go back onto the game picture: every frame (it's a
-	 * new picture each frame), from their own boxes (a pixel belongs to the
-	 * first moving piece whose box has it) */
-	for (int m = 0; moves && m < HUD_MOVES; ++m) {
-		const HudMove* mv = &moves[m];
-		if (!moving[m] || !mv->toGame) continue;
-		for (int y = SDL_max(mv->y0, 0); y <= SDL_min(mv->y1, GBA_H - 1); ++y) {
-			for (int x = SDL_max(mv->x0, 0); x <= SDL_min(mv->x1, GBA_W - 1); ++x) {
-				uint32_t c = hudPx[y * GBA_W + x];
-				if ((c & 0xFFFFFF) == clear) continue;
-				bool earlier = false;
-				for (int k = 0; k < m && !earlier; ++k) {
-					const HudMove* o = &moves[k];
-					earlier = moving[k] && x >= o->x0 && x <= o->x1 && y >= o->y0 && y <= o->y1;
-				}
-				if (earlier) continue;
-				int nx = x + moveDx[m], ny = y + moveDy[m];
-				if (nx < 0 || nx >= GBA_W || ny < 0 || ny >= GBA_H) continue;
-				emu_fb_put(&emu, nx, ny, c); /* back onto the game picture */
-			}
-		}
-	}
+	hud_put_pieces(moves, movesIn, mosV, clear, moving, moveDx, moveDy);
 	if (!canvas) return;
 	if (lay) hud_over_begin();
 	int movingIdx[HUD_MOVES], nMoving = 0; /* (the pieces that move, to look through for each pixel) */
@@ -5196,6 +5240,7 @@ static void update_hud(void) {
 			 * from: armGBA on the 3DS draws the HUD one frame in five) */
 			bool fresh = emu_hud_fresh();
 			hudPicNew = fresh;
+			hudPicSerial += fresh;
 			if (hudLayered) {
 				/* (the layers kept as they are between new pictures; the pieces that go on the game screen every frame) */
 				hud_compose(fresh || grabbed || !hudShown || hudFrames <= 3 ? HB_ALL : HB_NONE);
