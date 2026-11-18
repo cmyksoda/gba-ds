@@ -5,7 +5,7 @@ Subject: armGBA: MSR, MRS and the BIOS's return from an exception run without th
 
 
 diff --git a/src/cpu/a32/backend.c b/src/cpu/a32/backend.c
-index 22cd230..54e5a42 100644
+index 22cd230..f8c5233 100644
 --- a/src/cpu/a32/backend.c
 +++ b/src/cpu/a32/backend.c
 @@ -2423,11 +2423,11 @@ static void emitSwap(struct Compiler* c, const struct Inst* in) {
@@ -25,7 +25,7 @@ index 22cd230..54e5a42 100644
  	}
  	storeGuest(c, in->rd, R0);
  }
-@@ -2476,6 +2476,60 @@ static void emitSystem(struct Compiler* c, const struct Inst* in) {
+@@ -2476,6 +2476,62 @@ static void emitSystem(struct Compiler* c, const struct Inst* in) {
  	aB(e, C_AL, c->jit->exitRoutine);
  }
  
@@ -33,7 +33,9 @@ index 22cd230..54e5a42 100644
 +// cycles, and a flag field's new flags are taken from the operand.
 +static void emitMsr(struct Compiler* c, const struct Inst* in) {
 +	struct Emitter* e = &c->e;
-+	if (!in->op2.isImm && in->op2.rm == 15) {
++	// A banked register may change under the operand with the mode, before its flags are read again.
++	bool const banked = !in->op2.isImm && in->op2.rm >= 8 && !in->spsr && in->fieldMask == 0xFF0000FF;
++	if (!in->op2.isImm && (in->op2.rm == 15 || banked)) {
 +		emitSystem(c, in);
 +		return;
 +	}
@@ -86,7 +88,7 @@ index 22cd230..54e5a42 100644
  // BX to a register.
  static void emitBx(struct Compiler* c, const struct Inst* in) {
  	loadGuest(c, R0, in->rm, in);
-@@ -2516,7 +2570,13 @@ static void emitBody(struct Compiler* c, const struct Inst* in, int index) {
+@@ -2516,7 +2572,13 @@ static void emitBody(struct Compiler* c, const struct Inst* in, int index) {
  		return;
  	}
  	if (jitSystem(in)) {
