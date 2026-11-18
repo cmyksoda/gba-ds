@@ -70,7 +70,9 @@ void config_defaults(Config* c) {
 	c->tallLive = false; /* (Pinball's live view runs two more copies of the game, two frames each, every frame) */
 	c->threadedVideo = true;
 	c->hudLayers = true;
-	c->renderWorkers = 2; /* (timed on a New 3DS: Mario Kart's races faster on two) */
+	/* (one worker that also widens the picture beat two without it in 46 of 53 games' slowest stretches on a New 2DS XL) */
+	c->renderWorkers = 1;
+	strcpy(c->armgba[9], "1"); /* armgba_picture_thread */
 #else
 	c->renderWorkers = 1;
 #endif
