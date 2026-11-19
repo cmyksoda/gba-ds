@@ -224,14 +224,27 @@ static const devoptab_t logDevice = {
 };
 
 /* (the lock is held) Lines the ring had no room for, in the order they came. */
-static void spill_move(void) {
+/* (returns the moved nodes for the caller to free after unlocking: free waits on the malloc lock, which the hidden copy
+ * holds while it compiles, and a writer stuck holding lg.lock behind it on core 3 stalls the game's next log write) */
+static Spilled* spill_move(void) {
+	Spilled* spent = NULL;
 	while (lg.spillHead && lg.used + 2 + lg.spillHead->n <= RING) {
 		Spilled* s = lg.spillHead;
 		lg.spillHead = s->next;
 		if (!lg.spillHead) lg.spillTail = NULL;
 		--lg.spilledNow;
 		ring_add(REC_LINE, s->text, s->n);
+		s->next = spent;
+		spent = s;
+	}
+	return spent;
+}
+
+static void spill_free(Spilled* s) {
+	while (s) {
+		Spilled* next = s->next;
 		free(s);
+		s = next;
 	}
 }
 
@@ -240,10 +253,11 @@ static void* writer_main(void* arg) {
 	static char rec[REC_MAX + 1];
 	for (;;) {
 		LightLock_Lock(&lg.lock);
-		spill_move();
+		Spilled* spent = spill_move();
 		if (!lg.used) {
 			bool quit = lg.quit;
 			LightLock_Unlock(&lg.lock);
+			spill_free(spent);
 			if (quit) break;
 			LightEvent_Wait(&lg.wake);
 			continue;
@@ -255,6 +269,7 @@ static void* writer_main(void* arg) {
 		u32 dropped = lg.dropped, lost = lg.lost;
 		lg.dropped = lg.lost = 0;
 		LightLock_Unlock(&lg.lock);
+		spill_free(spent);
 		if (dropped) fprintf(lg.file, "\n[log: %u write(s) dropped, the SD card was busy]\n", (unsigned) dropped);
 		if (lost && lg.file) fprintf(lg.file, "\n[bench: %u line(s) lost, the SD card was busy for minutes]\n", (unsigned) lost);
 		if (header & REC_LINE) {
