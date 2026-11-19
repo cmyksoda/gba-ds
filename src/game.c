@@ -8545,6 +8545,7 @@ static enum GameExit game_run_inner(Config* c, const char* rom, bool fromLibrary
 	host_set_video_wake(cfg->videoWake);
 	host_set_lines_first(cfg->linesFirst);
 	host_set_cpu_tile(cfg->cpuTile);
+	host_set_async_upload(cfg->asyncUpload);
 	emu_threaded_video(cfg->threadedVideo && isNew3ds()); /* (mGBA's drawing thread on the New 3DS's third core) */
 #else
 	emu_threaded_video(cfg->threadedVideo);

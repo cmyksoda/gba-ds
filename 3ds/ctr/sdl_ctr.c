@@ -271,6 +271,8 @@ struct SDL_Window {
 	SDL_Renderer* ren;
 };
 
+#define STAGE_SLOTS 3
+
 struct SDL_Texture {
 	C3D_Tex tex;
 	C3D_RenderTarget* target; /* SDL_TEXTUREACCESS_TARGET */
@@ -282,7 +284,11 @@ struct SDL_Texture {
 	bool linear; /* the filter the GPU texture is set to */
 	Uint8 r, g, b, a;
 	bool streaming; /* updated again and again: tiled by the GPU */
-	u32* stage;     /* its picture in linear memory for the GPU's tiling (its own: transfers queued in a frame run at its end) */
+	/* its picture in linear memory for the GPU's tiling: its own, and rows a frame's queued transfer is still to read are
+	 * not written again in that frame (transfers queued in a frame run at its end) */
+	u32* stage[STAGE_SLOTS];
+	unsigned stageFrame[STAGE_SLOTS]; /* the frame the copies queued from a slot belong to ... */
+	u64 stageBands[STAGE_SLOTS];      /* ... and the bands of 8 rows they read */
 };
 
 struct SDL_Renderer {
@@ -302,6 +308,7 @@ static bool videoUp;
 static SDL_Window windows[2];
 static SDL_Renderer renderers[2];
 static bool inFrame;
+static unsigned frameSerial; /* the frames begun: what a transfer queued in one is tagged with */
 static C3D_RenderTarget* bound; /* the target of the scene under way */
 static SDL_BlendMode boundBlend = SDL_BLENDMODE_BLEND;
 static bool scissorOn;
@@ -436,12 +443,16 @@ static void doomed_targets_free(void);
 /* The bench's "gpu wait": what the calls that can wait for the GPU take (C3D_FrameBegin and C3D_FrameEnd, a picture's
  * display transfer). */
 static atomic_uint gpuWait;
-#define GPU_WAIT(call) \
+static u64 waitBegin, waitEnd, waitCopy; /* (the same, by call: logged with the picture's upload) */
+#define GPU_WAIT_IN(part, call) \
 	do { \
 		u64 waitT0 = svcGetSystemTick(); \
 		call; \
-		atomic_fetch_add(&gpuWait, (unsigned) (svcGetSystemTick() - waitT0)); \
+		u64 waitDt = svcGetSystemTick() - waitT0; \
+		atomic_fetch_add(&gpuWait, (unsigned) waitDt); \
+		part += waitDt; \
 	} while (0)
+#define GPU_WAIT(call) GPU_WAIT_IN(waitCopy, call)
 
 uint32_t host_gpu_wait_ticks(void) {
 	return atomic_load(&gpuWait);
@@ -455,9 +466,10 @@ static void frame_begin(void) {
 		if (windows[i].ren) windows[i].ren->presented = false;
 	}
 	doomed_targets_free(); /* (citro3d stops the app if a render target goes inside a frame) */
-	GPU_WAIT(C3D_FrameBegin(sync ? C3D_FRAME_SYNCDRAW : 0));
+	GPU_WAIT_IN(waitBegin, C3D_FrameBegin(sync ? C3D_FRAME_SYNCDRAW : 0));
 	doomed_free();
 	inFrame = true;
+	++frameSerial;
 	bound = NULL;
 	boundBlend = SDL_BLENDMODE_BLEND;
 	scissorOn = false;
@@ -541,7 +553,7 @@ void SDL_RenderPresent(SDL_Renderer* r) {
 		C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
 		scissorOn = false;
 	}
-	GPU_WAIT(C3D_FrameEnd(0));
+	GPU_WAIT_IN(waitEnd, C3D_FrameEnd(0));
 	inFrame = false;
 	bound = NULL;
 	static int frames;
@@ -678,6 +690,7 @@ static int pow2(int v) {
 static u32* stages[2];
 static size_t stageSizes[2];
 static int stageNext;
+static unsigned stagesFrame[2]; /* the frame a copy was last queued from each, in a frame */
 
 /* Texel (x, y) of a w-wide texture in the GPU's layout: 8x8 tiles, row by
  * row, Morton order inside a tile; the first row is the picture's top. */
@@ -755,7 +768,9 @@ static SDL_Texture* doomed[256];
 static int nDoomed;
 
 static void texture_free(SDL_Texture* t) {
-	if (t->stage) linearFree(t->stage);
+	for (int i = 0; i < STAGE_SLOTS; ++i) {
+		if (t->stage[i]) linearFree(t->stage[i]);
+	}
 	if (t->target) C3D_RenderTargetDelete(t->target);
 	C3D_TexDelete(&t->tex);
 	free(t);
@@ -837,6 +852,15 @@ static bool gpu_tiling(void) {
 	return gpuTiling;
 }
 
+/* gba-ds.cfg's async_upload: a picture's copy to its texture is queued in the frame being drawn and runs on the GPU while
+ * the next frame emulates, where it was a call that waited for the copy engine (the same pixels, drawn at the same time). */
+static bool asyncUpload;
+static bool uploadSync; /* (the start's self-tests read the texture back at once) */
+
+void host_set_async_upload(bool on) {
+	asyncUpload = on;
+}
+
 static bool update_by_gpu(SDL_Texture* t, const void* pixels, int pitch, int y0, int rows);
 
 /* (TEST: the GPU's tiling against the CPU's, word for word, once) */
@@ -848,7 +872,9 @@ static void tiling_selftest(void) {
 	for (int y = 0; y < 160; ++y) {
 		for (int x = 0; x < 240; ++x) px[y * 240 + x] = (u32) x | (u32) y << 8 | 0x5A0000u | (u32) ((x * 7 + y) & 0xFF) << 24;
 	}
+	uploadSync = true;
 	update_by_gpu(t, px, 240 * 4, 0, 160);
+	uploadSync = false;
 	svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32) t->tex.data, t->tex.size);
 	const u32* got = t->tex.data;
 	int bad = 0, first = -1;
@@ -939,18 +965,39 @@ static bool update_by_cpu_tiled(SDL_Texture* t, const void* pixels, int pitch) {
 	return tile_into(t, pixels, pitch);
 }
 
+/* A stage of t's whose rows (bands of 8, a bit each) no transfer queued in the frame under way reads. */
+static u32* stage_take(SDL_Texture* t, size_t words, bool queued, u64 bands, int* slot) {
+	for (int i = 0; i < STAGE_SLOTS; ++i) {
+		const bool pending = queued && t->stage[i] && t->stageFrame[i] == frameSerial;
+		if (pending && (t->stageBands[i] & bands)) continue;
+		if (!t->stage[i]) {
+			t->stage[i] = linearAlloc(words * 4);
+			if (!t->stage[i]) continue;
+			memset(t->stage[i], 0, words * 4);
+		}
+		t->stageBands[i] = (pending ? t->stageBands[i] : 0) | bands;
+		*slot = i;
+		return t->stage[i];
+	}
+	return NULL;
+}
+
+static u64 upSwapTicks, upFlushTicks8, upXferTicks8;
+
 /* Rows y0 to y0 + rows - 1 (whole tile rows: multiples of 8) of the picture, from pixels, which starts at row y0. */
 static bool update_by_gpu(SDL_Texture* t, const void* pixels, int pitch, int y0, int rows) {
 	int w = t->w, h = t->h;
 	u32 texW = t->tex.width;
 	if (!gpu_tiling() || !t->streaming || t->tw != w || t->th != h || (w & 7) || (h & 7) || texW < 64) return false;
-	size_t need = (size_t) texW * (size_t) h;
-	if (!t->stage) {
-		t->stage = linearAlloc(need * 4);
-		if (!t->stage) return false;
-		memset(t->stage, 0, need * 4);
-	}
-	u32* stage = t->stage;
+	/* (begun first: that waits for the GPU to be done with the last frame, whose transfers read the stage) */
+	const bool async = asyncUpload && !uploadSync;
+	if (async) frame_begin();
+	int slot = 0;
+	const int band0 = y0 / 8, band1 = (y0 + rows - 1) / 8;
+	const u64 bands = band1 > 63 ? ~0ull : (2ull << band1) - (1ull << band0);
+	u32* stage = stage_take(t, (size_t) texW * (size_t) h, inFrame, bands, &slot);
+	if (!stage) return false;
+	u64 t0 = svcGetSystemTick();
 	bool argb = t->format == SDL_PIXELFORMAT_ARGB8888;
 	u32 alpha = t->format == SDL_PIXELFORMAT_XBGR8888 ? 0xFF000000u : 0;
 	for (int y = 0; y < rows; ++y) {
@@ -962,12 +1009,16 @@ static bool update_by_gpu(SDL_Texture* t, const void* pixels, int pitch, int y0,
 			for (int x = 0; x < w; ++x) dst[x] = __builtin_bswap32(src[x] | alpha);
 		}
 	}
+	u64 t1 = svcGetSystemTick();
 	cache_flush(stage + (size_t) y0 * texW, (size_t) rows * texW * 4);
+	u64 t2 = svcGetSystemTick();
+	if (inFrame) t->stageFrame[slot] = frameSerial;
 	/* (a strip of tile rows is a stretch of the texture's memory of its own) */
 	GPU_WAIT(C3D_SyncDisplayTransfer(stage + (size_t) y0 * texW, GX_BUFFER_DIM(texW, rows), (u32*) t->tex.data + (size_t) y0 * texW,
 	                                 GX_BUFFER_DIM(texW, rows),
 	                                 GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
 	                                     GX_TRANSFER_OUT_TILED(1)));
+	if (w == 240 && h == 160) upSwapTicks += t1 - t0, upFlushTicks8 += t2 - t1, upXferTicks8 += svcGetSystemTick() - t2;
 	return true;
 }
 
@@ -990,13 +1041,13 @@ static int update_565(SDL_Texture* t, const void* pixels, int pitch) {
 	}
 	const void* from = pixels;
 	if (pitch != (int) (texW * 2) || !osConvertVirtToPhys(pixels) || ((u32) pixels & 0x7F)) {
-		if (!t->stage) {
-			t->stage = linearAlloc((size_t) texW * h * 2);
-			if (!t->stage) return -1;
-			memset(t->stage, 0, (size_t) texW * h * 2);
+		if (!t->stage[0]) {
+			t->stage[0] = linearAlloc((size_t) texW * h * 2);
+			if (!t->stage[0]) return -1;
+			memset(t->stage[0], 0, (size_t) texW * h * 2);
 		}
-		for (int y = 0; y < h; ++y) memcpy((u16*) t->stage + (size_t) y * texW, (const u8*) pixels + (size_t) y * pitch, (size_t) w * 2);
-		from = t->stage;
+		for (int y = 0; y < h; ++y) memcpy((u16*) t->stage[0] + (size_t) y * texW, (const u8*) pixels + (size_t) y * pitch, (size_t) w * 2);
+		from = t->stage[0];
 	}
 	u64 flushT0 = svcGetSystemTick();
 	cache_flush(from, (size_t) texW * h * 2);
@@ -1023,7 +1074,10 @@ static void cpu_tile_selftest(void) {
 		SDL_Texture* b = SDL_CreateTexture(NULL, formats[k], SDL_TEXTUREACCESS_STREAMING, 240, 160);
 		u32 seed = 777 + (u32) k;
 		for (int i = 0; i < 240 * 160; ++i) px[i] = seed = seed * 1664525u + 1013904223u;
-		if (!a || !b || !update_by_gpu(a, px, 240 * 4, 0, 160) || !tile_into(b, px, 240 * 4)) {
+		uploadSync = true;
+		bool viaGpu = a && b && update_by_gpu(a, px, 240 * 4, 0, 160);
+		uploadSync = false;
+		if (!viaGpu || !tile_into(b, px, 240 * 4)) {
 			ok = false;
 		} else {
 			svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32) a->tex.data, a->tex.size);
@@ -1071,9 +1125,19 @@ int SDL_UpdateTexture(SDL_Texture* t, const SDL_Rect* rect, const void* pixels, 
 					logLine("textures: a 240x160 picture's upload %.3f ms on average (tiled by the CPU: %.3f ms of it, the rest the frame start and the cache flush)", up,
 					        (double) upTileTicks / upCount / CPU_TICKS_PER_MSEC);
 				} else {
-					logLine("textures: a 240x160 picture's upload %.3f ms on average (tiled by the GPU)", up);
+					const double per = (double) CPU_TICKS_PER_MSEC * upCount;
+					static unsigned lastSerial;
+					const unsigned frames = frameSerial - lastSerial;
+					lastSerial = frameSerial;
+					logLine("textures: a 240x160 picture's upload %.3f ms on average (tiled by the GPU, %s: swap %.3f, flush %.3f, transfer call %.3f)",
+					        up, asyncUpload ? "queued in the frame" : "waited for", (double) upSwapTicks / per, (double) upFlushTicks8 / per,
+					        (double) upXferTicks8 / per);
+					logLine("textures: the GPU calls by part (ms a frame, %u frames, %u 240x160 uploads): frame begin %.3f, frame end %.3f, picture copies %.3f",
+					        frames, (unsigned) upCount, (double) waitBegin / CPU_TICKS_PER_MSEC / (frames ? frames : 1),
+					        (double) waitEnd / CPU_TICKS_PER_MSEC / (frames ? frames : 1), (double) waitCopy / CPU_TICKS_PER_MSEC / (frames ? frames : 1));
+					waitBegin = waitEnd = waitCopy = 0;
 				}
-				upTicks = upTileTicks = 0, upCount = 0;
+				upTicks = upTileTicks = upSwapTicks = upFlushTicks8 = upXferTicks8 = 0, upCount = 0;
 			}
 		}
 		return done ? 0 : -1;
@@ -1094,21 +1158,23 @@ static int update_by_cpu(SDL_Texture* t, const SDL_Rect* rect, const void* pixel
 	bool opaque = t->format == SDL_PIXELFORMAT_XBGR8888;
 	if (step == 1 && rect->x == 0 && rect->w == t->tw && rect->y >= 0 && !(rect->y & 7) && rect->h > 0 && rect->y + rect->h <= t->th &&
 	    (!(rect->h & 7) || rect->y + rect->h == t->th) &&
-	    texW >= 64 && !inFrame) {
+	    texW >= 64) {
 		/* whole rows (whole bands of 8, or the picture's last): written
 		 * straight into a plain buffer in the GPU's colour order, and the
 		 * GPU's copy engine (the display transfer) lays them out in tiles,
-		 * which took the CPU 35 ns a pixel. Not inside a frame being drawn
-		 * (the transfer would land in its command list) */
+		 * which took the CPU 35 ns a pixel. In a frame being drawn the transfer is queued in it (async_upload; the
+		 * buffer is not written again in that frame), else by the slower way below */
+		if (asyncUpload && !uploadSync) frame_begin();
 		u32 h8 = (u32) (rect->h + 7) & ~7u;
 		size_t need = (size_t) texW * h8 * 4;
 		int k = stageNext;
-		if (need > stageSizes[k]) {
+		const bool usable = !inFrame || (asyncUpload && stagesFrame[k] != frameSerial);
+		if (usable && need > stageSizes[k]) {
 			if (stages[k]) linearFree(stages[k]);
 			stages[k] = linearAlloc(need);
 			stageSizes[k] = stages[k] ? need : 0;
 		}
-		u32* stage = stages[k];
+		u32* stage = usable ? stages[k] : NULL;
 		if (stage) stageNext ^= 1;
 		if (stage) {
 			for (int y = 0; y < rect->h; ++y) {
@@ -1119,7 +1185,8 @@ static int update_by_cpu(SDL_Texture* t, const SDL_Rect* rect, const void* pixel
 				else if (opaque) for (; x < t->tw; ++x) o[x] = __builtin_bswap32(src[x] | 0xFF000000u);
 				else for (; x < t->tw; ++x) o[x] = __builtin_bswap32(src[x]);
 			}
-			GSPGPU_FlushDataCache(stage, (u32) texW * (u32) rect->h * 4);
+			cache_flush(stage, (size_t) texW * (size_t) rect->h * 4);
+			if (inFrame) stagesFrame[k] = frameSerial;
 			C3D_SyncDisplayTransfer(stage, GX_BUFFER_DIM(texW, h8), out + (size_t) rect->y * texW, GX_BUFFER_DIM(texW, h8),
 			                        GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(1) | GX_TRANSFER_RAW_COPY(0) |
 			                        GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |

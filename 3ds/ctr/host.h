@@ -49,6 +49,8 @@ void host_set_cores(int side, int capture, int ahead, int video, int core1Percen
 void host_set_video_wake(int mask);
 /* gba-ds.cfg's cpu_tile: the CPU tiles a whole 240x160 picture (once its self-test against the GPU's tiling passes). */
 void host_set_cpu_tile(bool on);
+/* gba-ds.cfg's async_upload: a picture's copy to its texture runs on the GPU while the next frame emulates. */
+void host_set_async_upload(bool on);
 /* What to give host_next_thread_core for the map capture's thread, and for the Frame Buffer's (mGBA's
  * drawing thread on or not). */
 int host_capture_core(void);
