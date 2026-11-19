@@ -784,14 +784,18 @@ static void* worker(void* arg) {
 #ifdef __ANDROID__
 	android_pin_worker_thread("map capture");
 #endif
+#ifdef __3DS__
+	host_capture_thread_lower();
+#endif
 	pthread_mutex_lock(&mc->lock);
 	while (mc->running) {
 		if (!mc->pending) {
 			pthread_cond_wait(&mc->cond, &mc->lock);
 			continue;
 		}
-		mc->pending = false;
-		mc->busy = true;
+		/* (busy first: the game thread reads pending and then busy without the lock, and must never see both clear) */
+		__atomic_store_n(&mc->busy, true, __ATOMIC_SEQ_CST);
+		__atomic_store_n(&mc->pending, false, __ATOMIC_SEQ_CST);
 		pthread_mutex_unlock(&mc->lock);
 
 		const char* err = do_capture(mc, mc->snapshot);
@@ -800,7 +804,7 @@ static void* worker(void* arg) {
 		/* (called off: a newer one's wanted; neither a result nor a failure) */
 		if (!mc->cancel) publish(mc, err);
 		mc->cancel = false;
-		mc->busy = false;
+		__atomic_store_n(&mc->busy, false, __ATOMIC_SEQ_CST);
 	}
 	pthread_mutex_unlock(&mc->lock);
 	return NULL;
@@ -809,15 +813,16 @@ static void* worker(void* arg) {
 /* A capture's result, for mapcap_poll (lock held). */
 static void publish(MapCapture* mc, const char* err) {
 	size_t n = mc->cropPixels;
-	mc->lastError = err;
-	mc->failures = err ? mc->failures + 1 : 0;
+	/* (the game thread reads failures, then lastError, without the lock) */
+	__atomic_store_n(&mc->lastError, err, __ATOMIC_RELEASE);
+	__atomic_store_n(&mc->failures, err ? mc->failures + 1 : 0, __ATOMIC_RELEASE);
 	if (err) return;
 	for (int i = 0; i < mc->workFrames; ++i) {
 		memcpy(mc->published[i], mc->work[i], n * sizeof(uint32_t));
 	}
 	mc->pubFrames = mc->workFrames;
 	mc->pubStep = mc->workStep;
-	++mc->serial;
+	__atomic_store_n(&mc->serial, mc->serial + 1, __ATOMIC_RELEASE);
 }
 
 MapCapture* mapcap_create(const char* romPath, const char* gameCode, bool tight) {
@@ -1104,7 +1109,8 @@ bool mapcap_request(MapCapture* mc, Emu* live) {
 		publish(mc, do_capture(mc, mc->snapshot));
 		return true;
 	}
-	pthread_mutex_lock(&mc->lock);
+	/* (no waiting for the worker's lock: a miss is tried again next frame) */
+	if (pthread_mutex_trylock(&mc->lock) != 0) return false;
 	if (mc->busy || mc->pending) {
 		pthread_mutex_unlock(&mc->lock);
 		return false;
@@ -1112,7 +1118,7 @@ bool mapcap_request(MapCapture* mc, Emu* live) {
 	/* The worker only reads the snapshot after `pending` is set. */
 	bool ok = emu_state_save(live, mc->snapshot);
 	if (ok) {
-		mc->pending = true;
+		__atomic_store_n(&mc->pending, true, __ATOMIC_SEQ_CST);
 		pthread_cond_signal(&mc->cond);
 	}
 	pthread_mutex_unlock(&mc->lock);
@@ -1136,21 +1142,24 @@ void mapcap_cancel(MapCapture* mc) {
 		return;
 	}
 #endif
-	pthread_mutex_lock(&mc->lock);
+	/* (a miss is asked again next frame: the room is still changed) */
+	if (pthread_mutex_trylock(&mc->lock) != 0) return;
 	if (mc->busy) mc->cancel = true;
 	pthread_mutex_unlock(&mc->lock);
 }
 
+/* The game thread's calls each frame (busy, failures, poll) never wait for the worker's lock: it can be held while the
+ * worker is not running (a core 3 thread of the same priority has the core, and the kernel doesn't time-slice). */
 bool mapcap_busy(MapCapture* mc) {
-	pthread_mutex_lock(&mc->lock);
-	bool b = mc->busy || mc->pending;
-	pthread_mutex_unlock(&mc->lock);
-	return b;
+	/* (pending first: the worker sets busy before it clears pending) */
+	bool pending = __atomic_load_n(&mc->pending, __ATOMIC_SEQ_CST);
+	return pending || __atomic_load_n(&mc->busy, __ATOMIC_SEQ_CST);
 }
 
 bool mapcap_poll(MapCapture* mc, uint32_t lastSerial, MapResult* out) {
 	size_t n = mc->cropPixels;
-	pthread_mutex_lock(&mc->lock);
+	uint32_t serial = __atomic_load_n(&mc->serial, __ATOMIC_ACQUIRE);
+	if (serial == lastSerial || serial == 0 || pthread_mutex_trylock(&mc->lock) != 0) return false;
 	bool fresh = mc->serial != lastSerial && mc->serial != 0;
 	if (fresh) {
 		out->ok = true;
@@ -1175,10 +1184,8 @@ bool mapcap_poll(MapCapture* mc, uint32_t lastSerial, MapResult* out) {
 }
 
 int mapcap_failures(MapCapture* mc, const char** why) {
-	pthread_mutex_lock(&mc->lock);
-	int f = mc->failures;
-	if (why) *why = mc->lastError;
-	pthread_mutex_unlock(&mc->lock);
+	int f = __atomic_load_n(&mc->failures, __ATOMIC_ACQUIRE);
+	if (why) *why = __atomic_load_n(&mc->lastError, __ATOMIC_ACQUIRE);
 	return f;
 }
 

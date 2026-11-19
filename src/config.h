@@ -72,6 +72,8 @@ typedef struct Config {
 	int videoWake;     /* video_wake: mGBA's drawing thread is woken every N+1 lines, N = 0, 1, 3, 7, 15, 31 or 63 (the patched libmgba) */
 	int core1Limit;    /* core1_limit: the percent of the system core given to a thread on core 1 */
 	bool coreProbe;    /* core_probe: how much CPU each core gives a thread, in the log at start */
+	int capturePriority; /* capture_priority: the hidden copy's thread this many steps below the other app threads (3DS; 0: as built) */
+	int captureDuty;   /* capture_duty: a capture under way at most 1/N of the time: the next waits N times as long as the last took (0: off) */
 	bool linesFirst;   /* lines_first: the log and bench line writer ahead of the hidden copy's thread (3DS) */
 	bool abSwap;       /* GBA A on the bottom face button instead of the right one */
 	char hotkey[16];   /* home | select | start | l3 (older names: guide = home, back = select) */

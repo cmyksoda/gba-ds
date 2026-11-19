@@ -121,6 +121,7 @@ static struct {
 static bool aheadInFlight; /* the worker is emulating the next frame */
 static bool aheadReady;    /* it has: that frame is emulated but not yet used */
 static double lateness = 1; /* capture_throttle: frames' work over their budget, averaged (1: on time) */
+static int captureFrames, lastCaptureFrames; /* capture_duty: frames the capture under way has taken so far, and the last one took */
 static uint32_t aheadFb[GBA_W * GBA_H]; /* the frame on screen, while the worker writes the next */
 
 /* Bits above the GBA keys, for run_frame: the SNES layout's camera pan
@@ -8530,6 +8531,7 @@ enum GameExit game_run(Config* c, const char* rom, bool fromLibrary) {
 static enum GameExit game_run_inner(Config* c, const char* rom, bool fromLibrary) {
 	cfg = c;
 	lateness = 1;
+	captureFrames = lastCaptureFrames = 0;
 	config_apply_core_env(c);
 	debug = getenv("GBADS_DEBUG") != NULL;
 	romPath = rom, lastLoop = 0;
@@ -8544,6 +8546,7 @@ static enum GameExit game_run_inner(Config* c, const char* rom, bool fromLibrary
 	host_set_cores(cfg->sideCore, cfg->captureCore, cfg->aheadCore, cfg->videoCore, cfg->core1Limit, false);
 	host_set_video_wake(cfg->videoWake);
 	host_set_lines_first(cfg->linesFirst);
+	host_set_capture_priority(cfg->capturePriority);
 	host_set_cpu_tile(cfg->cpuTile);
 	emu_threaded_video(cfg->threadedVideo && isNew3ds()); /* (mGBA's drawing thread on the New 3DS's third core) */
 #else
@@ -8836,6 +8839,7 @@ static enum GameExit game_run_inner(Config* c, const char* rom, bool fromLibrary
 		screen_restore_apply();
 		bug_tick();
 		Uint64 workT0 = SDL_GetPerformanceCounter(); /* this frame's work, without the wait at the end */
+		Uint64 preM1 = workT0, preM2 = workT0, preM3 = workT0; /* (where "pre" went, for bench_pre_note) */
 		long preempt0 = thread_preemptions();
 		double cpuMs0 = thread_cpu_ms();
 		if (((!logoTex[0] && !logoTex[1]) || logoProvisional) && logo_generation() != logoGen) {
@@ -8863,6 +8867,7 @@ static enum GameExit game_run_inner(Config* c, const char* rom, bool fromLibrary
 		}
 		ui_tick();
 		ui_read_buttons();
+		preM1 = SDL_GetPerformanceCounter();
 		{
 			const char* ld = ui_script_load();
 			if (ld && !state_load(ld)) fprintf(stderr, "could not load %s\n", ld);
@@ -9499,6 +9504,7 @@ static enum GameExit game_run_inner(Config* c, const char* rom, bool fromLibrary
 		 * which is what made the lag worse every time. */
 		int queuedNow = audio ? (int) (SDL_GetQueuedAudioSize(audio) / 4) : 0;
 		bool dropAudio = queuedNow > targetQueued * 3; /* hard cap on drift */
+		preM2 = SDL_GetPerformanceCounter();
 		/* Health report (always on, every 5 s when something went wrong): audio
 		 * underruns (the queue ran dry = a crackle), slow loop iterations, and
 		 * how often the background map capture was running. */
@@ -9540,6 +9546,7 @@ static enum GameExit game_run_inner(Config* c, const char* rom, bool fromLibrary
 		if (debug && audio && frameCount % 30 == 0) {
 			fprintf(stderr, "audio queue %d ms%s\n", queuedNow * 1000 / want.freq, ff ? " (ff)" : "");
 		}
+		preM3 = SDL_GetPerformanceCounter();
 		Uint64 emuT0 = SDL_GetPerformanceCounter(), raT = 0, audT = 0;
 		double emuCpu0 = thread_cpu_ms();
 		if (rewinding) {
@@ -9692,6 +9699,8 @@ static enum GameExit game_run_inner(Config* c, const char* rom, bool fromLibrary
 			 * the new one starts as soon as it has stopped */
 			bool roomChanged = rk && rk != lastRoomKey && seenRoomFor >= 2;
 			if (roomChanged && mapcap_busy(mc)) mapcap_cancel(mc);
+			if (mapcap_busy(mc)) ++captureFrames;
+			else if (captureFrames) lastCaptureFrames = captureFrames, captureFrames = 0;
 			/* Back off while captures keep failing (e.g. the game says "playing"
 			 * but the map can't open: intro cutscenes, briefings). Each failed
 			 * attempt emulates a few seconds in the background, which starves
@@ -9718,6 +9727,9 @@ static enum GameExit game_run_inner(Config* c, const char* rom, bool fromLibrary
 			/* capture_throttle: further apart while the frames run late (squared: 87% speed, 1.3 times); not after
 			 * failures, whose backoff above already spaces them out */
 			if (cfg->captureThrottle > 0 && !fails) interval = (int) (interval * SDL_min(lateness * lateness, (double) cfg->captureThrottle));
+			/* capture_duty: the next periodic capture waits N times as long as the last one took, so one runs at most 1/N
+			 * of the time (a room change still asks for one at once) */
+			if (cfg->captureDuty > 0 && !fails) interval = SDL_max(interval, lastCaptureFrames * cfg->captureDuty);
 			/* after failures, a room change still triggers a try, but no more
 			 * often than the normal interval */
 			bool due = sinceMapRequest >= interval ||
@@ -9859,6 +9871,11 @@ static enum GameExit game_run_inner(Config* c, const char* rom, bool fromLibrary
 		bench_frame(frameCount, benchEmuMs, (drawT1 - drawT0) * 1000.0 / SDL_GetPerformanceFrequency(),
 		            (drawT0 - emuT1) * 1000.0 / SDL_GetPerformanceFrequency(), mc && mapcap_busy(mc),
 		            (emuT0 - workT0) * 1000.0 / SDL_GetPerformanceFrequency(), (drawT1 - workT0) * 1000.0 / SDL_GetPerformanceFrequency());
+		{
+			const double toMs = 1000.0 / (double) SDL_GetPerformanceFrequency();
+			bench_pre_note(frameCount, (double) (emuT0 - workT0) * toMs, (double) (preM1 - workT0) * toMs, (double) (preM2 - preM1) * toMs,
+			               (double) (preM3 - preM2) * toMs, (double) (emuT0 - preM3) * toMs);
+		}
 		bench_check(&emu, frameCount);
 		if (cfg->captureThrottle > 0 && !ff) {
 			double over = (double) (drawT1 - loopT0) / SDL_GetPerformanceFrequency() / frameSec;
