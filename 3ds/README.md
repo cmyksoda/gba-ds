@@ -253,6 +253,11 @@ frame in armGBA itself. What cut it, with the same pictures, RAM and sound
   (`armgba_lean_logs = 0` for the old way, to compare on a console).
 - The interrupt pipeline's events and a halfword store to an I/O register
   take shorter ways through the core.
+- A compile no longer clears the 21 KB of state it kept for the worst case, only
+  what it uses: Golden Sun 2's second of Sol Sanctum compiles about a thousand
+  blocks at once. `armgba_compile_after` (2 as built) is how many visits to a
+  new block are stepped on the exact CPU before it compiles; a console can try
+  4 to 16 where bursts like that are the slow part.
 - `make PGO=use` builds armGBA's files from a profile (`3ds/emu/pgo/`, made
   with `PGO=gen` and `3ds/emu/pgo-train.py`; both builds need `BUILD=build/gen`,
   emptied first: GCC names a static function's profile by its object's path):
