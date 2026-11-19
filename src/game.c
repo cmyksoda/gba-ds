@@ -4594,7 +4594,7 @@ static void hud_put_pieces(const HudMove* moves, const HudMove* movesIn, int mos
 #ifdef COLOR_16_BIT
 			for (int k = 0; k < put.run[i].n; ++k) emu_fb_put(&emu, put.run[i].x + k, put.run[i].y, hudPx[put.run[i].src + k]);
 #else
-			memcpy(&emu.fb[put.run[i].y * GBA_W + put.run[i].x], &hudPx[put.run[i].src], (size_t) put.run[i].n * 4);
+			emu_fb_put_run(&emu, put.run[i].x, put.run[i].y, &hudPx[put.run[i].src], put.run[i].n);
 #endif
 		}
 		return;
@@ -8546,6 +8546,8 @@ static enum GameExit game_run_inner(Config* c, const char* rom, bool fromLibrary
 	host_set_lines_first(cfg->linesFirst);
 	host_set_cpu_tile(cfg->cpuTile);
 	host_set_async_upload(cfg->asyncUpload);
+	host_set_gpu_twin(cfg->gpuTwin);
+	host_set_twin_check(cfg->twinCheck);
 	emu_threaded_video(cfg->threadedVideo && isNew3ds()); /* (mGBA's drawing thread on the New 3DS's third core) */
 #else
 	emu_threaded_video(cfg->threadedVideo);
@@ -9811,6 +9813,14 @@ static enum GameExit game_run_inner(Config* c, const char* rom, bool fromLibrary
 		if (mirrorOn && mirrorHave) shownFb = mirrorHeld; /* (hud.mirror: the picture from before) */
 		if (tallLive) shownFb = cfg->swap ? tallBot : tallTop; /* (profile.tall: the table's upper half on the top screen) */
 		if (cfg->ghosting) shownFb = ghost_frame(shownFb ? shownFb : emu_fb(&emu));
+#ifdef __3DS__
+		/* (the twin's rows the HUD's pieces were put on: written back before the GPU reads it) */
+		for (unsigned bands = emu.fbGpu ? emu.fbGpuDirty : 0; bands; bands &= bands - 1) {
+			host_flush_data(emu.fbGpu + __builtin_ctz(bands) * 8 * EMU_TWIN_STRIDE, 8 * EMU_TWIN_STRIDE * sizeof(uint32_t));
+		}
+		emu.fbGpuDirty = 0;
+		host_picture_twin(emu.fb, ff || rewinding ? NULL : emu.fbGpu); /* (fast forward: frames come faster than a copy is sure to be read) */
+#endif
 		/* only the view the game is on needs it (all of them right after a swap,
 		 * since the menu draws the game without uploading) */
 		for (int i = 0; i < nViews; ++i) {

@@ -70,6 +70,7 @@ void config_defaults(Config* c) {
 	c->tallLive = false; /* (Pinball's live view runs two more copies of the game, two frames each, every frame) */
 	c->threadedVideo = true;
 	c->asyncUpload = true;
+	c->gpuTwin = true;
 	c->hudLayers = true;
 	/* (one worker that also widens the picture beat two without it in 46 of 53 games' slowest stretches on a New 2DS XL) */
 	c->renderWorkers = 1;
@@ -236,6 +237,8 @@ static bool set_option(Config* c, const char* key, const char* val) {
 	INT("core1_limit", core1Limit)
 	INT("video_wake", videoWake)
 	BOOL("async_upload", asyncUpload)
+	BOOL("gpu_twin", gpuTwin)
+	BOOL("twin_check", twinCheck)
 	BOOL("cpu_tile", cpuTile)
 	INT("bench_check", benchCheck)
 	BOOL("core_probe", coreProbe)

@@ -51,6 +51,20 @@ void host_set_video_wake(int mask);
 void host_set_cpu_tile(bool on);
 /* gba-ds.cfg's async_upload: a picture's copy to its texture runs on the GPU while the next frame emulates. */
 void host_set_async_upload(bool on);
+/* gba-ds.cfg's gpu_twin: the render worker also writes each frame in the GPU's byte order (rows HOST_TWIN_STRIDE words apart),
+ * which the copy engine reads where it is. host_gpu_twin_ready: on, and the start's self-test passed. host_picture_twin(fb, twin)
+ * says the pixels fb have that twin (NULL: none) for the texture updates that follow. host_flush_data: write back the cache. */
+#define HOST_TWIN_STRIDE 256 /* (= emu.h's EMU_TWIN_STRIDE) */
+void host_set_gpu_twin(bool on);
+void host_set_twin_check(bool on); /* gba-ds.cfg's twin_check (a test): each twin is compared with its picture before use */
+bool host_gpu_twin_ready(void);
+void host_picture_twin(const void* fb, const void* gpuOrder);
+void host_flush_data(const void* p, size_t n);
+/* The system tick (svcGetSystemTick) and its ticks a millisecond. */
+uint64_t host_ticks(void);
+#define HOST_TICKS_PER_MS 268111.856
+/* Waits until the GPU has done what is queued (a buffer it was to read may be freed after). */
+void host_gpu_settle(void);
 /* What to give host_next_thread_core for the map capture's thread, and for the Frame Buffer's (mGBA's
  * drawing thread on or not). */
 int host_capture_core(void);

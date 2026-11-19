@@ -76,6 +76,7 @@ typedef struct ArmCore {
 	 * e->fb points at the one that holds the frame taken (fbOwn is the one this machine made) */
 	uint32_t* fbOwn;
 	uint32_t* wideBuf[2];
+	uint32_t* twin[2]; /* gpu_twin: wideBuf's pictures again in the GPU's byte order (linear memory, HOST_TWIN_STRIDE words a row) */
 } ArmCore;
 
 static ArmCore* AC(const Emu* e) {
@@ -764,6 +765,10 @@ static void jit_stats(ArmCore* c, unsigned frame, bool game, bool closing) {
 }
 #endif
 
+#ifdef __3DS__
+static void twin_open(ArmCore* c, bool oneWorker);
+static void twin_close(ArmCore* c);
+#endif
 static void close_core(ArmCore* c) {
 	if (!c) return;
 #ifdef __3DS__
@@ -796,6 +801,9 @@ static void close_core(ArmCore* c) {
 		gbaDestroy(c->gba);
 	}
 	free(c->markFrame);
+#ifdef __3DS__
+	twin_close(c);
+#endif
 	free(c->wideBuf[0]);
 	free(c->wideBuf[1]);
 	free(c->savePath);
@@ -1027,6 +1035,9 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 		c->wideBuf[1] = calloc(GBA_W * GBA_H, sizeof(uint32_t));
 		if (c->wideBuf[0] && c->wideBuf[1]) {
 			widen_tables();
+#ifdef __3DS__
+			twin_open(c, emuRenderWorkers == 1);
+#endif
 			renderThreadSetWiden(gba, widen_row, c->wideBuf[0], c->wideBuf[1]);
 		} else {
 			free(c->wideBuf[0]);
@@ -1070,6 +1081,7 @@ void emu_close(Emu* e) {
 	}
 	free(e->fb);
 	e->fb = NULL;
+	e->fbGpu = NULL;
 }
 
 bool emu_cancelled(const Emu* e) {
@@ -1103,9 +1115,110 @@ static __attribute__((noipa)) void widen_words(uint32_t* restrict dst, const uin
 	}
 }
 
+#ifdef __3DS__
+/* gpu_twin: the picture the workers widen is also written in the GPU's byte order (the words swapped, as the game thread's swap made them), into a
+ * linear buffer that the worker flushes itself, when the last row is in. */
+static struct {
+	uint32_t* wide;
+	uint32_t* twin;
+} twinMap[2];
+
+/* The whole twin is written back in one call when its last row is in (or, if that row never came, when the rows start on the
+ * other twin); only the one worker calls this (twin_open: one worker). */
+static const uint32_t* twinDirty;
+static uint64_t twinRowTicks, twinFlushTicks;
+static unsigned twinFrames;
+
+/* Where row `wideRow` of a wide buffer has its twin (NULL: none), and which twin that is, for twin_row_done. */
+static uint32_t* twin_row_at(const uint32_t* wideRow, int* y, uint32_t** twin) {
+	for (int k = 0; k < 2; ++k) {
+		const uint32_t* base = twinMap[k].wide;
+		if (!base || wideRow < base || wideRow >= base + GBA_W * GBA_H) continue;
+		*y = (int) ((wideRow - base) / GBA_W);
+		*twin = twinMap[k].twin;
+		return *twin + (size_t) *y * HOST_TWIN_STRIDE;
+	}
+	return NULL;
+}
+
+/* The row is in: the whole twin is written back in one call with its last row (or, if that row never came, when the rows
+ * start on the other twin). Only the one worker calls this (twin_open: one worker). */
+static void twin_row_done(int y, uint32_t* twin) {
+	const size_t bytes = (size_t) GBA_H * HOST_TWIN_STRIDE * sizeof(uint32_t);
+	if (twinDirty && twinDirty != twin) host_flush_data(twinDirty, bytes);
+	if (y == GBA_H - 1) {
+		const uint64_t t0 = host_ticks();
+		host_flush_data(twin, bytes);
+		twinFlushTicks += host_ticks() - t0;
+		twinDirty = NULL;
+		++twinFrames;
+	} else {
+		twinDirty = twin;
+	}
+}
+
+static void twin_open(ArmCore* c, bool oneWorker) {
+	c->twin[0] = c->twin[1] = NULL;
+	if (!oneWorker || !host_gpu_twin_ready()) return;
+	const size_t bytes = (size_t) GBA_H * HOST_TWIN_STRIDE * sizeof(uint32_t);
+	for (int k = 0; k < 2; ++k) {
+		c->twin[k] = host_linear_alloc(bytes);
+		if (!c->twin[k]) break;
+		memset(c->twin[k], 0, bytes);
+		host_flush_data(c->twin[k], bytes);
+	}
+	if (!c->twin[0] || !c->twin[1]) {
+		for (int k = 0; k < 2; ++k) {
+			if (c->twin[k]) host_linear_free(c->twin[k]);
+			c->twin[k] = NULL;
+		}
+		return;
+	}
+	twinDirty = NULL;
+	for (int k = 0; k < 2; ++k) twinMap[k].wide = c->wideBuf[k], twinMap[k].twin = c->twin[k];
+	logLine("picture twin: made (2 x %u KiB of linear memory)", (unsigned) (bytes >> 10));
+}
+
+static void twin_close(ArmCore* c) {
+	if (!c->twin[0]) return;
+	host_gpu_settle();
+	if (twinFrames) {
+		logLine("picture twin: per frame the render worker spent %.3f ms widening the rows with it and %.3f ms flushing it (%u frames)", twinRowTicks / HOST_TICKS_PER_MS / twinFrames,
+		        twinFlushTicks / HOST_TICKS_PER_MS / twinFrames, twinFrames);
+	}
+	twinRowTicks = twinFlushTicks = 0, twinFrames = 0;
+	twinDirty = NULL;
+	for (int k = 0; k < 2; ++k) {
+		twinMap[k].wide = twinMap[k].twin = NULL;
+		host_linear_free(c->twin[k]);
+		c->twin[k] = NULL;
+	}
+}
+#endif
+
 /* One row, from a render worker (its source is word aligned: the log's frame). */
 static void widen_row(uint32_t* dst, const uint16_t* src) {
 	const uint32_t* words = __builtin_assume_aligned(src, 4);
+#ifdef __3DS__
+	int y = 0;
+	uint32_t* twin = NULL;
+	uint32_t* const tw = twinMap[0].twin ? twin_row_at(dst, &y, &twin) : NULL;
+	if (tw) {
+		/* (the same words, swapped into the twin as they are made) */
+		const uint64_t t0 = host_ticks();
+		for (int i = 0; i < GBA_W / 2; i += 2) {
+			uint32_t const a = words[i], b = words[i + 1];
+			uint32_t const w0 = widenLow[a & 0xFF] | widenHigh[(a >> 8) & 0xFF], w1 = widenLow[(a >> 16) & 0xFF] | widenHigh[a >> 24];
+			uint32_t const w2 = widenLow[b & 0xFF] | widenHigh[(b >> 8) & 0xFF], w3 = widenLow[(b >> 16) & 0xFF] | widenHigh[b >> 24];
+			dst[2 * i] = w0, dst[2 * i + 1] = w1, dst[2 * i + 2] = w2, dst[2 * i + 3] = w3;
+			tw[2 * i] = __builtin_bswap32(w0), tw[2 * i + 1] = __builtin_bswap32(w1);
+			tw[2 * i + 2] = __builtin_bswap32(w2), tw[2 * i + 3] = __builtin_bswap32(w3);
+		}
+		twinRowTicks += host_ticks() - t0;
+		twin_row_done(y, twin);
+		return;
+	}
+#endif
 	for (int i = 0; i < GBA_W / 2; i += 2) {
 		uint32_t const a = words[i], b = words[i + 1];
 		dst[2 * i] = widenLow[a & 0xFF] | widenHigh[(a >> 8) & 0xFF];
@@ -1131,8 +1244,11 @@ static void widen_picture(uint32_t* dst, const uint16_t* src) {
 static void take_picture(Emu* e) {
 	ArmCore* c = AC(e);
 	const uint32_t* wide = c->wideBuf[0] ? renderThreadWide(c->gba) : NULL;
+	e->fbGpu = NULL;
+	e->fbGpuDirty = 0;
 	if (wide) {
 		e->fb = (uint32_t*) wide;
+		if (c->twin[0] && !c->markFrame) e->fbGpu = c->twin[wide == c->wideBuf[1]]; /* (a marked picture's fourth bytes are not the twin's) */
 	} else {
 		e->fb = c->fbOwn;
 		widen_picture(e->fb, (const uint16_t*) c->gba->renderer.frame);
@@ -1162,6 +1278,7 @@ static void run_frame(Emu* e, uint32_t keys, bool draw) {
 		/* (the picture kept is a worker's buffer, which it writes again when this frame ends: copied before) */
 		memcpy(c->fbOwn, e->fb, GBA_W * GBA_H * sizeof(uint32_t));
 		e->fb = c->fbOwn;
+		e->fbGpu = NULL;
 	}
 	++e->frames;
 	gbaSetKeys(gba, (uint16_t) keys);

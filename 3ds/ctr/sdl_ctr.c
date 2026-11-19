@@ -1022,6 +1022,147 @@ static bool update_by_gpu(SDL_Texture* t, const void* pixels, int pitch, int y0,
 	return true;
 }
 
+/* gba-ds.cfg's gpu_twin: the picture the render worker widened is also made by it in the GPU's byte order, in linear memory,
+ * flushed by the worker (emu_armgba.c); the copy engine reads it from there, so the game thread does no swap and no flush.
+ * host_picture_twin is told, each frame, which pixels (the XBGR ones) have that twin: a texture updated from them is copied from it. */
+static bool twinOn, twinOk;
+static const void* twinKey;
+static const void* twinPx;
+static unsigned twinFrame; /* the frame a twin's copy was queued in (one a frame: the next picture is written over it two frames later) */
+static u64 upTwinTicks;
+
+void host_set_gpu_twin(bool on) {
+	twinOn = on;
+}
+
+bool host_gpu_twin_ready(void) {
+	return twinOn && twinOk && gpu_tiling();
+}
+
+void host_picture_twin(const void* fb, const void* gpuOrder) {
+	twinKey = fb;
+	twinPx = gpuOrder;
+}
+
+void host_flush_data(const void* p, size_t n) {
+	cache_flush(p, n);
+}
+
+uint64_t host_ticks(void) {
+	return svcGetSystemTick();
+}
+
+void host_gpu_settle(void) {
+	if (!videoUp || inFrame) return;
+	C3D_FrameBegin(0);
+	C3D_FrameEnd(0);
+}
+
+/* gba-ds.cfg's twin_check (a test): each twin is compared with the picture it is the twin of, word for word, before it is used;
+ * one that differs is not used (the stage path draws the picture) and the count is logged. */
+static bool twinCheck;
+static unsigned twinChecked, twinDiffers;
+
+void host_set_twin_check(bool on) {
+	twinCheck = on;
+}
+
+static bool twin_matches(const u32* fb, const u32* twin) {
+	for (int y = 0; y < 160; ++y) {
+		for (int x = 0; x < 240; ++x) {
+			if (twin[y * HOST_TWIN_STRIDE + x] != __builtin_bswap32(fb[y * 240 + x])) {
+				if (twinDiffers++ < 3) {
+					logLine("textures: twin check: frame %u differs at (%d,%d): picture %08lx, twin %08lx", twinChecked, x, y, (unsigned long) fb[y * 240 + x],
+					        (unsigned long) twin[y * HOST_TWIN_STRIDE + x]);
+				}
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+static bool update_from_twin(SDL_Texture* t, const void* pixels) {
+	if (!pixels || pixels != twinKey || !twinPx || !twinOn || !twinOk) return false;
+	if (twinCheck) {
+		++twinChecked;
+		const bool same = twin_matches(pixels, twinPx);
+		if (twinChecked % 600 == 0) logLine("textures: twin check: %u pictures compared, %u differed", twinChecked, twinDiffers);
+		if (!same) return false;
+	}
+	u32 texW = t->tex.width;
+	if (t->format != SDL_PIXELFORMAT_ABGR8888 || !t->streaming || t->w != 240 || t->h != 160 || t->tw != 240 || t->th != 160 ||
+	    texW != HOST_TWIN_STRIDE || !gpu_tiling()) {
+		return false;
+	}
+	if (asyncUpload && !uploadSync) frame_begin();
+	if (inFrame) {
+		if (twinFrame == frameSerial) return false;
+		twinFrame = frameSerial;
+	}
+	u64 t0 = svcGetSystemTick();
+	GPU_WAIT(C3D_SyncDisplayTransfer((u32*) twinPx, GX_BUFFER_DIM(texW, 160), (u32*) t->tex.data, GX_BUFFER_DIM(texW, 160),
+	                                 GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
+	                                     GX_TRANSFER_OUT_TILED(1)));
+	upTwinTicks += svcGetSystemTick() - t0;
+	return true;
+}
+
+/* (TEST, at the start: another core writes a picture over old words and flushes it, as the render worker does; the
+ * copy engine's tiling of it must be the new words. Off for the run if it is not.) */
+typedef struct {
+	u32* buf;
+	u32 seed;
+} TwinWriter;
+
+static void twin_writer(void* arg) {
+	TwinWriter* w = arg;
+	u32 seed = w->seed;
+	for (int y = 0; y < 160; ++y) {
+		u32* row = w->buf + (size_t) y * HOST_TWIN_STRIDE;
+		for (int x = 0; x < 240; ++x) row[x] = seed = seed * 1664525u + 1013904223u;
+	}
+	cache_flush(w->buf, (size_t) 160 * HOST_TWIN_STRIDE * 4);
+}
+
+static void twin_selftest(void) {
+	twinOk = false;
+	if (!gpu_tiling()) return;
+	u32* buf = linearAlloc((size_t) HOST_TWIN_STRIDE * 160 * 4);
+	SDL_Texture* t = SDL_CreateTexture(NULL, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, 240, 160);
+	if (!buf || !t || t->tex.width != HOST_TWIN_STRIDE) {
+		if (buf) linearFree(buf);
+		if (t) texture_free(t);
+		logLine("textures: GPU twin self-test: not made");
+		return;
+	}
+	memset(buf, 0, (size_t) HOST_TWIN_STRIDE * 160 * 4);
+	cache_flush(buf, (size_t) HOST_TWIN_STRIDE * 160 * 4);
+	int bad = 0, made = 0;
+	for (int k = 0; k < 4; ++k) {
+		TwinWriter w = { buf, 4242u + (u32) k * 77u };
+		s32 prio = 0x30;
+		svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+		Thread th = threadCreate(twin_writer, &w, 32 * 1024, prio, host_side_core(), false);
+		if (!th) continue;
+		threadJoin(th, U64_MAX);
+		threadFree(th);
+		++made;
+		C3D_SyncDisplayTransfer(buf, GX_BUFFER_DIM(HOST_TWIN_STRIDE, 160), (u32*) t->tex.data, GX_BUFFER_DIM(HOST_TWIN_STRIDE, 160),
+		                        GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
+		                            GX_TRANSFER_OUT_TILED(1));
+		svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32) t->tex.data, t->tex.size);
+		const u32* got = t->tex.data;
+		for (int y = 0; y < 160; ++y) {
+			for (int x = 0; x < HOST_TWIN_STRIDE; ++x) bad += got[tiled((u32) x, (u32) y, HOST_TWIN_STRIDE)] != buf[(size_t) y * HOST_TWIN_STRIDE + x];
+		}
+	}
+	linearFree(buf);
+	texture_free(t);
+	twinOk = made == 4 && !bad;
+	logLine("textures: GPU twin self-test: %s", made < 4 ? "no thread" : bad ? "differs from what the other core wrote" : "all words match (4 pictures, written on another core)");
+}
+
 /* (TEST: the average time of a whole picture's upload, logged now and then) */
 static u64 upTicks, upFlushTicks, upXferTicks;
 static unsigned upCount;
@@ -1115,6 +1256,7 @@ int SDL_UpdateTexture(SDL_Texture* t, const SDL_Rect* rect, const void* pixels, 
 	if (rect == &whole || (!rect->x && !rect->y && rect->w == t->w && rect->h == t->h)) {
 		u64 t0 = svcGetSystemTick();
 		bool done = t->w == 240 && t->h == 160 && update_by_cpu_tiled(t, pixels, pitch);
+		if (!done && t->w == 240 && t->h == 160) done = update_from_twin(t, pixels);
 		if (!done) done = update_by_gpu(t, pixels, pitch, 0, t->h);
 		if (!done) done = update_by_cpu(t, rect, pixels, pitch) == 0;
 		if (t->w == 240 && t->h == 160) {
@@ -1136,8 +1278,9 @@ int SDL_UpdateTexture(SDL_Texture* t, const SDL_Rect* rect, const void* pixels, 
 					        frames, (unsigned) upCount, (double) waitBegin / CPU_TICKS_PER_MSEC / (frames ? frames : 1),
 					        (double) waitEnd / CPU_TICKS_PER_MSEC / (frames ? frames : 1), (double) waitCopy / CPU_TICKS_PER_MSEC / (frames ? frames : 1));
 					waitBegin = waitEnd = waitCopy = 0;
+					if (upTwinTicks) logLine("textures: the picture copied from the render worker's twin instead (no swap, no flush): call %.3f ms", (double) upTwinTicks / per);
 				}
-				upTicks = upTileTicks = upSwapTicks = upFlushTicks8 = upXferTicks8 = 0, upCount = 0;
+				upTicks = upTileTicks = upSwapTicks = upFlushTicks8 = upXferTicks8 = upTwinTicks = 0, upCount = 0;
 			}
 		}
 		return done ? 0 : -1;
@@ -1830,6 +1973,7 @@ int SDL_Init(Uint32 flags) {
 		logLine("start: the GPU is up");
 		tiling_selftest();
 		cpu_tile_selftest();
+		twin_selftest();
 		if (!padThread) pad_start();
 	}
 	if (flags & SDL_INIT_AUDIO) {
