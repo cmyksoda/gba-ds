@@ -285,14 +285,17 @@ index 679bd4b..7751de9 100644
  	uint8_t* exitLinkRoutine;
  	// load32, load16, load8, loadS8, loadS16, store32, store16, store8
 diff --git a/src/cpu/jit.c b/src/cpu/jit.c
-index a665665..e97749c 100644
+index a665665..47b938a 100644
 --- a/src/cpu/jit.c
 +++ b/src/cpu/jit.c
-@@ -2262,7 +2262,7 @@ void jitRunLoop(struct GBA* gba) {
+@@ -2260,9 +2260,8 @@ void jitRunLoop(struct GBA* gba) {
+ 				// Mario Kart's code memory, and the recompiler threw everything away when that ran out
+ 				// (2026-11-09). Until an event has fallen in a block a few times, the exact CPU steps
  				// to the event instead, as when there's no room for one.
- 				// Nor is one compiled in a frame that has used up its time for compiling, or once careful
- 				// copies have taken their share of the code memory (CAREFUL_SHARE).
+-				// Nor is one compiled in a frame that has used up its time for compiling, or once careful
+-				// copies have taken their share of the code memory (CAREFUL_SHARE).
 -				bool const earned = link->from->twin || (link->from->checkFires >= CAREFUL_AFTER && !compileBusy() && !carefulFull(jit));
++				// Nor is one once careful copies have taken their share of the code memory (CAREFUL_SHARE).
 +				bool const earned = link->from->twin || (link->from->checkFires >= CAREFUL_AFTER && !carefulFull(jit));
  				if (!earned) {
  					struct Block* from = link->from;
