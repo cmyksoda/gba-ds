@@ -114,7 +114,7 @@ index ef362d7..11f8362 100644
  			link->careful = true;
  			link->index = stub->index;
 diff --git a/src/cpu/jit.c b/src/cpu/jit.c
-index 317d8e4..4e4d76f 100644
+index 317d8e4..06a0bf8 100644
 --- a/src/cpu/jit.c
 +++ b/src/cpu/jit.c
 @@ -1389,6 +1389,9 @@ void jitNameCode(const void* start, const void* end, const char* name) {
@@ -133,9 +133,9 @@ index 317d8e4..4e4d76f 100644
  
 +static int compileAfterSetting = COMPILE_AFTER;
 +
-+// The frontend's own count of first visits stepped before a block compiles (1 to 250).
++// The frontend's own count of first visits stepped before a block compiles (1 to 250; 0 or less: as built).
 +void jitSetCompileAfter(int times) {
-+	compileAfterSetting = times < 1 ? 1 : times > 250 ? 250 : times;
++	compileAfterSetting = times <= 0 ? COMPILE_AFTER : times > 250 ? 250 : times;
 +}
 +
  // Times a block's start is stepped through before it's compiled, as things are.
@@ -156,14 +156,14 @@ index 317d8e4..4e4d76f 100644
  		++*seen;
  		++jit->deferred;
 diff --git a/src/cpu/jit.h b/src/cpu/jit.h
-index f324821..a76cc69 100644
+index f324821..016407b 100644
 --- a/src/cpu/jit.h
 +++ b/src/cpu/jit.h
 @@ -32,6 +32,8 @@ void jitFlush(struct GBA*);
  // How many times the CPU returns to the same place inside a block (from an interrupt, or an event
  // stepped up to) before a block is compiled there, instead of stepping the rest of this block; 0: never.
  void jitSetMidAfter(struct GBA*, int times);
-+// How many visits to a new block are stepped through before it is compiled (1 to 250, for every machine; 2 as built).
++// How many visits to a new block are stepped through before it is compiled (1 to 250, for every machine; 0 or less: 2, as built).
 +void jitSetCompileAfter(int times);
  // The code memory compiled code takes so far, and (size) all there is: for a frontend that empties it
  // (jitFlush) at a moment of its choosing, before it fills at one of the game's.

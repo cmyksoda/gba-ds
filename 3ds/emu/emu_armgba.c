@@ -853,7 +853,7 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 	}
 	struct GBA* gba = c->gba;
 	threadLogsLean = !getenv("GBADS_ARMGBA_LEAN_LOGS") || atoi(getenv("GBADS_ARMGBA_LEAN_LOGS")); /* (armgba_lean_logs = 0: a barrier at every entry of the render and sound logs) */
-	if (getenv("GBADS_ARMGBA_COMPILE_AFTER")) jitSetCompileAfter(atoi(getenv("GBADS_ARMGBA_COMPILE_AFTER"))); /* (armgba_compile_after: first visits of a block stepped before it compiles, 2 as built) */
+	jitSetCompileAfter(getenv("GBADS_ARMGBA_COMPILE_AFTER") ? atoi(getenv("GBADS_ARMGBA_COMPILE_AFTER")) : 0); /* (armgba_compile_after: 0 when unset, so a bench job after another gets the built 2 back) */
 	if (getenv("GBADS_ARMGBA_MID_AFTER")) jitSetMidAfter(gba, atoi(getenv("GBADS_ARMGBA_MID_AFTER"))); /* (armgba_mid_after: 0 steps every return into a block) */
 	c->hooks.context = c;
 	renderSetHooks(gba, &c->hooks);
