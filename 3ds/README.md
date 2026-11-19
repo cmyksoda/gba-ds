@@ -251,6 +251,12 @@ frame in armGBA itself. What cut it, with the same pictures, RAM and sound
 - The render log's entries reach its workers once a line, and the sound log
   takes one barrier an entry instead of three: the ARM11's barriers are slow
   (`armgba_lean_logs = 0` for the old way, to compare on a console).
+- A careful copy lets more events run after the instruction they fall in, not
+  inside it on the exact CPU: a sound timer's overflow that asks its FIFO's DMA
+  for nothing, and any event at all when the instruction only fetches (data
+  processing without a register shift, not into r15), where the DMA the event
+  starts takes the bus at the next instruction's fetch as before
+  (`armgba_defer = 0` for the old way, to compare on a console).
 - The interrupt pipeline's events and a halfword store to an I/O register
   take shorter ways through the core.
 - A compile no longer clears the 21 KB of state it kept for the worst case, only
