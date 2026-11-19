@@ -54,6 +54,7 @@ typedef struct ArmCore {
 	unsigned statsEvery;
 	struct JitSeen* seen;
 	bool game; /* the machine with the sound: not a copy */
+	uint64_t compileBudget; /* (3DS, the game: the host ticks of compiling a frame may take before the code met for the first times is put off) */
 	unsigned ran, loads; /* frames run and states loaded here (a copy's frame counter is the game's, from the state it loaded) */
 	/* sound not yet read (emu_audio_read): stereo frames in a ring */
 	int16_t* ring;
@@ -872,6 +873,7 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 	}
 	struct GBA* gba = c->gba;
 	threadLogsLean = !getenv("GBADS_ARMGBA_LEAN_LOGS") || atoi(getenv("GBADS_ARMGBA_LEAN_LOGS")); /* (armgba_lean_logs = 0: a barrier at every entry of the render and sound logs) */
+	c->compileBudget = getenv("GBADS_ARMGBA_COMPILE_BUDGET") ? (uint64_t) (atof(getenv("GBADS_ARMGBA_COMPILE_BUDGET")) * 268111.856) : 268111 * 3 / 2; /* (armgba_compile_budget, in ms: 1.5 when unset) */
 	jitSetCompileAfter(getenv("GBADS_ARMGBA_COMPILE_AFTER") ? atoi(getenv("GBADS_ARMGBA_COMPILE_AFTER")) : 0); /* (armgba_compile_after: 0 when unset, so a bench job after another gets the built 2 back) */
 	if (getenv("GBADS_ARMGBA_MID_AFTER")) jitSetMidAfter(gba, atoi(getenv("GBADS_ARMGBA_MID_AFTER"))); /* (armgba_mid_after: 0 steps every return into a block) */
 	if (getenv("GBADS_ARMGBA_DEFER")) jitSetDeferMore(gba, atoi(getenv("GBADS_ARMGBA_DEFER")) != 0); /* (armgba_defer = 0: only events that start no DMA run after the instruction they fall in) */
@@ -1192,7 +1194,7 @@ static void run_frame(Emu* e, uint32_t keys, bool draw) {
 	 * compiled, and compiled in a later frame if it doesn't come round
 	 * again; a Mario Kart race frame has about that much to spare: 4 ms
 	 * made 18-22 ms frames) */
-	jitSetCompileBudget(gba, 268111 * 3 / 2);
+	jitSetCompileBudget(gba, c->compileBudget);
 #endif
 	do {
 		gbaRunPart(gba);

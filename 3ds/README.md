@@ -260,6 +260,8 @@ frame in armGBA itself. What cut it, with the same pictures, RAM and sound
   processing without a register shift, not into r15), where the DMA the event
   starts takes the bus at the next instruction's fetch as before
   (`armgba_defer = 0` for the old way, to compare on a console).
+- `armgba_compile_budget` (ms of compiling a frame of the game may take before code met for the first times is put off,
+  1.5 as built; 1000 never puts any off) is a knob for comparing on a console: careful copies no longer wait for it.
 - The interrupt pipeline's events and a halfword store to an I/O register
   take shorter ways through the core.
 - A compile no longer clears the 21 KB of state it kept for the worst case, only
