@@ -1181,6 +1181,7 @@ static void twin_open(ArmCore* c, bool oneWorker) {
 
 static void twin_close(ArmCore* c) {
 	if (!c->twin[0]) return;
+	host_picture_twin(NULL, NULL); /* (a later game's picture may sit at the freed picture's address) */
 	host_gpu_settle();
 	if (twinFrames) {
 		logLine("picture twin: per frame the render worker spent %.3f ms widening the rows with it and %.3f ms flushing it (%u frames)", twinRowTicks / HOST_TICKS_PER_MS / twinFrames,
