@@ -132,10 +132,13 @@ A New 3DS gives homebrew 64 MiB: about 46 MiB of heap here, after 12 MiB of
 linear memory for the GPU and the sound. The game's ROM, the recompiler's
 code (what is left after the ROM and 15 MiB kept for the rest, up to 16 MiB:
 about 13 MiB with Mario Kart; 22 MiB kept for a game with a hidden copy:
-about 8 MiB with Yoshi's Island), the hidden copy and its code (up to 4 MiB)
-share it. When the heap runs low, each machine's recompiler empties its own
+about 8 MiB with Yoshi's Island; up to 24 MiB when the heap has 8 MiB to
+spare beyond that, as a console with 84 MiB free has for a game of up to 20 MiB), the
+hidden copy and its code (up to 4 MiB) share it. When the heap runs low, each machine's recompiler empties its own
 code memory (`jitHostMemoryLow`, counted per thread). The emulator tests run
-with the same heap, not the 124 MiB an emulator would give.
+with the same heap, not the 124 MiB an emulator would give
+(`make EMU_HEAP_KIB=86700` gives Azahar the 84 MiB free a New 3DS console has at a job's start, for
+code memory tests).
 
 A game's ROM is read once and shared by every copy of the game (the game, the hidden copy, a logo's),
 and kept at the top of the heap's address range with the heap's end brought down below it, so even a
@@ -264,6 +267,14 @@ frame in armGBA itself. What cut it, with the same pictures, RAM and sound
   blocks at once. `armgba_compile_after` (2 as built) is how many visits to a
   new block are stepped on the exact CPU before it compiles; a console can try
   4 to 16 where bursts like that are the slow part.
+- A flush hands back every block's records in one go (they are kept in an arena)
+  instead of freeing 4 to 8 pieces a block: Golden Sun 2's flush of 8,700 blocks
+  took 28.6 ms in Azahar and takes 4.7. The game's code memory is 24 MiB, not 16, when
+  the heap has the room: Golden Sun 2 and Sword of Mana filled 16 MiB in their long
+  routes, and each flush was a long frame and a few seconds of recompiling. In a bench
+  job the `armgba_stats = N` lines (what compiled, why and when it flushed, the code
+  and heap used) go to the job's results, not the log, which drops writes while the
+  card is busy.
 - `make PGO=use` builds armGBA's files from a profile (`3ds/emu/pgo/`, made
   with `PGO=gen` and `3ds/emu/pgo-train.py`; both builds need `BUILD=build/gen`,
   emptied first: GCC names a static function's profile by its object's path):
