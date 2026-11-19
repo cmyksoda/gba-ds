@@ -100,7 +100,7 @@ static bool makeExecutable(uint8_t* code, size_t size, bool* protected) {
 	return true;
 }
 
-// The game's code memory: the heap left after its ROM and HEAP_LATER, up to 16 MiB. The other machines run
+// The game's code memory: the heap left after its ROM and HEAP_LATER, up to 16 MiB (24 with plenty to spare). The other machines run
 // the same game for a few hundred frames at a time (a map screen, a title screen): up to 4 MiB
 // each. What the recompiler keeps about each block is about 0.4 bytes for each byte of code.
 enum {
@@ -121,6 +121,10 @@ enum {
 	// to compile it again each time (2026-11-16). 21 still left the heap low once in 2 minutes with
 	// the code memory near full (9 MiB): 22 gives it 8.
 	HEAP_LATER_HIDDEN = 22 << 20,
+	// The game's code memory goes up to MAIN_ROOMY when the heap has this much to spare past its share (Golden Sun 2's code
+	// memory of 16 MiB filled in its heaviest second, and it flushed: 17.8 ms with it, 16.3 with 24 MiB, 2026-11-19)
+	MAIN_ROOMY = 24 << 20,
+	MAIN_SLACK = 8 << 20,
 };
 
 bool jitHostMemoryLow(void) {
@@ -175,6 +179,7 @@ void* jitHostAllocCode(size_t* size) {
 		hiddenPending = false;
 		spare &= ~(size_t) 0xFFFFF;
 		size_t most = main ? MAIN_MAX : OTHER_MAX;
+		if (main && avail > reserve + MAIN_SLACK && (avail - reserve - MAIN_SLACK) / 7 * 5 >= MAIN_ROOMY) most = MAIN_ROOMY;
 		/* (gba-ds.cfg armgba_code_mib: the game's code memory up to this many MiB, 4 to 24: armGBA's own frontend takes up to 24) */
 		const char* wanted = getenv("GBADS_ARMGBA_CODE_MIB");
 		if (main && wanted && atoi(wanted) >= 4 && atoi(wanted) <= 24) most = (size_t) atoi(wanted) << 20;

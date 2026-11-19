@@ -17,6 +17,7 @@
 #endif
 #include "video/render.h"
 
+#include "bench.h"
 #include "emu.h"
 #ifdef __3DS__
 #include "host.h"
@@ -687,9 +688,9 @@ static void warm_save(ArmCore* c) { (void) c; }
 /* ---------------------------------------------- open, close, frames */
 
 /* gba-ds.cfg armgba_stats = N: every N frames of the game (of a copy: of those it ran) and as a machine closes, a log
- * line of what the recompiler did. The ms compiling and in cache calls are the whole program's: a copy's include the game's. */
+ * line of what the recompiler did. The ms compiling are this machine's; those in cache calls are the whole program's. */
 #ifdef __3DS__
-extern uint64_t jitCompileTicks, jitFlushTicks;
+extern uint64_t jitFlushTicks;
 extern uint32_t jitFlushCalls;
 extern bool jitStatsOn;
 extern uint64_t renderWaitTicks, renderWorkTicks, audioWaitTicks, audioWorkTicks;
@@ -697,11 +698,23 @@ uint64_t renderThreadHostTicks(void);
 static uint64_t pictureTicks, splitTicks;
 
 struct JitSeen {
-	uint64_t compiled, deferred, flushes0, flushes1, compileTicks, flushTicks, invalidations, codeWrites, stepped, revived;
+	uint64_t compiled, deferred, flushes0, flushes1, flushesAll, heapLow, freed, compileTicks, flushTicks, flushWork, invalidations, codeWrites, stepped, revived;
 	uint32_t flushCalls, loads;
 	uint64_t renderWait, renderWork, audioWait, audioWork, picture, split;
 	unsigned last;
 };
+
+/* In a bench job the line goes with the job's results (the log's ring drops writes while the card is busy, and did drop these);
+ * otherwise to the log. Its words don't start "threads:", which the bench's own line of where each thread ran does. */
+static void stat_line(const char* format, ...) {
+	char line[600];
+	va_list args;
+	va_start(args, format);
+	vsnprintf(line, sizeof(line), format, args);
+	va_end(args);
+	if (bench_active()) bench_note(line);
+	else fprintf(stderr, "%s\n", line);
+}
 
 /* (the game's core, once its machine is made: the key is read here, so a bench job's options can switch it) */
 static void jit_stats_open(ArmCore* c, bool game) {
@@ -712,8 +725,7 @@ static void jit_stats_open(ArmCore* c, bool game) {
 	c->seen = every > 0 ? calloc(1, sizeof(*c->seen)) : NULL;
 	if (!c->seen) return;
 	c->statsEvery = (unsigned) every;
-	c->seen->compileTicks = jitCompileTicks; /* (these three are the whole program's, not this machine's) */
-	c->seen->flushTicks = jitFlushTicks;
+	c->seen->flushTicks = jitFlushTicks; /* (these two are the whole program's, not this machine's) */
 	c->seen->flushCalls = jitFlushCalls;
 	c->seen->renderWait = renderWaitTicks;
 	c->seen->renderWork = renderWorkTicks;
@@ -728,20 +740,23 @@ static void jit_stats(ArmCore* c, unsigned frame, bool game, bool closing) {
 	struct Jit* jit = c->gba->jit;
 	if (!seen || !jit || (!closing && frame % c->statsEvery)) return;
 	double const perMs = 268111.856, frames = frame - seen->last ? frame - seen->last : 1;
-	if (game) fprintf(stderr, "threads: frames %u-%u: game thread waits for the renderer %.2f ms and the mixer %.2f ms a frame; renderer works %.2f ms, mixer %.2f ms; the game thread's picture %.2f ms, second picture %.2f ms\n",
+	if (game) stat_line("jit threads: frames %u-%u: game thread waits for the renderer %.2f ms and the mixer %.2f ms a frame; renderer works %.2f ms, mixer %.2f ms; the game thread's picture %.2f ms, second picture %.2f ms",
 	        seen->last, frame, (renderWaitTicks - seen->renderWait) / perMs / frames, (audioWaitTicks - seen->audioWait) / perMs / frames,
 	        (renderWorkTicks - seen->renderWork) / perMs / frames, (audioWorkTicks - seen->audioWork) / perMs / frames, (pictureTicks - seen->picture) / perMs / frames,
 	        (splitTicks - seen->split) / perMs / frames);
-	fprintf(stderr,
-	        "jit%s%s: frames %u-%u: compiled +%u, first visits stepped +%u, flushes +%u by writes or waits +%u by full memory, compiling %.2f ms and cache calls %.2f ms (%u) a frame, code %u of %u KiB (hot %u, cold %u, careful copies %u, unused %u), heap %u KiB free; invalidated +%u, writes to code +%u, instructions stepped +%u, revived +%u, states loaded +%u\n",
+	uint64_t const others = jit->flushes - seen->flushesAll - (jit->flushReasons[0] - seen->flushes0) - (jit->flushReasons[1] - seen->flushes1);
+	stat_line("jit%s%s: frames %u-%u: compiled +%u, first visits stepped +%u, flushes +%u by writes or waits +%u by full memory (%u of them heap low) +%u by states or resets, emptying %.1f ms (%u blocks freed), compiling %.2f ms and, for all machines, cache calls %.2f ms (%u) a frame",
 	        game ? "" : " copy", closing ? " (closing)" : "", seen->last, frame, (unsigned) (jit->compiled - seen->compiled), (unsigned) (jit->deferred - seen->deferred),
-	        (unsigned) (jit->flushReasons[0] - seen->flushes0), (unsigned) (jit->flushReasons[1] - seen->flushes1),
-	        (jitCompileTicks - seen->compileTicks) / perMs / frames, (jitFlushTicks - seen->flushTicks) / perMs / frames,
-	        (unsigned) (jitFlushCalls - seen->flushCalls), (unsigned) ((jit->codeNext - jit->codeStart) >> 10),
+	        (unsigned) (jit->flushReasons[0] - seen->flushes0), (unsigned) (jit->flushReasons[1] - seen->flushes1), (unsigned) (jit->heapLowFlushes - seen->heapLow),
+	        (unsigned) others, (jit->flushWorkTicks - seen->flushWork) / perMs, (unsigned) (jit->flushedBlocks - seen->freed),
+	        (jit->compileTicks - seen->compileTicks) / perMs / frames, (jitFlushTicks - seen->flushTicks) / perMs / frames, (unsigned) (jitFlushCalls - seen->flushCalls));
+	stat_line("jit%s code: frames %u-%u: code %u of %u KiB (hot %u, cold %u, careful copies %u, unused %u), heap %u KiB free; invalidated +%u, writes to code +%u, instructions stepped +%u, revived +%u, states loaded +%u; compiles refused so far: heap low %u, no allocation %u, no code room %u",
+	        game ? "" : " copy", seen->last, frame, (unsigned) ((jit->codeNext - jit->codeStart) >> 10),
 	        (unsigned) (jit->codeSize >> 10), (unsigned) (jit->hotBytes >> 10), (unsigned) (jit->coldBytes >> 10),
 	        (unsigned) (jit->carefulBytes >> 10), (unsigned) (jit->wastedBytes >> 10), (unsigned) (host_heap_free() >> 10),
 	        (unsigned) (jit->invalidations - seen->invalidations), (unsigned) (jit->codeWrites - seen->codeWrites),
-	        (unsigned) (jit->stepped - seen->stepped), (unsigned) (jit->revived - seen->revived), (unsigned) (c->loads - seen->loads));
+	        (unsigned) (jit->stepped - seen->stepped), (unsigned) (jit->revived - seen->revived), (unsigned) (c->loads - seen->loads),
+	        (unsigned) jit->refused[0], (unsigned) jit->refused[1], (unsigned) jit->refused[2]);
 	seen->loads = c->loads;
 	seen->invalidations = jit->invalidations;
 	seen->codeWrites = jit->codeWrites;
@@ -751,7 +766,11 @@ static void jit_stats(ArmCore* c, unsigned frame, bool game, bool closing) {
 	seen->deferred = jit->deferred;
 	seen->flushes0 = jit->flushReasons[0];
 	seen->flushes1 = jit->flushReasons[1];
-	seen->compileTicks = jitCompileTicks;
+	seen->flushesAll = jit->flushes;
+	seen->heapLow = jit->heapLowFlushes;
+	seen->freed = jit->flushedBlocks;
+	seen->flushWork = jit->flushWorkTicks;
+	seen->compileTicks = jit->compileTicks;
 	seen->flushTicks = jitFlushTicks;
 	seen->flushCalls = jitFlushCalls;
 	seen->renderWait = renderWaitTicks;
@@ -1168,16 +1187,12 @@ static void run_frame(Emu* e, uint32_t keys, bool draw) {
 	videoDrawSkipped = !draw;
 	uint32_t const frame = gba->video.frameCounter;
 #ifdef __3DS__
-	if (c->ring) {
-		/* (the game: past 1.5 ms of compiling in a frame, code met for the
-		 * first times is stepped through a few times more before it's
-		 * compiled, and compiled in a later frame if it doesn't come round
-		 * again; a Mario Kart race frame has about that much to spare: 4 ms
-		 * made 18-22 ms frames) */
-		extern uint64_t jitCompileTicks, jitCompileBudget, jitCompileFrameStart;
-		jitCompileFrameStart = jitCompileTicks;
-		jitCompileBudget = 268111 * 3 / 2;
-	}
+	/* (each machine, for its own frames: past 1.5 ms of compiling in a frame, code met for the
+	 * first times is stepped through a few times more before it's
+	 * compiled, and compiled in a later frame if it doesn't come round
+	 * again; a Mario Kart race frame has about that much to spare: 4 ms
+	 * made 18-22 ms frames) */
+	jitSetCompileBudget(gba, 268111 * 3 / 2);
 #endif
 	do {
 		gbaRunPart(gba);
