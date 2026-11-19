@@ -239,6 +239,7 @@ static bool set_option(Config* c, const char* key, const char* val) {
 	BOOL("async_upload", asyncUpload)
 	BOOL("gpu_twin", gpuTwin)
 	BOOL("twin_check", twinCheck)
+	BOOL("tex_check", texCheck)
 	BOOL("cpu_tile", cpuTile)
 	INT("bench_check", benchCheck)
 	BOOL("core_probe", coreProbe)

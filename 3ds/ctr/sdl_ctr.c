@@ -458,6 +458,8 @@ uint32_t host_gpu_wait_ticks(void) {
 	return atomic_load(&gpuWait);
 }
 
+static void tex_verify(void);
+
 static void frame_begin(void) {
 	if (inFrame) return;
 	bool sync = false;
@@ -467,6 +469,7 @@ static void frame_begin(void) {
 	}
 	doomed_targets_free(); /* (citro3d stops the app if a render target goes inside a frame) */
 	GPU_WAIT_IN(waitBegin, C3D_FrameBegin(sync ? C3D_FRAME_SYNCDRAW : 0));
+	tex_verify();
 	doomed_free();
 	inFrame = true;
 	++frameSerial;
@@ -767,7 +770,10 @@ SDL_Texture* SDL_CreateTexture(SDL_Renderer* r, Uint32 format, int access, int w
 static SDL_Texture* doomed[256];
 static int nDoomed;
 
+static void tex_forget(const SDL_Texture* t);
+
 static void texture_free(SDL_Texture* t) {
+	tex_forget(t);
 	for (int i = 0; i < STAGE_SLOTS; ++i) {
 		if (t->stage[i]) linearFree(t->stage[i]);
 	}
@@ -1082,6 +1088,63 @@ static bool twin_matches(const u32* fb, const u32* twin) {
 	return true;
 }
 
+/* gba-ds.cfg's tex_check (a test): what the GPU made of each 240x160 picture is read back from its texture once the next frame
+ * begins (the queue is empty then) and compared word for word with the picture it was given: the view the CPU's checks can't have
+ * of the copy engine (a stale twin, a stage written too soon, a missed cache line). */
+static bool texCheck;
+#define TEX_CHECKED 4
+static struct {
+	const SDL_Texture* t;
+	u32* want; /* the texture's words in tile order, as the picture should have made them */
+	bool have;
+} texSeen[TEX_CHECKED];
+static unsigned texChecked, texDiffers;
+
+void host_set_tex_check(bool on) {
+	texCheck = on;
+}
+
+static void tex_forget(const SDL_Texture* t) {
+	for (int i = 0; i < TEX_CHECKED; ++i) {
+		if (texSeen[i].t == t) texSeen[i].t = NULL, texSeen[i].have = false;
+	}
+}
+
+static void tex_verify(void) {
+	for (int i = 0; i < TEX_CHECKED; ++i) {
+		if (!texSeen[i].have) continue;
+		texSeen[i].have = false;
+		const SDL_Texture* t = texSeen[i].t;
+		svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32) t->tex.data, t->tex.size);
+		const u32* got = t->tex.data;
+		int bad = 0, firstX = 0, firstY = 0;
+		for (int y = 0; y < 160; ++y) {
+			for (int x = 0; x < 240; ++x) {
+				if (got[tiled((u32) x, (u32) y, t->tex.width)] != texSeen[i].want[y * 240 + x] && !bad++) firstX = x, firstY = y;
+			}
+		}
+		++texChecked;
+		if (bad && texDiffers++ < 20) logLine("textures: tex check: picture %u differs in %d words, the first at (%d,%d)", texChecked, bad, firstX, firstY);
+		if (texChecked % 600 == 0) logLine("textures: tex check: %u pictures read back, %u differed", texChecked, texDiffers);
+	}
+}
+
+/* (pixels as they were given: the words the texture should hold are the same swap as the stage's) */
+static void tex_note(const SDL_Texture* t, const void* pixels, int pitch) {
+	if (!texCheck || !pixels || pitch != 240 * 4 || t->w != 240 || t->h != 160 || !t->streaming || t->tex.width < 240) return;
+	if (t->format != SDL_PIXELFORMAT_ABGR8888 && t->format != SDL_PIXELFORMAT_XBGR8888) return;
+	int k = -1;
+	for (int i = 0; i < TEX_CHECKED && k < 0; ++i) k = texSeen[i].t == t ? i : -1;
+	for (int i = 0; i < TEX_CHECKED && k < 0; ++i) k = texSeen[i].t ? -1 : i;
+	if (k < 0) return;
+	if (!texSeen[k].want && !(texSeen[k].want = malloc(240 * 160 * sizeof(u32)))) return;
+	const u32 alpha = t->format == SDL_PIXELFORMAT_XBGR8888 ? 0xFF000000u : 0;
+	const u32* src = pixels;
+	for (int i = 0; i < 240 * 160; ++i) texSeen[k].want[i] = __builtin_bswap32(src[i] | alpha);
+	texSeen[k].t = t;
+	texSeen[k].have = true;
+}
+
 static bool update_from_twin(SDL_Texture* t, const void* pixels) {
 	if (!pixels || pixels != twinKey || !twinPx || !twinOn || !twinOk) return false;
 	if (twinCheck) {
@@ -1259,6 +1322,7 @@ int SDL_UpdateTexture(SDL_Texture* t, const SDL_Rect* rect, const void* pixels, 
 		if (!done && t->w == 240 && t->h == 160) done = update_from_twin(t, pixels);
 		if (!done) done = update_by_gpu(t, pixels, pitch, 0, t->h);
 		if (!done) done = update_by_cpu(t, rect, pixels, pitch) == 0;
+		if (done) tex_note(t, pixels, pitch);
 		if (t->w == 240 && t->h == 160) {
 			upTicks += svcGetSystemTick() - t0;
 			if (++upCount == 600) {

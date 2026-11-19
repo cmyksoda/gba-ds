@@ -71,6 +71,7 @@ typedef struct Config {
 	bool asyncUpload;  /* async_upload: the 3DS queues a picture's copy to its texture instead of waiting for it (default on) */
 	bool gpuTwin;      /* gpu_twin: the 3DS's render worker also writes the picture in the GPU's byte order, so the game thread swaps and flushes nothing */
 	bool twinCheck;    /* twin_check: a test: each twin compared with its picture before it is used (the 3DS) */
+	bool texCheck;     /* tex_check: a test: each picture's texture read back once the GPU is done and compared with the picture (the 3DS) */
 	bool cpuTile;      /* cpu_tile: the 3DS tiles a whole 240x160 picture itself, not by the GPU's copy engine */
 	int videoWake;     /* video_wake: mGBA's drawing thread is woken every N+1 lines, N = 0, 1, 3, 7, 15, 31 or 63 (the patched libmgba) */
 	int core1Limit;    /* core1_limit: the percent of the system core given to a thread on core 1 */

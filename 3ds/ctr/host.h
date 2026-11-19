@@ -57,6 +57,7 @@ void host_set_async_upload(bool on);
 #define HOST_TWIN_STRIDE 256 /* (= emu.h's EMU_TWIN_STRIDE) */
 void host_set_gpu_twin(bool on);
 void host_set_twin_check(bool on); /* gba-ds.cfg's twin_check (a test): each twin is compared with its picture before use */
+void host_set_tex_check(bool on);  /* gba-ds.cfg's tex_check (a test): each picture texture is read back after the GPU's copy and compared */
 bool host_gpu_twin_ready(void);
 void host_picture_twin(const void* fb, const void* gpuOrder);
 void host_flush_data(const void* p, size_t n);
