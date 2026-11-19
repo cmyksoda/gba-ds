@@ -690,7 +690,7 @@ static void warm_save(ArmCore* c) { (void) c; }
 /* gba-ds.cfg armgba_stats = N: every N frames of the game (of a copy: of those it ran) and as a machine closes, a log
  * line of what the recompiler did. The ms compiling and in cache calls are the whole program's: a copy's include the game's. */
 #ifdef __3DS__
-extern uint64_t jitCompileTicks, jitFlushTicks, jitFlushWorkTicks;
+extern uint64_t jitCompileTicks, jitFlushTicks;
 extern uint32_t jitFlushCalls;
 extern bool jitStatsOn;
 extern uint64_t renderWaitTicks, renderWorkTicks, audioWaitTicks, audioWorkTicks;
@@ -705,7 +705,7 @@ struct JitSeen {
 };
 
 /* In a bench job the line goes with the job's results (the log's ring drops writes while the card is busy, and did drop these);
- * otherwise to the log. */
+ * otherwise to the log. Its words don't start "threads:", which the bench's own line of where each thread ran does. */
 static void stat_line(const char* format, ...) {
 	char line[600];
 	va_list args;
@@ -741,7 +741,7 @@ static void jit_stats(ArmCore* c, unsigned frame, bool game, bool closing) {
 	struct Jit* jit = c->gba->jit;
 	if (!seen || !jit || (!closing && frame % c->statsEvery)) return;
 	double const perMs = 268111.856, frames = frame - seen->last ? frame - seen->last : 1;
-	if (game) stat_line("threads: frames %u-%u: game thread waits for the renderer %.2f ms and the mixer %.2f ms a frame; renderer works %.2f ms, mixer %.2f ms; the game thread's picture %.2f ms, second picture %.2f ms",
+	if (game) stat_line("jit threads: frames %u-%u: game thread waits for the renderer %.2f ms and the mixer %.2f ms a frame; renderer works %.2f ms, mixer %.2f ms; the game thread's picture %.2f ms, second picture %.2f ms",
 	        seen->last, frame, (renderWaitTicks - seen->renderWait) / perMs / frames, (audioWaitTicks - seen->audioWait) / perMs / frames,
 	        (renderWorkTicks - seen->renderWork) / perMs / frames, (audioWorkTicks - seen->audioWork) / perMs / frames, (pictureTicks - seen->picture) / perMs / frames,
 	        (splitTicks - seen->split) / perMs / frames);
@@ -749,7 +749,7 @@ static void jit_stats(ArmCore* c, unsigned frame, bool game, bool closing) {
 	stat_line("jit%s%s: frames %u-%u: compiled +%u, first visits stepped +%u, flushes +%u by writes or waits +%u by full memory (%u of them heap low) +%u by states or resets, emptying %.1f ms (%u blocks freed), compiling %.2f ms and cache calls %.2f ms (%u) a frame",
 	        game ? "" : " copy", closing ? " (closing)" : "", seen->last, frame, (unsigned) (jit->compiled - seen->compiled), (unsigned) (jit->deferred - seen->deferred),
 	        (unsigned) (jit->flushReasons[0] - seen->flushes0), (unsigned) (jit->flushReasons[1] - seen->flushes1), (unsigned) (jit->heapLowFlushes - seen->heapLow),
-	        (unsigned) others, (jitFlushWorkTicks - seen->flushWork) / perMs, (unsigned) (jit->flushedBlocks - seen->freed),
+	        (unsigned) others, (jit->flushWorkTicks - seen->flushWork) / perMs, (unsigned) (jit->flushedBlocks - seen->freed),
 	        (jitCompileTicks - seen->compileTicks) / perMs / frames, (jitFlushTicks - seen->flushTicks) / perMs / frames, (unsigned) (jitFlushCalls - seen->flushCalls));
 	stat_line("jit%s code: frames %u-%u: code %u of %u KiB (hot %u, cold %u, careful copies %u, unused %u), heap %u KiB free; invalidated +%u, writes to code +%u, instructions stepped +%u, revived +%u, states loaded +%u",
 	        game ? "" : " copy", seen->last, frame, (unsigned) ((jit->codeNext - jit->codeStart) >> 10),
@@ -769,7 +769,7 @@ static void jit_stats(ArmCore* c, unsigned frame, bool game, bool closing) {
 	seen->flushesAll = jit->flushes;
 	seen->heapLow = jit->heapLowFlushes;
 	seen->freed = jit->flushedBlocks;
-	seen->flushWork = jitFlushWorkTicks;
+	seen->flushWork = jit->flushWorkTicks;
 	seen->compileTicks = jitCompileTicks;
 	seen->flushTicks = jitFlushTicks;
 	seen->flushCalls = jitFlushCalls;
