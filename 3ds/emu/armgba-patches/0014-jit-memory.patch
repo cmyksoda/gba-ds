@@ -103,7 +103,7 @@ index 936946d..cbd7f76 100644
  	c->block->outCount = 0;
  }
 diff --git a/src/cpu/jit.c b/src/cpu/jit.c
-index a665665..85c9f89 100644
+index a665665..f42b2b8 100644
 --- a/src/cpu/jit.c
 +++ b/src/cpu/jit.c
 @@ -236,7 +236,12 @@ static void addPages(struct Jit* jit, struct Block* block) {
@@ -334,7 +334,7 @@ index a665665..85c9f89 100644
  		}
  		registerBlock(jit, block);
  	}
-@@ -1416,19 +1470,31 @@ enum {
+@@ -1416,19 +1470,33 @@ enum {
  };
  
  #if defined(__3DS__)
@@ -352,8 +352,10 @@ index a665665..85c9f89 100644
 +// compiling used up the game's time and the game compiled no careful copies while a capture ran.
 +void jitSetCompileBudget(struct GBA* gba, uint64_t ticks) {
 +	struct Jit* const jit = gba->jit;
-+	jit->compileFrameStart = jit->compileTicks;
-+	jit->compileBudget = ticks;
++	if (jit) {
++		jit->compileFrameStart = jit->compileTicks;
++		jit->compileBudget = ticks;
++	}
 +}
 +#else
 +void jitSetCompileBudget(struct GBA* gba, uint64_t ticks) {
@@ -373,7 +375,7 @@ index a665665..85c9f89 100644
  	return false;
  #endif
  }
-@@ -1441,9 +1507,9 @@ void jitSetCompileAfter(int times) {
+@@ -1441,9 +1509,9 @@ void jitSetCompileAfter(int times) {
  }
  
  // Times a block's start is stepped through before it's compiled, as things are.
@@ -385,7 +387,7 @@ index a665665..85c9f89 100644
  }
  
  // Returns the block for a PC: an existing one, one brought back unchanged from before a rewrite, or
-@@ -1466,7 +1532,7 @@ static struct Block* getBlock(struct GBA* gba, uint32_t pc, bool thumb) {
+@@ -1466,7 +1534,7 @@ static struct Block* getBlock(struct GBA* gba, uint32_t pc, bool thumb) {
  	// then steps to the end of the block
  	// without looking each instruction up.
  	uint8_t* seen = &jit->seenCount[lookupHash(key)];
@@ -394,7 +396,7 @@ index a665665..85c9f89 100644
  #if defined(__3DS__)
  		jitBudgetPutOff += *seen >= compileAfterSetting;
  #endif
-@@ -1480,6 +1546,7 @@ static struct Block* getBlock(struct GBA* gba, uint32_t pc, bool thumb) {
+@@ -1480,6 +1548,7 @@ static struct Block* getBlock(struct GBA* gba, uint32_t pc, bool thumb) {
  	block = compileBlock(gba, pc, thumb, NULL);
  	if (!block) {
  		++jit->flushReasons[1];
@@ -402,7 +404,7 @@ index a665665..85c9f89 100644
  		jitFlush(gba);
  		block = compileBlock(gba, pc, thumb, NULL);
  	}
-@@ -2157,7 +2224,7 @@ void jitRunLoop(struct GBA* gba) {
+@@ -2157,7 +2226,7 @@ void jitRunLoop(struct GBA* gba) {
  				// A place that keeps being returned to, as an interrupt returns to the same instruction line
  				// after line, gets a block of its own; the rest, whose events fall all over, are stepped.
  				uint8_t* seen = &jit->seenCount[lookupHash(key)];
@@ -411,7 +413,7 @@ index a665665..85c9f89 100644
  					if (jit->midAfter && *seen < jit->midAfter) {
  						++*seen;
  					}
-@@ -2262,7 +2329,7 @@ void jitRunLoop(struct GBA* gba) {
+@@ -2262,7 +2331,7 @@ void jitRunLoop(struct GBA* gba) {
  				// to the event instead, as when there's no room for one.
  				// Nor is one compiled in a frame that has used up its time for compiling, or once careful
  				// copies have taken their share of the code memory (CAREFUL_SHARE).
@@ -420,7 +422,7 @@ index a665665..85c9f89 100644
  				if (!earned) {
  					struct Block* from = link->from;
  					if (gba->video.frameCounter - from->firesFrom > CAREFUL_FRAMES) {
-@@ -2305,7 +2372,7 @@ void jitRunLoop(struct GBA* gba) {
+@@ -2305,7 +2374,7 @@ void jitRunLoop(struct GBA* gba) {
  			// When tracing, every block is entered from here.
  			// A block not met yet is left to the run loop, which steps through it the first time.
  			if (!jit->flushRequested && !jit->waitsChanged && compilable(gba, next, thumb) && !gba->traceFile &&
@@ -429,7 +431,7 @@ index a665665..85c9f89 100644
  				uint64_t flushes = jit->flushes;
  				struct Block* target = getBlock(gba, next, thumb);
  				if (target && flushes == jit->flushes) {
-@@ -2835,6 +2902,7 @@ bool jitInit(struct GBA* gba) {
+@@ -2835,6 +2904,7 @@ bool jitInit(struct GBA* gba) {
  	jit->gba = gba;
  	gba->jit = jit;
  	jit->midAfter = MID_AFTER;
