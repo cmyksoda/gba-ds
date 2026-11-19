@@ -59,7 +59,11 @@ void __system_allocateHeaps(void) {
 	/* An emulator gives the 124 MiB a New 3DS's own software gets; the console
 	 * gives homebrew 64 MiB (heap 41568 KiB, 2026-11-12). The same here, so
 	 * that what is tested is what the console has. */
+#ifdef GBADS_EMU_HEAP_KIB /* (a build option: in Azahar, the heap of a New 3DS console in its own mode, 84 MiB free at a job's start) */
+	if (isEmulator() && heap > ((u32) GBADS_EMU_HEAP_KIB << 10)) heap = (u32) GBADS_EMU_HEAP_KIB << 10, linear = LINEAR_WANTED;
+#else
 	if (isEmulator() && heap > (41568u << 10)) heap = (41568u << 10) + (16u << 20) - LINEAR_WANTED, linear = LINEAR_WANTED;
+#endif
 	__ctru_heap_size = heap;
 	__ctru_linear_heap_size = linear;
 	if (R_FAILED(svcControlMemory(&__ctru_heap, OS_HEAP_AREA_BEGIN, 0, __ctru_heap_size, MEMOP_ALLOC, MEMPERM_READ | MEMPERM_WRITE)))
