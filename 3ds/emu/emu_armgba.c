@@ -1186,14 +1186,12 @@ static void run_frame(Emu* e, uint32_t keys, bool draw) {
 	videoDrawSkipped = !draw;
 	uint32_t const frame = gba->video.frameCounter;
 #ifdef __3DS__
-	if (c->ring) {
-		/* (the game: past 1.5 ms of compiling in a frame, code met for the
-		 * first times is stepped through a few times more before it's
-		 * compiled, and compiled in a later frame if it doesn't come round
-		 * again; a Mario Kart race frame has about that much to spare: 4 ms
-		 * made 18-22 ms frames) */
-		jitSetCompileBudget(gba, 268111 * 3 / 2);
-	}
+	/* (each machine, for its own frames: past 1.5 ms of compiling in a frame, code met for the
+	 * first times is stepped through a few times more before it's
+	 * compiled, and compiled in a later frame if it doesn't come round
+	 * again; a Mario Kart race frame has about that much to spare: 4 ms
+	 * made 18-22 ms frames) */
+	jitSetCompileBudget(gba, 268111 * 3 / 2);
 #endif
 	do {
 		gbaRunPart(gba);
