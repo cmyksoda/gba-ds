@@ -750,12 +750,13 @@ static void jit_stats(ArmCore* c, unsigned frame, bool game, bool closing) {
 	        (unsigned) (jit->flushReasons[0] - seen->flushes0), (unsigned) (jit->flushReasons[1] - seen->flushes1), (unsigned) (jit->heapLowFlushes - seen->heapLow),
 	        (unsigned) others, (jit->flushWorkTicks - seen->flushWork) / perMs, (unsigned) (jit->flushedBlocks - seen->freed),
 	        (jit->compileTicks - seen->compileTicks) / perMs / frames, (jitFlushTicks - seen->flushTicks) / perMs / frames, (unsigned) (jitFlushCalls - seen->flushCalls));
-	stat_line("jit%s code: frames %u-%u: code %u of %u KiB (hot %u, cold %u, careful copies %u, unused %u), heap %u KiB free; invalidated +%u, writes to code +%u, instructions stepped +%u, revived +%u, states loaded +%u",
+	stat_line("jit%s code: frames %u-%u: code %u of %u KiB (hot %u, cold %u, careful copies %u, unused %u), heap %u KiB free; invalidated +%u, writes to code +%u, instructions stepped +%u, revived +%u, states loaded +%u; compiles refused so far: heap low %u, no allocation %u, no code room %u",
 	        game ? "" : " copy", seen->last, frame, (unsigned) ((jit->codeNext - jit->codeStart) >> 10),
 	        (unsigned) (jit->codeSize >> 10), (unsigned) (jit->hotBytes >> 10), (unsigned) (jit->coldBytes >> 10),
 	        (unsigned) (jit->carefulBytes >> 10), (unsigned) (jit->wastedBytes >> 10), (unsigned) (host_heap_free() >> 10),
 	        (unsigned) (jit->invalidations - seen->invalidations), (unsigned) (jit->codeWrites - seen->codeWrites),
-	        (unsigned) (jit->stepped - seen->stepped), (unsigned) (jit->revived - seen->revived), (unsigned) (c->loads - seen->loads));
+	        (unsigned) (jit->stepped - seen->stepped), (unsigned) (jit->revived - seen->revived), (unsigned) (c->loads - seen->loads),
+	        (unsigned) jit->refused[0], (unsigned) jit->refused[1], (unsigned) jit->refused[2]);
 	seen->loads = c->loads;
 	seen->invalidations = jit->invalidations;
 	seen->codeWrites = jit->codeWrites;
