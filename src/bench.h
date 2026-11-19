@@ -13,6 +13,8 @@
 /* Runs the jobs file cfg->bench; false if it can't be read. */
 bool bench_run(Config* cfg);
 bool bench_active(void);
+/* A line of the running job's own ("bench JOB " and then text, under 600 bytes), written with its results and never dropped. */
+void bench_note(const char* text);
 /* Once a frame from the game loop: this frame's emulating and drawing times, and GBA DS's own work between them
  * (the second screen's map, HUD and snapshot pictures); the loop's work before emulating, and the whole of its
  * body (what the frame took outside it is the lines written, the loop's start and its end). */

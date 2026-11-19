@@ -97,6 +97,13 @@ static void drain(void) {}
 static void stop_writer(void) {}
 #endif
 
+void bench_note(const char* text) {
+	if (!active) return;
+	char line[640];
+	snprintf(line, sizeof(line), "bench %s %s", jobId, text);
+	put(line);
+}
+
 /* Which core each thread ran on (the console's; an emulator's processor ids mean nothing), once for a job, again if it
  * changed by the end. */
 static void threads_line(void) {
