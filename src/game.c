@@ -7726,16 +7726,44 @@ static void draw_osd(void) {
  * above it), centred in the rows below that. A user's own logo too big
  * for that is shrunk to fit. False if there's no logo. */
 #define LOGO_IDLE 128
+/* A HUD game's logo, kept decoded: its backdrops are built again as the level's name or the held picture change, and the
+ * first build went to the SD card for the file in the middle of a frame (100-230 ms in Ninja Five-O, Sonic Advance 3). */
+static SDL_Surface* hudLogoSurf;
+static bool hudLogoPixel;
+static int hudLogoSub;
+
+static void hud_logo_surface_drop(void) {
+	if (hudLogoSurf) SDL_FreeSurface(hudLogoSurf);
+	hudLogoSurf = NULL;
+}
+
+static SDL_Surface* hud_logo_surface(bool* pixelArt, int* sub) {
+	if (!hudProf) return ui_logo_surface(cfg, romPath, emu.gameCode, pixelArt, sub);
+	if (!hudLogoSurf) hudLogoSurf = ui_logo_surface(cfg, romPath, emu.gameCode, &hudLogoPixel, &hudLogoSub);
+	*pixelArt = hudLogoPixel, *sub = hudLogoSub;
+	return hudLogoSurf;
+}
+
+/* (the logo's file read now, at the start or when the logo changes, where the frame has no hurry) */
+static void hud_logo_prime(void) {
+	hud_logo_surface_drop();
+	if (!hudProf) return;
+	bool pixelArt;
+	int sub;
+	hud_logo_surface(&pixelArt, &sub);
+}
+
 static bool logo_draw(uint32_t* px, int cw, int ch, int k, int top, int alpha) {
 	bool pixelArt = false;
 	int sub = 1;
-	SDL_Surface* lg = ui_logo_surface(cfg, romPath, emu.gameCode, &pixelArt, &sub);
+	SDL_Surface* lg = hud_logo_surface(&pixelArt, &sub);
 	if (!lg) return false;
+	SDL_Surface* const kept = hudProf ? lg : NULL; /* (the cache's own: not freed here) */
 	int room = ch - top;
 	if (room <= 0) {
 		/* (no room below a HUD that fills the screen: Mega Man Battle
 		 * Network's custom screen, hud.rows GBA_H) */
-		SDL_FreeSurface(lg);
+		if (lg != kept) SDL_FreeSurface(lg);
 		return false;
 	}
 	int w = SDL_max(1, lg->w * k / sub), h = SDL_max(1, lg->h * k / sub);
@@ -7743,7 +7771,10 @@ static bool logo_draw(uint32_t* px, int cw, int ch, int k, int top, int alpha) {
 		/* a scraped logo at full resolution, onto a canvas with fewer
 		 * pixels per GBA pixel: averaged down to them (GEN-11) */
 		SDL_Surface* sm = ui_resample(lg, w, h);
-		if (sm) SDL_FreeSurface(lg), lg = sm;
+		if (sm) {
+			if (lg != kept) SDL_FreeSurface(lg);
+			lg = sm;
+		}
 	}
 	if (w > cw || h > room) {
 		float sc = SDL_min((float) cw / lg->w, (float) room / lg->h);
@@ -7768,7 +7799,7 @@ static bool logo_draw(uint32_t* px, int cw, int ch, int k, int top, int alpha) {
 		}
 	}
 	SDL_UnlockSurface(lg);
-	SDL_FreeSurface(lg);
+	if (lg != kept) SDL_FreeSurface(lg);
 	return true;
 }
 
@@ -8483,6 +8514,7 @@ static void logo_refresh(void) {
 	logoSub = 1;
 	bool got = ui_load_logo(cfg, romPath, emu.gameCode, logoTex, &logoW, &logoH, &logoPixel);
 	logoProvisional = ui_logo_provisional();
+	hud_logo_prime();
 	if (!got) return;
 	make_logo_canvas();
 	hudLogoBelowDone = hudLogoDone = false; /* the HUD's pictures with it */
@@ -8634,6 +8666,7 @@ static enum GameExit game_run_inner(Config* c, const char* rom, bool fromLibrary
 	logoSub = 1;
 	if (ui_load_logo(cfg, rom, emu.gameCode, logoTex, &logoW, &logoH, &logoPixel)) make_logo_canvas();
 	logoProvisional = ui_logo_provisional();
+	hud_logo_prime();
 
 	memset(pageLen, 0, sizeof(pageLen));
 	memset(rowN, 0, sizeof(rowN));
@@ -10025,6 +10058,7 @@ static enum GameExit game_run_inner(Config* c, const char* rom, bool fromLibrary
 	free(stillPx);
 	stillPx = NULL;
 	stillValid = false;
+	hud_logo_surface_drop();
 	for (int i = 0; i < nViews; ++i) {
 		SDL_DestroyTexture(gameTex[i]);
 #ifdef COLOR_16_BIT
