@@ -199,13 +199,16 @@ void* jitHostAllocCode(size_t* size) {
 			spare = least;
 		}
 		for (; spare >= least; spare -= 1 << 20) {
-			uint8_t* code = memalign(0x1000, spare);
+			uint8_t* code = main ? host_top_alloc_code(spare) : NULL;
+			if (!code) {
+				code = memalign(0x1000, spare);
+			}
 			if (!code) {
 				continue;
 			}
 			bool protected = false;
 			if (!makeExecutable(code, spare, &protected)) {
-				free(code);
+				host_rom_free(code);
 				break;
 			}
 			buffers[slot].code = code;
@@ -229,7 +232,7 @@ static void release(int i) {
 		Result rc = svcControlProcessMemory(self, (u32) buffers[i].code, 0, buffers[i].size, MEMOP_PROT, MEMPERM_READ | MEMPERM_WRITE);
 		logLine("jit: code memory back to read-write: %08lX", (unsigned long) rc);
 	}
-	free(buffers[i].code);
+	host_rom_free(buffers[i].code);
 	memset(&buffers[i], 0, sizeof(buffers[i]));
 }
 

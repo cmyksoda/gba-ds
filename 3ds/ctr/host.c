@@ -541,6 +541,10 @@ void host_linear_free(void* p) {
 	linearFree(p);
 }
 
+uint8_t* host_top_alloc_code(size_t size) {
+	return top_alloc_room((size + 0xFFF) & ~(size_t) 0xFFF, HEAP_ROOM);
+}
+
 uint8_t* host_top_alloc(size_t size) {
 	size = (size + 0xFFF) & ~(size_t) 0xFFF;
 	uint8_t* p = top_alloc_room(size, HEAP_ROOM);

@@ -148,7 +148,11 @@ code memory tests).
 
 A game's ROM is read once and shared by every copy of the game (the game, the hidden copy, a logo's),
 and kept at the top of the heap's address range with the heap's end brought down below it, so even a
-32 MiB game finds one stretch of memory. mGBA's own large blocks (a ROM copy for a copy of the game
+32 MiB game finds one stretch of memory. A plain ROM's room is set aside before the game's machine and code memory
+are made, and the game's code memory goes to the top as well, under the ROM, when the break leaves it room: the
+heap's peak then holds no 16-24 MiB of code, so a small block a game leaves behind (it is made at the peak) can't hold the
+break above the room the next 32 MiB ROM needs (a bench session of 54 games left MOTHER 3 no room on a 62 MiB heap before
+this). The hidden copy's scratch states go back with the game for the same reason. mGBA's own large blocks (a ROM copy for a copy of the game
 that writes to it) come from there too (`mgba/memory-map-hook.patch`). MOTHER 3 starts in the 64 MB mode
 with about 9 MiB of the heap free; the CIA asks for the 80 MB mode. The Azahar emulator gives 124 MiB;
 `host.c` keeps the heap to the console's size there, so that what is tested is what the console has.

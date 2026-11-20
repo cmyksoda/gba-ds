@@ -18,6 +18,9 @@ size_t host_heap_free(void);
 void host_heap_shape(char* out, size_t n);
 /* A ROM at the top of the heap's range, out of the way of the heap's own allocations (NULL: no room). */
 uint8_t* host_top_alloc(size_t size);
+/* The game's code memory at the top as well, under its ROM, if the heap's break leaves it room (NULL: it doesn't; given back with
+ * host_rom_free). Made in the heap, its peak takes the break up with it, and what the game leaves behind there holds it. */
+uint8_t* host_top_alloc_code(size_t size);
 bool host_top_free(void* p); /* false: not one of those */
 bool host_top_owns(const void* p);
 void host_rom_free(void* p); /* either kind */
