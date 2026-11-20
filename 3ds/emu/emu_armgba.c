@@ -105,7 +105,7 @@ void emu_read_cancel(const volatile bool* flag) {
 #endif
 
 #ifdef __3DS__
-static _Thread_local uint8_t* romRoomNow; /* (the room emu_open set aside at the top for the read that follows, and its size) */
+static _Thread_local uint8_t* romRoomNow; /* (the room emu_open set aside at the top for the read that comes next, and its size) */
 static _Thread_local size_t romRoomSize;
 #endif
 
@@ -951,7 +951,7 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 #endif
 	if (!s) {
 #ifdef __3DS__
-		/* (a plain file's room goes to its read as it is: given back first, another core's start could take it) */
+		/* (a plain file's room goes to its read as it is; a .zip's is given back first) */
 		if (romRoom && host_top_owns(romRoom)) romRoomNow = romRoom, romRoomSize = romRoomBytes;
 		else host_rom_free(romRoom);
 		romRoom = NULL;
