@@ -197,8 +197,29 @@ static int logdev_close(struct _reent* r, void* file) {
 	return 0;
 }
 
+/* The log's last bytes, kept apart from the ring, which drops writes while the card is busy: a bench job that fails to start
+ * says why in its own line (host_log_tail), as the posted log may not reach that far. */
+static char tail[600];
+static u32 tailAt;
+
+static void tail_add(const char* buf, size_t n) {
+	if (n > sizeof(tail)) buf += n - sizeof(tail), n = sizeof(tail);
+	for (size_t i = 0; i < n; ++i) tail[(tailAt + i) % sizeof(tail)] = buf[i];
+	tailAt = (u32) ((tailAt + n) % sizeof(tail));
+}
+
+void host_log_tail(char* out, size_t size) {
+	size_t k = 0;
+	for (size_t i = 0; i < sizeof(tail) && k + 1 < size; ++i) {
+		char c = tail[(tailAt + i) % sizeof(tail)];
+		if (c) out[k++] = c == '\n' ? '|' : c;
+	}
+	out[k] = 0;
+}
+
 static ssize_t logdev_write(struct _reent* r, void* file, const char* buf, size_t n) {
 	(void) r, (void) file;
+	tail_add(buf, n);
 	if (!lg.threaded) {
 		if (lg.file && fwrite(buf, 1, n, lg.file) == n) fflush(lg.file);
 		return (ssize_t) n;

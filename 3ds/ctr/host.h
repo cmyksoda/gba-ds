@@ -39,6 +39,8 @@ void host_next_thread_name(const char* name);
 /* The bench: a job begins (ended threads are forgotten) / one line with the core each thread found itself on and
  * whether the core asked for was refused. */
 void host_threads_job_start(void);
+/* The log's last few hundred bytes, newlines as '|' (for a bench job that failed to start). */
+void host_log_tail(char* out, size_t size);
 void host_threads_describe(char* out, size_t n);
 /* The time sdl_ctr.c's drawing has waited for the GPU, in SDL_GetPerformanceCounter ticks (a sum that wraps). */
 uint32_t host_gpu_wait_ticks(void);

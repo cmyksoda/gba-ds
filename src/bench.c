@@ -395,7 +395,13 @@ bool bench_run(Config* cfg) {
 		put(msg);
 #endif
 		if (!jobFrames) {
+#ifdef __3DS__
+			char why[480];
+			host_log_tail(why, sizeof(why));
+			snprintf(msg, sizeof(msg), "bench %s failed: the game didn't start; the log's last lines: %s", jobId, why);
+#else
 			snprintf(msg, sizeof(msg), "bench %s failed: the game didn't start (the app's log says why)", jobId);
+#endif
 			put(msg);
 		}
 		snprintf(msg, sizeof(msg), "bench %s done", jobId);
