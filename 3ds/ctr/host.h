@@ -67,12 +67,10 @@ void host_set_twin_check(bool on); /* gba-ds.cfg's twin_check (a test): each twi
 void host_set_tex_check(bool on);  /* gba-ds.cfg's tex_check (a test): each picture texture is read back after the GPU's copy and compared */
 bool host_gpu_twin_ready(void);
 void host_picture_twin(const void* fb, const void* gpuOrder);
-/* gba-ds.cfg's raw_picture: the render worker's picture buffers are linear memory (rows 240 words, a little slack after) that the
- * worker flushes itself when a picture is whole; the copy engine tiles them as they are, and the GPU puts the channels right when
- * it draws (a texture combiner swizzle). host_raw_picture_ready: on, and the start's self-test (a draw both ways, compared) passed.
- * host_picture_raw(fb) says the pixels fb are such a buffer (NULL: none) for the texture updates that follow. */
+/* gba-ds.cfg's raw_picture: the render worker's picture buffers are linear memory it flushes itself, so the copy engine tiles them as they are and the
+ * GPU's combiner puts the channels right. host_raw_picture_ready: on, and the self-test passed; host_picture_raw(fb): fb is such a buffer (NULL: none). */
 #define HOST_RAW_SLACK_WORDS 64 /* (the copy engine reads 16 words past a picture's last row) */
-void host_set_raw_picture(bool on);
+void host_set_raw_picture(int mode); /* 0 off, 1 the copy in one transfer, 2 in two (a linear copy with gaps, then the usual transfer) */
 void host_set_raw_check(bool on); /* gba-ds.cfg's raw_check (a test): each raw picture is also drawn the old way, offscreen, and compared */
 bool host_raw_picture_ready(void);
 void host_picture_raw(const void* fb);

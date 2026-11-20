@@ -1269,11 +1269,15 @@ static void twin_selftest(void) {
 /* gba-ds.cfg's raw_picture: the render worker's picture (linear memory it writes back itself) is copied to the texture as it is, and the GPU
  * puts the channels right when it draws (raw_draw_flush). host_picture_raw is told, each frame, which pixels are such a picture. */
 static bool rawOn, rawOk, rawCheckOn;
+static int rawMode; /* 1: one transfer; 2: a copy with gaps, then the usual transfer */
+static signed char rawVerdict[3]; /* the self-test of each mode: 1 passed, -1 failed, 0 not run */
 static const void* rawKey;
 static u64 upRawTicks;
 
-void host_set_raw_picture(bool on) {
-	rawOn = on;
+void host_set_raw_picture(int mode) {
+	rawMode = mode == 2 ? 2 : mode ? 1 : 0;
+	rawOn = rawMode != 0;
+	rawOk = rawVerdict[rawMode] > 0;
 }
 
 void host_set_raw_check(bool on) {
@@ -1281,16 +1285,14 @@ void host_set_raw_check(bool on) {
 }
 
 static void raw_selftest(void);
-static bool rawTested;
+static void frame_end_now(void);
 
-/* The self-test runs once, the first time a game asks with the option on: the copy's two dimensions are not what the GPU's documentation
- * covers, so a build or job that doesn't use raw_picture never sends it. */
+/* The self-test runs once for each mode, the first time a game asks with the option on: the copy's two dimensions are not what the GPU's
+ * documentation covers, so a build or job that doesn't use raw_picture never sends it. */
 bool host_raw_picture_ready(void) {
 	if (!rawOn || !gpu_tiling()) return false;
-	if (!rawTested && inFrame) {
-		logLine("raw picture: a frame is under way, the self-test waits for the next game");
-	} else if (!rawTested) {
-		rawTested = true;
+	if (!rawVerdict[rawMode]) {
+		frame_end_now(); /* (the first job of a run finds the start's last frame still open: the test begins frames of its own) */
 		raw_selftest();
 	}
 	return rawOk;
@@ -1300,12 +1302,25 @@ void host_picture_raw(const void* fb) {
 	rawKey = fb;
 }
 
-/* The picture's rows are 240 words apart and the texture's 256 wide, which the copy engine takes from its two dimensions (the 16 padding
- * words it adds to a row come from the next row, and are never drawn). */
+/* One transfer takes the picture's 240-word rows into the texture's 256 by its two dimensions (the 16 padding words come from the next row and are
+ * never drawn). Two passes (raw_picture = 2) stay inside what the copy engine documents: a linear copy leaves a gap after each row, then the usual transfer. */
+#define RAW_ROW_UNITS (240 * 4 / 16) /* (the copy engine counts a row and its gap in 16-byte units) */
+#define RAW_GAP_UNITS ((HOST_TWIN_STRIDE - 240) * 4 / 16)
+#define RAW_TILE_ROWS ((1ull << (160 / 8)) - 1)
 static bool raw_transfer(SDL_Texture* t, const void* pixels) {
-	GPU_WAIT(C3D_SyncDisplayTransfer((u32*) pixels, GX_BUFFER_DIM(240, 160), (u32*) t->tex.data, GX_BUFFER_DIM(t->tex.width, 160),
-	                                 GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
-	                                     GX_TRANSFER_OUT_TILED(1)));
+	const u32 flags = GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_TILED(1);
+	if (rawMode == 2) {
+		int slot = 0;
+		u32* stage = stage_take(t, (size_t) HOST_TWIN_STRIDE * 160, inFrame, RAW_TILE_ROWS, &slot);
+		if (!stage) return false;
+		if (inFrame) t->stageFrame[slot] = frameSerial;
+		GPU_WAIT(C3D_SyncTextureCopy((u32*) pixels, GX_BUFFER_DIM(RAW_ROW_UNITS, 0), stage, GX_BUFFER_DIM(RAW_ROW_UNITS, RAW_GAP_UNITS),
+		                             240 * 160 * 4, 8 | 4));
+		GPU_WAIT(C3D_SyncDisplayTransfer(stage, GX_BUFFER_DIM(HOST_TWIN_STRIDE, 160), (u32*) t->tex.data, GX_BUFFER_DIM(HOST_TWIN_STRIDE, 160),
+		                                 flags));
+	} else {
+		GPU_WAIT(C3D_SyncDisplayTransfer((u32*) pixels, GX_BUFFER_DIM(240, 160), (u32*) t->tex.data, GX_BUFFER_DIM(t->tex.width, 160), flags));
+	}
 	t->raw = true;
 	return true;
 }
@@ -1398,9 +1413,11 @@ static void raw_check_picture(SDL_Texture* t, const void* pixels) {
 	checkPending = true;
 }
 
-/* The test keys' verdicts so far (the last pictures' too), then counted again. */
+/* The test keys' verdicts so far (the last pictures' too), then counted again; the keys and the targets are let go, so the next job's lines
+ * are its own. */
 void host_checks_report(void) {
 	char line[160];
+	if (texCheck || rawCheckOn) frame_end_now(); /* (the last pictures' copies run when their frame ends) */
 	host_gpu_settle();
 	tex_verify();
 	rawcheck_verify();
@@ -1415,6 +1432,11 @@ void host_checks_report(void) {
 		if (bench_active()) bench_note(line);
 	}
 	texChecked = texDiffers = rawChecked = rawDiffers = 0;
+	texCheck = rawCheckOn = false;
+	if (checkRigMade && !inFrame) {
+		rig_free(&checkRig);
+		checkRigMade = false;
+	}
 }
 
 static void rawcheck_verify(void) {
@@ -1436,7 +1458,7 @@ static bool update_from_raw(SDL_Texture* t, const void* pixels, int pitch) {
 	if (asyncUpload && !uploadSync) frame_begin();
 	if (inFrame) C2D_Flush(); /* (a draw of the texture still waiting would use the old stages on the raw words) */
 	u64 t0 = svcGetSystemTick();
-	raw_transfer(t, pixels);
+	if (!raw_transfer(t, pixels)) return false;
 	upRawTicks += svcGetSystemTick() - t0;
 	if (rawCheckOn && inFrame) raw_check_picture(t, pixels);
 	return true;
@@ -1487,7 +1509,16 @@ static bool gpu_settle_within(unsigned ms) {
 	return false;
 }
 
+/* The self-test's verdict, in the log and (a long job's log can be cut) in the bench's results, under the job that ran it. */
+static void raw_said(const char* line) {
+	logLine("textures: %s", line);
+	if (bench_active()) bench_note(line);
+}
+
 static void raw_selftest(void) {
+	const int mode = rawMode;
+	const char* how = mode == 2 ? "two passes" : "one transfer";
+	char line[260];
 	rawOk = false;
 	if (!gpu_tiling()) return;
 	const size_t bytes = (size_t) (240 * 160 + HOST_RAW_SLACK_WORDS) * 4;
@@ -1499,7 +1530,8 @@ static void raw_selftest(void) {
 		if (buf) linearFree(buf);
 		free(copy);
 		if (t) texture_free(t);
-		logLine("textures: raw picture self-test: not made");
+		rawVerdict[mode] = -1;
+		raw_said("raw picture self-test: not made");
 		return;
 	}
 	memset(buf, 0, bytes);
@@ -1529,9 +1561,11 @@ static void raw_selftest(void) {
 		rig_draw(&g, t, buf);
 		frame_end_now();
 		if (!gpu_settle_within(3000)) {
-			logLine("textures: raw picture self-test: the GPU did not finish the pictures in 3 s, the copy or the drawing hangs it");
+			snprintf(line, sizeof(line), "raw picture self-test (%s): the GPU did not finish the pictures in 3 s, the copy or the drawing hangs it", how);
+			raw_said(line);
 			rawOn = wasOn;
 			rawOk = false;
+			rawVerdict[mode] = -1;
 			rawKey = wasKey;
 			return; /* (the targets are not freed: the GPU may still hold them) */
 		}
@@ -1552,10 +1586,12 @@ static void raw_selftest(void) {
 	linearFree(buf);
 	free(copy);
 	rawOk = made == 2 && !badCopy && !badDraw;
-	if (rawOk) logLine("textures: raw picture self-test: all words match (2 pictures, written on another core: copied as they are, drawn 1:1 and smooth, the same as swapped)");
-	else if (made < 2) logLine("textures: raw picture self-test: no thread");
-	else logLine("textures: raw picture self-test: %s (%d words of the copy, %d of the drawing, the first in the %s draw)", badCopy ? "the copy differs" : "the drawing differs", badCopy,
-	             badDraw, whichDraw ? "smooth" : "1:1");
+	rawVerdict[mode] = rawOk ? 1 : -1;
+	if (rawOk) snprintf(line, sizeof(line), "raw picture self-test (%s): all words match (2 pictures, written on another core: copied as they are, drawn 1:1 and smooth, the same as swapped)", how);
+	else if (made < 2) snprintf(line, sizeof(line), "raw picture self-test (%s): no thread", how);
+	else snprintf(line, sizeof(line), "raw picture self-test (%s): %s (%d words of the copy, %d of the drawing, the first in the %s draw)", how,
+	              badCopy ? "the copy differs" : "the drawing differs", badCopy, badDraw, whichDraw ? "smooth" : "1:1");
+	raw_said(line);
 }
 
 /* (TEST: the average time of a whole picture's upload, logged now and then) */

@@ -87,8 +87,10 @@ The CIA takes armGBA-3DS's `.rsf` (the 80 MB mode, among others), so `make cia` 
   itself, and the copy engine tiles it as it is, so the game thread does no byte swap and no cache flush. The picture's
   channels then come out in the wrong order, and the GPU puts them right when it draws (two texture combiner
   stages). The start-up self-test draws pictures both ways, compared word for word, and falls back to the byte swap
-  if they differ (the log says "raw picture self-test"). `raw_check = 1` and `tex_check = 1` are tests: each
-  picture drawn both ways offscreen and compared, each texture read back; their verdicts are bench lines.
+  if they differ (the log says "raw picture self-test"). `raw_picture = 2` makes the copy in two passes instead (a linear
+  copy that leaves a gap after each row, then the usual transfer), in case the copy engine can't do the one transfer.
+  `raw_check = 1` and `tex_check = 1` are tests: each picture drawn both ways offscreen and compared, each texture read
+  back; their verdicts are bench lines.
 - `SDL_GetTicks` on the 3DS counts the system tick, not `osGetTime`: that clock steps (the log says "clock:
   osGetTime moved ..."), and a step back looked like a pause of over two seconds to the game loop, which rebuilt
   every picture (one 200-370 ms frame, seen as the bench's "pre stall" in "events and buttons").

@@ -69,7 +69,7 @@ typedef struct Config {
 	int sideCore;      /* side_core: the pad thread, logos, files and the rest */
 	int videoCore;     /* video_core: mGBA's drawing thread (needs the patched libmgba) */
 	bool asyncUpload;  /* async_upload: the 3DS queues a picture's copy to its texture instead of waiting for it (default on) */
-	bool rawPicture;   /* raw_picture: the 3DS's render worker's picture is copied to its texture as it is (no byte swap, no flush on the game thread) and the GPU puts the channels right when it draws */
+	int rawPicture;    /* raw_picture: the 3DS's render worker's picture is copied to its texture as it is (no byte swap, no flush on the game thread) and the GPU puts the channels right when it draws; 2: the copy in two passes */
 	bool rawCheck;     /* raw_check: a test: each raw picture drawn offscreen both ways, the two compared (the 3DS) */
 	bool gpuTwin;      /* gpu_twin: the 3DS's render worker also writes the picture in the GPU's byte order, so the game thread swaps and flushes nothing */
 	bool twinCheck;    /* twin_check: a test: each twin compared with its picture before it is used (the 3DS) */
