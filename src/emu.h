@@ -46,8 +46,9 @@ typedef struct SpriteRule {
 typedef struct Emu {
 	struct mCore* core;
 	uint32_t* fb; /* GBA_W * GBA_H, mGBA native 32-bit color (XBGR8888, i.e. bytes R,G,B,X); read it with emu_fb() */
-	const uint32_t* fbGpu; /* 3DS armGBA: the same picture in the GPU's byte order, rows EMU_TWIN_STRIDE words apart (else NULL) */
+	const uint32_t* fbGpu; /* 3DS armGBA: the picture in the GPU's byte order, rows EMU_TWIN_STRIDE words apart, or (raw_picture) fb itself, written back (else NULL) */
 	uint32_t fbGpuDirty;   /* ... and the bands of 8 rows of it written by the game thread since (to be flushed before the GPU reads it) */
+	uint32_t fbGpuStride;  /* ... and the words a row of fbGpu has */
 #ifdef COLOR_16_BIT
 	/* libmgba with 16-bit pixels (RGB565): mGBA draws into fb16; fb is made from it by emu_fb() */
 	uint16_t* fb16;
@@ -112,12 +113,12 @@ static inline uint32_t emu_pixel_n(Emu* e, int i) {
 	return e->fb[i];
 }
 /* (the 3DS's fbGpu, the picture's twin in the GPU's byte order, is kept the same as fb: pixels put go there too, in the bands of
- * 8 rows noted in fbGpuDirty; a whole picture set takes the twin away) */
+ * 8 rows noted in fbGpuDirty; a whole picture set takes the twin away. With raw_picture fbGpu is fb itself: the bands are only noted) */
 #define EMU_TWIN_STRIDE 256
 static inline void emu_fb_put(Emu* e, int x, int y, uint32_t c) {
 	e->fb[y * GBA_W + x] = c;
 	if (e->fbGpu) {
-		((uint32_t*) e->fbGpu)[y * EMU_TWIN_STRIDE + x] = __builtin_bswap32(c);
+		if (e->fbGpu != e->fb) ((uint32_t*) e->fbGpu)[y * EMU_TWIN_STRIDE + x] = __builtin_bswap32(c);
 		e->fbGpuDirty |= 1u << (y >> 3);
 	}
 }
@@ -125,8 +126,10 @@ static inline void emu_fb_put(Emu* e, int x, int y, uint32_t c) {
 static inline void emu_fb_put_run(Emu* e, int x, int y, const uint32_t* px, int n) {
 	memcpy(&e->fb[y * GBA_W + x], px, (size_t) n * sizeof(uint32_t));
 	if (e->fbGpu) {
-		uint32_t* tw = (uint32_t*) e->fbGpu + y * EMU_TWIN_STRIDE + x;
-		for (int i = 0; i < n; ++i) tw[i] = __builtin_bswap32(px[i]);
+		if (e->fbGpu != e->fb) {
+			uint32_t* tw = (uint32_t*) e->fbGpu + y * EMU_TWIN_STRIDE + x;
+			for (int i = 0; i < n; ++i) tw[i] = __builtin_bswap32(px[i]);
+		}
 		e->fbGpuDirty |= 1u << (y >> 3);
 	}
 }

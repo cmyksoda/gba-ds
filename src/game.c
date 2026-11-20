@@ -8583,6 +8583,8 @@ static enum GameExit game_run_inner(Config* c, const char* rom, bool fromLibrary
 	host_set_async_upload(cfg->asyncUpload);
 	host_set_gpu_twin(cfg->gpuTwin);
 	host_set_twin_check(cfg->twinCheck);
+	host_set_raw_picture(cfg->rawPicture);
+	host_set_raw_check(cfg->rawCheck);
 	host_set_tex_check(cfg->texCheck);
 	emu_threaded_video(cfg->threadedVideo && isNew3ds()); /* (mGBA's drawing thread on the New 3DS's third core) */
 #else
@@ -9862,10 +9864,12 @@ static enum GameExit game_run_inner(Config* c, const char* rom, bool fromLibrary
 #ifdef __3DS__
 		/* (the twin's rows the HUD's pieces were put on: written back before the GPU reads it) */
 		for (unsigned bands = emu.fbGpu ? emu.fbGpuDirty : 0; bands; bands &= bands - 1) {
-			host_flush_data(emu.fbGpu + __builtin_ctz(bands) * 8 * EMU_TWIN_STRIDE, 8 * EMU_TWIN_STRIDE * sizeof(uint32_t));
+			host_flush_data(emu.fbGpu + __builtin_ctz(bands) * 8 * emu.fbGpuStride, 8 * emu.fbGpuStride * sizeof(uint32_t));
 		}
 		emu.fbGpuDirty = 0;
-		host_picture_twin(emu.fb, ff || rewinding ? NULL : emu.fbGpu); /* (fast forward: frames come faster than a copy is sure to be read) */
+		const bool picRaw = emu.fbGpu && emu.fbGpu == emu.fb;
+		host_picture_twin(emu.fb, ff || rewinding || picRaw ? NULL : emu.fbGpu); /* (fast forward: frames come faster than a copy is sure to be read) */
+		host_picture_raw(picRaw && !ff && !rewinding ? emu.fb : NULL);
 #endif
 		/* only the view the game is on needs it (all of them right after a swap,
 		 * since the menu draws the game without uploading) */
@@ -10050,6 +10054,9 @@ static enum GameExit game_run_inner(Config* c, const char* rom, bool fromLibrary
 	webPlaying = false;
 #endif
 	twin_close();
+#ifdef __3DS__
+	host_checks_report();
+#endif
 	emu_close(&emu); /* flushes the battery save */
 	for (int i = 0; i < MAP_MAX_FRAMES; ++i) {
 		free(mapRes.frames[i]);

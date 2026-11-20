@@ -82,6 +82,13 @@ The CIA takes armGBA-3DS's `.rsf` (the 80 MB mode, among others), so `make cia` 
   no byte swap and no cache flush (`gpu_twin = 1`, off by default: on a New 2DS XL its extra pass slowed the game
   thread more than it saved; it needs a start-up self-test to pass, and the log says "GPU twin self-test"). Both
   draw the same pictures at the same time.
+- `raw_picture = 1` (off by default, until the console has timed it) has no second copy at all: with one drawing
+  thread the picture thread widens each picture straight into linear memory (240 words a row), writes it back
+  itself, and the copy engine tiles it as it is, so the game thread does no byte swap and no cache flush. The picture's
+  channels then come out in the wrong order, and the GPU puts them right when it draws (two texture combiner
+  stages). The start-up self-test draws pictures both ways, compared word for word, and falls back to the byte swap
+  if they differ (the log says "raw picture self-test"). `raw_check = 1` and `tex_check = 1` are tests: each
+  picture drawn both ways offscreen and compared, each texture read back; their verdicts are bench lines.
 - `SDL_GetTicks` on the 3DS counts the system tick, not `osGetTime`: that clock steps (the log says "clock:
   osGetTime moved ..."), and a step back looked like a pause of over two seconds to the game loop, which rebuilt
   every picture (one 200-370 ms frame, seen as the bench's "pre stall" in "events and buttons").
