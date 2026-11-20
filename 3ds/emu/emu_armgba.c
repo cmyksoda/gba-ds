@@ -79,6 +79,7 @@ typedef struct ArmCore {
 	uint32_t* fbOwn;
 	uint32_t* wideBuf[2];
 	bool wideLinear;   /* raw_picture: wideBuf is linear memory, written back by the worker, that the copy engine reads as it is */
+	unsigned widePitch; /* ... and the words a row of it has (256: one transfer tiles it; 240: two passes) */
 	uint32_t* twin[2]; /* gpu_twin: wideBuf's pictures again in the GPU's byte order (linear memory, HOST_TWIN_STRIDE words a row) */
 } ArmCore;
 
@@ -866,6 +867,7 @@ bool emuHiddenCopy;
 
 bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 	memset(e, 0, sizeof(*e));
+	e->fbPitch = GBA_W;
 	ArmCore* c = calloc(1, sizeof(*c));
 	if (!c) return false;
 	e->core = (struct mCore*) c;
@@ -1130,8 +1132,17 @@ fail:
 
 static Emu* rewindOwner;
 void emu_close(Emu* e) {
+#ifdef __3DS__
+	if (e->fbCompactCopies) {
+		char line[120];
+		snprintf(line, sizeof(line), "the picture was copied to rows of 240 words %u times in %llu frames (raw_picture)", e->fbCompactCopies, (unsigned long long) e->frames);
+		logLine("%s", line);
+		if (bench_active()) bench_note(line);
+	}
+#endif
 	if (e->core) {
 		if (AC(e)->fbOwn) e->fb = AC(e)->fbOwn;
+		e->fbPitch = GBA_W;
 		if (rewindOwner == e) emu_rewind_deinit();
 		close_core(AC(e));
 		e->core = NULL;
@@ -1139,6 +1150,10 @@ void emu_close(Emu* e) {
 	free(e->fb);
 	e->fb = NULL;
 	e->fbGpu = NULL;
+	free(e->fbCompact);
+	e->fbCompact = NULL;
+	e->fbCompactOk = false;
+	e->fbPitch = GBA_W;
 }
 
 bool emu_cancelled(const Emu* e) {
@@ -1253,18 +1268,26 @@ static void twin_close(ArmCore* c) {
 	}
 }
 
-/* raw_picture: wideBuf is what the copy engine reads (it reads 16 words past the last row, hence the slack), written back by the one
+/* raw_picture: wideBuf is what the copy engine reads (with some slack after it), written back by the one
  * worker when its last row is in, as the twin's. */
 static const uint32_t* rawBase[2];
 static const uint32_t* rawDirty;
 static uint64_t rawFlushTicks;
 static unsigned rawFrames;
 
-static void raw_row_done(const uint32_t* dst) {
-	const uint32_t* base = dst >= rawBase[1] && dst < rawBase[1] + GBA_W * GBA_H ? rawBase[1] : rawBase[0];
-	const size_t bytes = (size_t) GBA_W * GBA_H * sizeof(uint32_t);
+static unsigned rawPitch;
+
+/* The buffer that row dst (as armGBA counts them: GBA_W words apart from the buffer's start) belongs to, and which row it is. */
+static uint32_t* raw_row_at(const uint32_t* dst, int* y, const uint32_t** base) {
+	*base = dst >= rawBase[1] && dst < rawBase[1] + GBA_W * GBA_H ? rawBase[1] : rawBase[0];
+	*y = (int) ((dst - *base) / GBA_W);
+	return (uint32_t*) *base + (size_t) *y * rawPitch;
+}
+
+static void raw_row_done(const uint32_t* base, int y) {
+	const size_t bytes = (size_t) rawPitch * GBA_H * sizeof(uint32_t);
 	if (rawDirty && rawDirty != base) host_flush_data(rawDirty, bytes);
-	if (dst - base == (GBA_H - 1) * GBA_W) {
+	if (y == GBA_H - 1) {
 		const uint64_t t0 = host_ticks();
 		host_flush_data(base, bytes);
 		rawFlushTicks += host_ticks() - t0;
@@ -1277,7 +1300,8 @@ static void raw_row_done(const uint32_t* dst) {
 
 static bool raw_open(ArmCore* c) {
 	if (!host_raw_picture_ready()) return false;
-	const size_t bytes = ((size_t) GBA_W * GBA_H + HOST_RAW_SLACK_WORDS) * sizeof(uint32_t);
+	c->widePitch = host_raw_picture_pitch();
+	const size_t bytes = ((size_t) c->widePitch * GBA_H + HOST_RAW_SLACK_WORDS) * sizeof(uint32_t);
 	for (int k = 0; k < 2; ++k) {
 		c->wideBuf[k] = host_linear_alloc(bytes);
 		if (!c->wideBuf[k]) break;
@@ -1293,8 +1317,9 @@ static bool raw_open(ArmCore* c) {
 		return false;
 	}
 	rawDirty = NULL;
+	rawPitch = c->widePitch;
 	for (int k = 0; k < 2; ++k) rawBase[k] = c->wideBuf[k];
-	logLine("raw picture: made (2 x %u KiB of linear memory)", (unsigned) (bytes >> 10));
+	logLine("raw picture: made (2 x %u KiB of linear memory, rows %u words apart)", (unsigned) (bytes >> 10), c->widePitch);
 	return true;
 }
 #endif
@@ -1318,6 +1343,7 @@ static void wide_free(ArmCore* c) {
 		host_linear_free(c->wideBuf[1]);
 		c->wideBuf[0] = c->wideBuf[1] = NULL;
 		c->wideLinear = false;
+		rawPitch = 0;
 		return;
 	}
 #endif
@@ -1348,6 +1374,9 @@ static void widen_row(uint32_t* dst, const uint16_t* src) {
 		twin_row_done(y, twin);
 		return;
 	}
+	const uint32_t* rawBuf = NULL;
+	int rawY = 0;
+	if (rawBase[0]) dst = raw_row_at(dst, &rawY, &rawBuf); /* (raw_picture's rows may be further apart than armGBA counts) */
 #endif
 	for (int i = 0; i < GBA_W / 2; i += 2) {
 		uint32_t const a = words[i], b = words[i + 1];
@@ -1357,7 +1386,7 @@ static void widen_row(uint32_t* dst, const uint16_t* src) {
 		dst[2 * i + 3] = widenLow[(b >> 16) & 0xFF] | widenHigh[b >> 24];
 	}
 #ifdef __3DS__
-	if (rawBase[0]) raw_row_done(dst);
+	if (rawBuf) raw_row_done(rawBuf, rawY);
 #endif
 }
 
@@ -1379,14 +1408,21 @@ static void take_picture(Emu* e) {
 	const uint32_t* wide = c->wideBuf[0] ? renderThreadWide(c->gba) : NULL;
 	e->fbGpu = NULL;
 	e->fbGpuDirty = 0;
-	if (wide) {
+	e->fbPitch = GBA_W;
+	e->fbCompactOk = false;
+	if (wide && c->wideLinear && c->widePitch != GBA_W && c->markFrame) {
+		/* (the marks are put on rows of GBA_W: on a copy) */
+		for (int y = 0; y < GBA_H; ++y) memcpy(&c->fbOwn[y * GBA_W], &wide[y * c->widePitch], GBA_W * sizeof(uint32_t));
+		e->fb = c->fbOwn;
+	} else if (wide) {
 		e->fb = (uint32_t*) wide;
 		if (c->twin[0] && !c->markFrame) { /* (a marked picture's fourth bytes are not the twin's) */
 			e->fbGpu = c->twin[wide == c->wideBuf[1]];
 			e->fbGpuStride = EMU_TWIN_STRIDE;
 		} else if (c->wideLinear && !c->markFrame) {
 			e->fbGpu = wide;
-			e->fbGpuStride = GBA_W;
+			e->fbGpuStride = c->widePitch;
+			e->fbPitch = c->widePitch;
 		}
 	} else {
 		e->fb = c->fbOwn;
@@ -1415,8 +1451,11 @@ static void run_frame(Emu* e, uint32_t keys, bool draw) {
 #endif
 	if (!draw && e->fb != c->fbOwn) {
 		/* (the picture kept is a worker's buffer, which it writes again when this frame ends: copied before) */
-		memcpy(c->fbOwn, e->fb, GBA_W * GBA_H * sizeof(uint32_t));
+		const int pitch = emu_pitch(e);
+		for (int y = 0; y < GBA_H; ++y) memcpy(&c->fbOwn[y * GBA_W], &e->fb[y * pitch], GBA_W * sizeof(uint32_t));
 		e->fb = c->fbOwn;
+		e->fbPitch = GBA_W;
+		e->fbCompactOk = false;
 		e->fbGpu = NULL;
 	}
 	++e->frames;

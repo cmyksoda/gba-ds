@@ -7505,8 +7505,8 @@ void prefs_save(Config* cfg) {
 
 static bool gameTexAll = true; /* upload the game's frame to every view next time */
 
-/* The game's picture to view i's texture: `shown`, XBGR8888, or (NULL) what mGBA drew. */
-static void game_upload(int i, const uint32_t* shown) {
+/* The game's picture to view i's texture: `shown`, XBGR8888 with `pitch` words to a row, or (NULL) what mGBA drew. */
+static void game_upload(int i, const uint32_t* shown, int pitch) {
 #ifdef GBADS_PICDUMP
 	emu_pic_dump_shown(&emu, shown);
 #endif
@@ -7522,7 +7522,7 @@ static void game_upload(int i, const uint32_t* shown) {
 		return;
 	}
 #endif
-	ui_update_texture(gameTex[i], shown ? shown : emu_fb(&emu), GBA_W * 4);
+	ui_update_texture(gameTex[i], shown ? shown : emu_fb(&emu), shown ? pitch * 4 : GBA_W * 4);
 }
 
 /* the textures draw_game puts on the views */
@@ -7540,7 +7540,7 @@ static void swap_screens(void) {
 	/* the game moves to the other view, whose copy of the frame may be old
 	 * (frames go only where the game is shown; the menu uploads none) */
 	if (emu.fb) {
-		for (int i = 0; i < nViews; ++i) game_upload(i, NULL);
+		for (int i = 0; i < nViews; ++i) game_upload(i, NULL, GBA_W);
 	}
 	if (nScreens < 2) {
 		singleShowsMap = !singleShowsMap;
@@ -8019,7 +8019,7 @@ static void setting_applied(const Setting* st) {
 		ghostHave = false;
 	} else if (!strcmp(k, "swap")) {
 		if (emu.fb) {
-			for (int i = 0; i < nViews; ++i) game_upload(i, NULL);
+			for (int i = 0; i < nViews; ++i) game_upload(i, NULL, GBA_W);
 		}
 	} else if (!strcmp(k, "screen_match") || !strcmp(k, "screen_placement")) {
 		ui_layout_pictures();
@@ -8437,7 +8437,7 @@ static void rebuild_textures(void) {
 #endif
 	}
 	ss_textures();
-	if (emu.fb) for (int i = 0; i < nViews; ++i) game_upload(i, NULL);
+	if (emu.fb) for (int i = 0; i < nViews; ++i) game_upload(i, NULL, GBA_W);
 	if (mapShownIdx >= 0) {
 		int idx = mapShownIdx;
 		overDirty = true;
@@ -8583,8 +8583,7 @@ static enum GameExit game_run_inner(Config* c, const char* rom, bool fromLibrary
 	host_set_async_upload(cfg->asyncUpload);
 	host_set_gpu_twin(cfg->gpuTwin);
 	host_set_twin_check(cfg->twinCheck);
-	host_set_raw_picture(cfg->rawForce ? cfg->rawForce : cfg->rawPicture, cfg->rawForce != 0);
-	host_set_raw_swizzle(cfg->rawSwizzle);
+	host_set_raw_picture(cfg->rawPicture);
 	host_set_raw_check(cfg->rawCheck);
 	host_set_tex_check(cfg->texCheck);
 	emu_threaded_video(cfg->threadedVideo && isNew3ds()); /* (mGBA's drawing thread on the New 3DS's third core) */
@@ -9850,18 +9849,20 @@ static enum GameExit game_run_inner(Config* c, const char* rom, bool fromLibrary
 		/* frame buffer: start the next frame now; this one is drawn from a copy */
 #ifdef COLOR_16_BIT
 		const uint32_t* shownFb = NULL; /* (NULL: the picture as mGBA drew it) */
+		int shownPitch = GBA_W;
 #else
 		const uint32_t* shownFb = emu.fb;
+		int shownPitch = emu_pitch(&emu); /* (raw_picture's pictures have rows 256 words apart) */
 #endif
 		/* (Pokemon Pinball's tall view always: two copies of the game beside
 		 * it only keep full speed with the frame emulated alongside the drawing) */
 		if ((cfg->frameBuffer || tallProf) && !ff && !rewinding) {
 			memcpy(aheadFb, emu_fb(&emu), sizeof(aheadFb));
-			if (ahead_start(keys)) aheadInFlight = true, shownFb = aheadFb;
+			if (ahead_start(keys)) aheadInFlight = true, shownFb = aheadFb, shownPitch = GBA_W;
 		}
-		if (mirrorOn && mirrorHave) shownFb = mirrorHeld; /* (hud.mirror: the picture from before) */
-		if (tallLive) shownFb = cfg->swap ? tallBot : tallTop; /* (profile.tall: the table's upper half on the top screen) */
-		if (cfg->ghosting) shownFb = ghost_frame(shownFb ? shownFb : emu_fb(&emu));
+		if (mirrorOn && mirrorHave) shownFb = mirrorHeld, shownPitch = GBA_W; /* (hud.mirror: the picture from before) */
+		if (tallLive) shownFb = cfg->swap ? tallBot : tallTop, shownPitch = GBA_W; /* (profile.tall: the table's upper half on the top screen) */
+		if (cfg->ghosting) shownFb = ghost_frame(shownFb && shownPitch == GBA_W ? shownFb : emu_fb(&emu)), shownPitch = GBA_W;
 #ifdef __3DS__
 		/* (the twin's rows the HUD's pieces were put on: written back before the GPU reads it) */
 		for (unsigned bands = emu.fbGpu ? emu.fbGpuDirty : 0; bands; bands &= bands - 1) {
@@ -9875,7 +9876,7 @@ static enum GameExit game_run_inner(Config* c, const char* rom, bool fromLibrary
 		/* only the view the game is on needs it (all of them right after a swap,
 		 * since the menu draws the game without uploading) */
 		for (int i = 0; i < nViews; ++i) {
-			if (gameTexAll || i == screens[game_screen()].view) game_upload(i, shownFb);
+			if (gameTexAll || i == screens[game_screen()].view) game_upload(i, shownFb, shownPitch);
 		}
 		gameTexAll = false;
 		/* (tests, GBADS_DRAW_SHOTS_ONLY: only the frames a screenshot or a

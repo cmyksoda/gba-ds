@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define GBA_W 240
@@ -49,6 +50,10 @@ typedef struct Emu {
 	const uint32_t* fbGpu; /* 3DS armGBA: the picture in the GPU's byte order, rows EMU_TWIN_STRIDE words apart, or (raw_picture) fb itself, written back (else NULL) */
 	uint32_t fbGpuDirty;   /* ... and the bands of 8 rows of it written by the game thread since (to be flushed before the GPU reads it) */
 	uint32_t fbGpuStride;  /* ... and the words a row of fbGpu has */
+	uint32_t fbPitch;      /* the words a row of fb has (0: GBA_W; raw_picture's pictures have rows 256 apart); emu_fb() gives GBA_W rows whatever this is */
+	uint32_t* fbCompact;   /* fb in GBA_W rows, made by emu_fb() when fb has other rows (valid while fbCompactOk) */
+	bool fbCompactOk;
+	unsigned fbCompactCopies; /* how many copies emu_fb() made (each costs the game thread a read of the whole picture) */
 #ifdef COLOR_16_BIT
 	/* libmgba with 16-bit pixels (RGB565): mGBA draws into fb16; fb is made from it by emu_fb() */
 	uint16_t* fb16;
@@ -103,20 +108,34 @@ static inline uint32_t emu_pixel_n(Emu* e, int i) {
 void emu_picture_linear(bool on);
 
 #else
+static inline int emu_pitch(const Emu* e) {
+	return e->fbPitch ? (int) e->fbPitch : GBA_W;
+}
+/* The picture in rows of GBA_W: fb itself, or a copy of it (made once a picture) where its rows are further apart. */
 static inline uint32_t* emu_fb(Emu* e) {
-	return e->fb;
+	const int pitch = emu_pitch(e);
+	if (pitch == GBA_W) return e->fb;
+	if (!e->fbCompactOk) {
+		if (!e->fbCompact && !(e->fbCompact = (uint32_t*) malloc(GBA_W * GBA_H * sizeof(uint32_t)))) return e->fb;
+		for (int y = 0; y < GBA_H; ++y) memcpy(&e->fbCompact[y * GBA_W], &e->fb[y * pitch], GBA_W * sizeof(uint32_t));
+		e->fbCompactOk = true;
+		++e->fbCompactCopies;
+	}
+	return e->fbCompact;
 }
 static inline uint32_t emu_pixel(Emu* e, int x, int y) {
-	return e->fb[y * GBA_W + x];
+	return e->fb[y * emu_pitch(e) + x];
 }
 static inline uint32_t emu_pixel_n(Emu* e, int i) {
-	return e->fb[i];
+	const int pitch = emu_pitch(e);
+	return pitch == GBA_W ? e->fb[i] : e->fb[i / GBA_W * pitch + i % GBA_W];
 }
 /* (the 3DS's fbGpu, the picture's twin in the GPU's byte order, is kept the same as fb: pixels put go there too, in the bands of
  * 8 rows noted in fbGpuDirty; a whole picture set takes the twin away. With raw_picture fbGpu is fb itself: the bands are only noted) */
 #define EMU_TWIN_STRIDE 256
 static inline void emu_fb_put(Emu* e, int x, int y, uint32_t c) {
-	e->fb[y * GBA_W + x] = c;
+	e->fb[y * emu_pitch(e) + x] = c;
+	if (e->fbCompactOk) e->fbCompact[y * GBA_W + x] = c;
 	if (e->fbGpu) {
 		if (e->fbGpu != e->fb) ((uint32_t*) e->fbGpu)[y * EMU_TWIN_STRIDE + x] = __builtin_bswap32(c);
 		e->fbGpuDirty |= 1u << (y >> 3);
@@ -124,7 +143,8 @@ static inline void emu_fb_put(Emu* e, int x, int y, uint32_t c) {
 }
 /* n pixels of one row from px. */
 static inline void emu_fb_put_run(Emu* e, int x, int y, const uint32_t* px, int n) {
-	memcpy(&e->fb[y * GBA_W + x], px, (size_t) n * sizeof(uint32_t));
+	memcpy(&e->fb[y * emu_pitch(e) + x], px, (size_t) n * sizeof(uint32_t));
+	if (e->fbCompactOk) memcpy(&e->fbCompact[y * GBA_W + x], px, (size_t) n * sizeof(uint32_t));
 	if (e->fbGpu) {
 		if (e->fbGpu != e->fb) {
 			uint32_t* tw = (uint32_t*) e->fbGpu + y * EMU_TWIN_STRIDE + x;
@@ -134,7 +154,10 @@ static inline void emu_fb_put_run(Emu* e, int x, int y, const uint32_t* px, int 
 	}
 }
 static inline void emu_fb_set(Emu* e, const uint32_t* px) {
-	memcpy(e->fb, px, GBA_W * GBA_H * sizeof(uint32_t));
+	const int pitch = emu_pitch(e);
+	if (pitch == GBA_W) memcpy(e->fb, px, GBA_W * GBA_H * sizeof(uint32_t));
+	else for (int y = 0; y < GBA_H; ++y) memcpy(&e->fb[y * pitch], &px[y * GBA_W], GBA_W * sizeof(uint32_t));
+	e->fbCompactOk = false;
 	e->fbGpu = NULL;
 }
 #endif

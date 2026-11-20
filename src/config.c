@@ -71,8 +71,6 @@ void config_defaults(Config* c) {
 	c->threadedVideo = true;
 	c->asyncUpload = true;
 	c->rawPicture = 0; /* (off until the console has timed it, 2026-11-20) */
-	c->rawForce = 0;
-	c->rawSwizzle = 0;
 	c->gpuTwin = false; /* (off: on the console its extra pass on the render worker slowed the game thread more than it saved, 2026-11-19) */
 	c->hudLayers = true;
 	/* (one worker that also widens the picture beat two without it in 46 of 53 games' slowest stretches on a New 2DS XL) */
@@ -246,11 +244,6 @@ static bool set_option(Config* c, const char* key, const char* val) {
 		c->rawPicture = atoi(val) == 2 ? 2 : parse_bool(val);
 		return true;
 	}
-	if (!strcmp(key, "raw_force")) {
-		c->rawForce = atoi(val) == 2 ? 2 : parse_bool(val);
-		return true;
-	}
-	INT("raw_swizzle", rawSwizzle)
 	BOOL("raw_check", rawCheck)
 	BOOL("gpu_twin", gpuTwin)
 	BOOL("twin_check", twinCheck)
