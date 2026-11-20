@@ -425,6 +425,17 @@ uint8_t* emu_rom_read_patched(const char* path, char files[][1024], int n, size_
 	return p ? p : emu_rom_read_all(path, size);
 }
 
+/* (a patched ROM is built in the heap, so a room given back after the code memory was placed under it stays out of reach;
+ * a 32 MiB ROM's patch never fits and its read takes the room) */
+static bool patches_apply(const char* romPath) {
+	char beside[1024];
+	bool planned = false, any = false;
+	pthread_mutex_lock(&patchedLock);
+	if (plan.rom[0] && !strcmp(plan.rom, romPath)) planned = true, any = plan.n > 0;
+	pthread_mutex_unlock(&patchedLock);
+	return planned ? any : patch_find(romPath, beside, sizeof(beside));
+}
+
 /* top: a plain ROM file into a top block (read_file_to), for a core's own cartridge only (freed with rom_free) */
 static uint8_t* read_played(const char* path, size_t* size, int* patch, char* patchName, uint32_t* fileCrc, bool top) {
 	int r;
@@ -878,7 +889,8 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 		if (!held) toLoad = emu_is_archive_name(romPath) || stat(romPath, &rst) ? 16u << 20 : (size_t) rst.st_size;
 		/* (a plain file's room is at the top of the heap's range: the code memory placed first can push the break up past it) */
 		romRoomBytes = gbaRomBufferSize(toLoad);
-		if (toLoad) romRoom = emu_is_archive_name(romPath) ? malloc(romRoomBytes) : host_top_alloc(romRoomBytes);
+		if (toLoad && emu_is_archive_name(romPath)) romRoom = malloc(romRoomBytes);
+		else if (toLoad && (toLoad > (16u << 20) || !patches_apply(romPath))) romRoom = host_top_alloc(romRoomBytes);
 		/* (set aside already: the heap free doesn't count it, so nothing more
 		 * is kept for it) */
 		host_jit_main(audio, romRoom ? 0 : toLoad, emuHiddenCopy);
