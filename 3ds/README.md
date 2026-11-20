@@ -296,8 +296,11 @@ frame in armGBA itself. What cut it, with the same pictures, RAM and sound
   caches, and a line start no longer runs its affine step); 2 writes the render
   log's entries straight into the ring while it has room, as one entry for the
   two registers of a 32-bit write, and takes video registers first in
-  `ioWrite` and `ioWrite32`. Crash Nitro Kart and GT Advance 3 write about 1300
-  video registers a frame from their H-blank DMA.
+  `ioWrite` and `ioWrite32`; 4 (with 1 and 2) keeps the register writes of one
+  DMA run to video registers in a batch and logs them as one entry (GT Advance 3
+  moves them 16 bits at a time); 8 makes the exact CPU's decode clear an
+  instruction with stores rather than a call to `memset`. Crash Nitro Kart and
+  GT Advance 3 write about 1300 video registers a frame from their H-blank DMA.
 - `armgba_compile_budget` (ms of compiling a frame of the game may take before code met for the first times is put off,
   1.5 as built; 1000 never puts any off) is a knob for comparing on a console: careful copies no longer wait for it.
 - The interrupt pipeline's events and a halfword store to an I/O register

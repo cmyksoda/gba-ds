@@ -1,14 +1,107 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: armGBA speedups <none@example.invalid>
 Date: Fri, 20 Nov 2026 18:00:00 -0500
-Subject: armGBA: with a render thread the machine's own renderer keeps only what is read of it, and the render log is written without the ring's checks (gbaCside)
+Subject: armGBA: with a render thread the machine's own renderer keeps only what is read of it, the render log is written without the ring's checks, a DMA run's register writes to the video are one log entry, the exact CPU's decode clears without a call (gbaCside)
 
 
+diff --git a/src/cpu/decode.c b/src/cpu/decode.c
+index 0a805ab..cdcc4f7 100644
+--- a/src/cpu/decode.c
++++ b/src/cpu/decode.c
+@@ -4,6 +4,7 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ #include "decode.h"
++#include "../gba.h"
+ 
+ #include <string.h>
+ 
+@@ -60,11 +61,30 @@ static void vcCall(struct Inst* in) {
+ 	in->op2.amount = 0;
+ }
+ 
++// Zeroes an instruction, in stores rather than the library's memset: the exact CPU decodes every step it makes.
++static inline void clearInst(struct Inst* in) {
++	if (!(gbaCside & CSIDE_FAST_STEP)) {
++		memset(in, 0, sizeof(*in));
++		return;
++	}
++	_Static_assert(sizeof(struct Inst) % 4 == 0 && sizeof(struct Inst) <= 96, "clearInst");
++	typedef uint32_t __attribute__((may_alias)) Word;
++	Word* w = (Word*) in;
++#define CLEAR_WORD(k) \
++	if ((k) < sizeof(struct Inst) / 4) { \
++		w[(k)] = 0; \
++	}
++	CLEAR_WORD(0) CLEAR_WORD(1) CLEAR_WORD(2) CLEAR_WORD(3) CLEAR_WORD(4) CLEAR_WORD(5) CLEAR_WORD(6) CLEAR_WORD(7)
++	CLEAR_WORD(8) CLEAR_WORD(9) CLEAR_WORD(10) CLEAR_WORD(11) CLEAR_WORD(12) CLEAR_WORD(13) CLEAR_WORD(14) CLEAR_WORD(15)
++	CLEAR_WORD(16) CLEAR_WORD(17) CLEAR_WORD(18) CLEAR_WORD(19) CLEAR_WORD(20) CLEAR_WORD(21) CLEAR_WORD(22) CLEAR_WORD(23)
++#undef CLEAR_WORD
++}
++
+ // Decodes the ARM instruction opcode at address into in. Bits 27-25 pick the class; everything the
+ // CPUs and the recompiler need afterwards is in the fields, so none of them looks at the opcode
+ // again.
+ void decodeArm(struct Inst* in, uint32_t address, uint32_t opcode) {
+-	memset(in, 0, sizeof(*in));
++	clearInst(in);
+ 	in->address = address;
+ 	in->opcode = opcode;
+ 	in->cond = opcode >> 28;
+@@ -226,7 +246,7 @@ static void thumbAlu(struct Inst* in, int op, int rd, int rn, bool setFlags) {
+ // Decodes the Thumb instruction opcode at address. Its top five bits pick the format; each becomes
+ // the ARM instruction it stands for, so the rest of the emulator handles one instruction set.
+ void decodeThumb(struct Inst* in, uint32_t address, uint16_t opcode) {
+-	memset(in, 0, sizeof(*in));
++	clearInst(in);
+ 	in->address = address;
+ 	in->opcode = opcode;
+ 	in->thumb = true;
 diff --git a/src/gba.h b/src/gba.h
-index cd3714b..e513000 100644
+index cd3714b..53cd10e 100644
 --- a/src/gba.h
 +++ b/src/gba.h
-@@ -1125,6 +1125,15 @@ enum {
+@@ -1030,6 +1030,39 @@ static inline void videoSync(struct GBA* gba) {
+ 		videoSyncDue(gba);
+ 	}
+ }
++void videoDispcntWritten(struct GBA*);
++// Writes video register address (an offset into the I/O space) into a batch (CSIDE_BATCH), as ioWrite with the machine's
++// copies drawing does, syncing the video first; the CPU's clock is the console's.
++static inline void renderBatchWrite(struct GBA* gba, struct RenderBatch* batch, uint32_t address, uint16_t value) {
++	if ((int32_t) (timingCpuTime(gba) - gba->video.stableUntil) >= 0) {
++		// (what the sync does may log: after what is batched)
++		renderBatchFlush(gba, batch);
++		videoSyncDue(gba);
++	}
++	uint16_t const logged = value;
++	uint16_t kept = 0;
++	if (address == batch->maskedRegister) {
++		kept = value & batch->maskedBits;
++		value &= ~batch->maskedBits;
++	}
++	value &= renderLeanMask[address >> 1];
++	if (address == 0x000) {
++		gba->renderer.dispcnt = value;
++		gba->vramStall = (value & 7) == 2 && (value & 0x0C00) == 0x0C00;
++		videoDispcntWritten(gba);
++	} else if (address == 0x054 && value > 0x10) {
++		value = 0x10;
++	}
++	gba->io[address >> 1] = value | kept;
++	uint32_t count = batch->count;
++	if (count == 2 * RENDER_BATCH_MAX) {
++		renderBatchFlush(gba, batch);
++		count = 0;
++	}
++	batch->words[count] = address << 16 | logged;
++	batch->words[count + 1] = (uint32_t) (timingCpuTime(gba) - gba->video.lineStart);
++	batch->count = count + 2;
++}
+ int videoLine(struct GBA*);
+ void videoHblankDmaArmed(struct GBA*);
+ uint32_t videoNextHblank(struct GBA*, uint32_t from);
+@@ -1125,6 +1158,20 @@ enum {
  // Whether the render and sound logs are published and read with the fewest barriers (false: a barrier
  // at every entry, as they were).
  extern bool threadLogsLean;
@@ -20,6 +113,11 @@ index cd3714b..e513000 100644
 +	// The render log's entries are written without the checks until the ring's end or the workers' progress needs them,
 +	// and a 32-bit write to two video registers is one entry. Needs threadLogsLean (no publishing at each entry).
 +	CSIDE_FAST_LOG = 2,
++	// With 1 and 2: the register writes of a DMA run to video registers go in the log as one entry.
++	CSIDE_BATCH = 4,
++	// The exact CPU's steps: an instruction is decoded without a call to clear it, and code is fetched from the cartridge
++	// without the region switch.
++	CSIDE_FAST_STEP = 8,
 +};
  // The console whose sound a thread makes, if any, and whether its calls are inside one already
  // logged whole.
@@ -111,8 +209,77 @@ index cd7f0c1..8891229 100644
  			writeVideoRegister(gba, address, value & 0xFFFF);
  			writeVideoRegister(gba, address | 2, value >> 16);
  			return;
+diff --git a/src/memory.c b/src/memory.c
+index 72f21cc..4a2e486 100644
+--- a/src/memory.c
++++ b/src/memory.c
+@@ -446,12 +446,21 @@ int memoryDmaToIo(struct GBA* gba, struct Dma* dma, int count, bool wide, int32_
+ 	uint32_t s = dma->nextSource;
+ 	uint32_t d = dma->nextDest;
+ 	int n = 0;
++	// The writes to video registers of a machine whose copies draw are batched (CSIDE_BATCH).
++	struct RenderBatch batch;
++	bool const batching = gba->renderThread && !cpu->overclock && (gbaCside & (CSIDE_LEAN_VIDEO | CSIDE_FAST_LOG | CSIDE_BATCH)) == (CSIDE_LEAN_VIDEO | CSIDE_FAST_LOG | CSIDE_BATCH);
++	if (batching) {
++		renderBatchBegin(gba, &batch);
++	}
+ 	for (; n < count && !gba->dmaReenter; ++n) {
+ 		if ((s >> 24) < REGION_EWRAM || (s >> 24) > REGION_IWRAM || (d >> 24) != REGION_IO) {
+ 			break;
+ 		}
+ 		cpu->cycles += 1 + waits[s >> 24];
+ 		if (cpu->cycles >= cpu->nextEvent) {
++			if (batching) {
++				renderBatchFlush(gba, &batch);
++			}
+ 			processEvents(gba);
+ 		}
+ 		uint32_t latch = plainLoad(gba, s, wide);
+@@ -463,17 +472,40 @@ int memoryDmaToIo(struct GBA* gba, struct Dma* dma, int count, bool wide, int32_
+ 		gba->lastAccessDma = true;
+ 		cpu->cycles += 1 + waits[REGION_IO];
+ 		if (cpu->cycles >= cpu->nextEvent) {
++			if (batching) {
++				renderBatchFlush(gba, &batch);
++			}
+ 			processEvents(gba);
+ 		}
+ 		if (wide) {
+-			ioWrite32(gba, d & 0xFFFFFC, latch);
++			uint32_t const at = d & 0xFFFFFC;
++			if (batching && at < 0x5E && at != 4) {
++				renderBatchWrite(gba, &batch, at, (uint16_t) latch);
++				renderBatchWrite(gba, &batch, at | 2, latch >> 16);
++			} else {
++				if (batching) {
++					renderBatchFlush(gba, &batch);
++				}
++				ioWrite32(gba, at, latch);
++			}
+ 		} else {
+-			ioWrite(gba, d & 0xFFFFFE, (uint16_t) (latch >> (8 * (d & 2))));
++			uint32_t const at = d & 0xFFFFFE;
++			if (batching && at < 0x60 && (at > 6 || at < 4)) {
++				renderBatchWrite(gba, &batch, at, (uint16_t) (latch >> (8 * (d & 2))));
++			} else {
++				if (batching) {
++					renderBatchFlush(gba, &batch);
++				}
++				ioWrite(gba, at, (uint16_t) (latch >> (8 * (d & 2))));
++			}
+ 		}
+ 		gba->lastAccessDma = true;
+ 		s += sourceStep;
+ 		d += destStep;
+ 	}
++	if (batching) {
++		renderBatchFlush(gba, &batch);
++	}
+ 	dma->nextSource = s;
+ 	dma->nextDest = d;
+ 	return n;
 diff --git a/src/video/render-thread.c b/src/video/render-thread.c
-index 2b57d37..af96228 100644
+index 2b57d37..a119200 100644
 --- a/src/video/render-thread.c
 +++ b/src/video/render-thread.c
 @@ -52,7 +52,7 @@ enum {
@@ -124,16 +291,18 @@ index 2b57d37..af96228 100644
  	// The rest of the log up to its end is unused, since entries don't wrap around.
  	LOG_SKIP,
  	LOG_LINE,
-@@ -60,6 +60,8 @@ enum {
+@@ -60,6 +60,10 @@ enum {
  	LOG_LATCH,
  	LOG_FINISH,
  	LOG_SKIP_LINE,
 +	// Both halves of a 32-bit register write, made at one time.
 +	LOG_REGISTER2 = RENDER_LOG_REGISTER2,
++	// A count of register writes, each a word of its address and value and a word of its time in the line.
++	LOG_REGISTERS = RENDER_LOG_REGISTERS,
  };
  
  struct RenderThread;
-@@ -82,16 +84,17 @@ struct Worker {
+@@ -82,16 +86,17 @@ struct Worker {
  };
  
  struct RenderThread {
@@ -156,7 +325,7 @@ index 2b57d37..af96228 100644
  	// The emulation thread's: up to where the log is known to be clear of what the workers have yet
  	// to do.
  	uint64_t roomUntil;
-@@ -209,6 +212,7 @@ struct Sharer {
+@@ -209,6 +214,7 @@ struct Sharer {
  // from a worker, lines taken as they were last frame, and times its copy was made anew.
  unsigned long renderShareCounts[4];
  bool threadLogsLean = true;
@@ -164,7 +333,7 @@ index 2b57d37..af96228 100644
  #if !defined(__3DS__)
  // ARMGBA_RENDER_STALL=n: a worker stops for 2 ms holding about one line in n, to test taking over.
  static int stallEvery = -1;
-@@ -321,6 +325,11 @@ static uint32_t play(struct GBA* copy, const uint8_t* entry, uint32_t* size) {
+@@ -321,6 +327,21 @@ static uint32_t play(struct GBA* copy, const uint8_t* entry, uint32_t* size) {
  		copy->renderer.copyCycle = head[3];
  		renderWriteRegister(copy, head[1], head[2]);
  		break;
@@ -173,10 +342,20 @@ index 2b57d37..af96228 100644
 +		renderWriteRegister(copy, head[1], (uint16_t) head[2]);
 +		renderWriteRegister(copy, head[1] | 2, head[2] >> 16);
 +		break;
++	case LOG_REGISTERS: {
++		*size = 16 + 8 * head[1];
++		for (uint32_t i = 0; i < head[1]; ++i) {
++			uint32_t pair[2];
++			memcpy(pair, entry + 16 + 8 * i, sizeof(pair));
++			copy->renderer.copyCycle = pair[1];
++			renderWriteRegister(copy, pair[0] >> 16, (uint16_t) pair[0]);
++		}
++		break;
++	}
  	case LOG_START_LINE:
  		renderStartLine(copy, head[1]);
  		break;
-@@ -436,7 +445,7 @@ static void* work(void* context) {
+@@ -436,7 +457,7 @@ static void* work(void* context) {
  #if defined(__3DS__)
  		uint64_t const began = HOST_TICKS();
  #endif
@@ -185,7 +364,7 @@ index 2b57d37..af96228 100644
  #if defined(__3DS__)
  		// One worker's time: with two, each draws half the lines.
  		if (!w->index) {
-@@ -489,16 +498,16 @@ static void publish(struct RenderThread* t);
+@@ -489,16 +510,16 @@ static void publish(struct RenderThread* t);
  // Waits until the worker has done everything written so far.
  static void drain(struct RenderThread* t) {
  	publish(t);
@@ -206,7 +385,7 @@ index 2b57d37..af96228 100644
  	if (atomic_load(&t->asleep)) {
  		pthread_mutex_lock(&t->mutex);
  		pthread_cond_signal(&t->workers[0].wake);
-@@ -512,13 +521,13 @@ static void shareBegin(struct GBA* gba);
+@@ -512,13 +533,13 @@ static void shareBegin(struct GBA* gba);
  
  // Finds room for the biggest entry, in one piece and clear of what the worker has yet to do.
  static uint8_t* reserve(struct RenderThread* t) {
@@ -224,7 +403,7 @@ index 2b57d37..af96228 100644
  		at = 0;
  	}
  	// The workers only get further, so room found once is still there: they are asked how far they
-@@ -532,26 +541,50 @@ static uint8_t* reserve(struct RenderThread* t) {
+@@ -532,26 +553,60 @@ static uint8_t* reserve(struct RenderThread* t) {
  		}
  		t->roomUntil = logNeededFrom(t) + LOG_SIZE;
  	}
@@ -275,10 +454,20 @@ index 2b57d37..af96228 100644
 +	entry(gba, LOG_REGISTER2, address, value, timingCurrentTime(gba) - gba->video.lineStart);
 +}
 +
++void renderThreadRegisters(struct GBA* gba, const uint32_t* words, uint32_t count) {
++	struct RenderThread* t = gba->renderThread;
++	uint64_t const at = t->end.head;
++	uint8_t* start = at < t->end.quickUntil ? &t->end.log[at & (LOG_SIZE - 1)] : reserve(t);
++	uint32_t head[4] = { LOG_REGISTERS, count, 0, 0 };
++	memcpy(start, head, sizeof(head));
++	memcpy(start + 16, words, 8 * count);
++	t->end.head += 16 + 8 * count;
++}
++
  void renderThreadStartLine(struct GBA* gba, int y) {
  	entry(gba, LOG_START_LINE, y, 0, 0);
  }
-@@ -564,7 +597,7 @@ void renderThreadLatch(struct GBA* gba) {
+@@ -564,7 +619,7 @@ void renderThreadLatch(struct GBA* gba) {
  static void logLine(struct GBA* gba, uint32_t kind, int y) {
  	struct RenderThread* t = gba->renderThread;
  	struct Renderer* renderer = &gba->renderer;
@@ -287,7 +476,7 @@ index 2b57d37..af96228 100644
  	uint8_t* data = start + 16;
  	uint32_t changed = renderer->memoryChanged;
  	renderer->memoryChanged = 0;
-@@ -596,7 +629,7 @@ static void logLine(struct GBA* gba, uint32_t kind, int y) {
+@@ -596,7 +651,7 @@ static void logLine(struct GBA* gba, uint32_t kind, int y) {
  	}
  	memcpy(start, head, sizeof(head));
  	// Entries start on word boundaries.
@@ -296,7 +485,7 @@ index 2b57d37..af96228 100644
  	publish(t);
  }
  
-@@ -636,11 +669,12 @@ static void helperClone(struct RenderThread* t) {
+@@ -636,11 +691,12 @@ static void helperClone(struct RenderThread* t) {
  		}
  	}
  	sharerSet(t->helper, t, HELPER, t->frameSeq);
@@ -310,7 +499,7 @@ index 2b57d37..af96228 100644
  }
  
  // Lines are shared from here on, if they can be: two workers, each frame waited for, a copy for the
-@@ -714,10 +748,10 @@ static void finishShared(struct GBA* gba) {
+@@ -714,10 +770,10 @@ static void finishShared(struct GBA* gba) {
  		if (t->idleFrames > 30) {
  			t->helperActive = false;
  		} else {
@@ -323,7 +512,7 @@ index 2b57d37..af96228 100644
  				t->helperDone += size;
  			}
  		}
-@@ -795,7 +829,7 @@ void renderThreadFinishFrame(struct GBA* gba) {
+@@ -795,7 +851,7 @@ void renderThreadFinishFrame(struct GBA* gba) {
  		renderHooksPublish(gba);
  	}
  	entry(gba, LOG_FINISH, 0, 0, 0);
@@ -332,7 +521,7 @@ index 2b57d37..af96228 100644
  }
  
  void renderThreadSetWiden(struct GBA* gba, void (*widen)(uint32_t* dst, const uint16_t* src), uint32_t* first, uint32_t* second) {
-@@ -877,16 +911,17 @@ bool renderThreadStart(struct GBA* gba, bool late, bool second) {
+@@ -877,16 +933,17 @@ bool renderThreadStart(struct GBA* gba, bool late, bool second) {
  	struct RenderThread* t = calloc(1, sizeof(*t));
  	if (t) {
  		t->workers[0].copy = calloc(1, sizeof(struct GBA));
@@ -353,7 +542,7 @@ index 2b57d37..af96228 100644
  	pthread_mutex_init(&t->mutex, NULL);
  	pthread_cond_init(&t->workers[0].wake, NULL);
  	pthread_cond_init(&t->workers[1].wake, NULL);
-@@ -905,7 +940,7 @@ bool renderThreadStart(struct GBA* gba, bool late, bool second) {
+@@ -905,7 +962,7 @@ bool renderThreadStart(struct GBA* gba, bool late, bool second) {
  	if (pthread_create(&t->workers[0].thread, NULL, work, &t->workers[0])) {
  #endif
  		free(t->workers[0].copy);
@@ -362,7 +551,7 @@ index 2b57d37..af96228 100644
  		free(t);
  		return false;
  	}
-@@ -967,6 +1002,6 @@ void renderThreadStop(struct GBA* gba) {
+@@ -967,6 +1024,6 @@ void renderThreadStop(struct GBA* gba) {
  	free(t->workers[1].copy);
  	free(t->helper);
  	free(t->merged);
@@ -371,7 +560,7 @@ index 2b57d37..af96228 100644
  	free(t);
  }
 diff --git a/src/video/render.c b/src/video/render.c
-index 2044d15..ba017ff 100644
+index 2044d15..b453ec7 100644
 --- a/src/video/render.c
 +++ b/src/video/render.c
 @@ -3242,6 +3242,9 @@ void renderSkipScanline(struct GBA* gba, int y) {
@@ -395,14 +584,14 @@ index 2044d15..ba017ff 100644
  	struct HookSlot* slot = twinOf(gba);
  	if (slot) {
  		oneLatchDispcnt(slot->twin);
-@@ -3300,6 +3307,86 @@ uint16_t renderWriteRegister(struct GBA* gba, uint32_t address, uint16_t value)
+@@ -3300,6 +3307,104 @@ uint16_t renderWriteRegister(struct GBA* gba, uint32_t address, uint16_t value)
  	return oneWriteRegister(gba, address, value) | kept;
  }
  
 +// Copies draw for this machine, so what it reads of its renderer is DISPCNT and its latch (video.c) and the
 +// registers' values as they read back; the rest stays as it was, and a copy takes the whole state from
 +// renderThreadClone (and this machine takes it back from the copies in renderThreadStop).
-+static uint16_t const leanMask[0x30] = {
++const uint16_t renderLeanMask[0x30] = {
 +	[0x000 >> 1] = 0xFFF7, [0x002 >> 1] = 0xFFFF, [0x004 >> 1] = 0xFFFF, [0x006 >> 1] = 0xFFFF,
 +	[0x008 >> 1] = 0xDFFF, [0x00A >> 1] = 0xDFFF, [0x00C >> 1] = 0xFFFF, [0x00E >> 1] = 0xFFFF,
 +	[0x010 >> 1] = 0x01FF, [0x012 >> 1] = 0x01FF, [0x014 >> 1] = 0x01FF, [0x016 >> 1] = 0x01FF,
@@ -431,7 +620,7 @@ index 2044d15..ba017ff 100644
 +		kept = value & any->hooks->maskedBits;
 +		value &= ~any->hooks->maskedBits;
 +	}
-+	value &= leanMask[address >> 1];
++	value &= renderLeanMask[address >> 1];
 +	if (address == 0x000) {
 +		gba->renderer.dispcnt = value;
 +		gba->vramStall = (value & 7) == 2 && (value & 0x0C00) == 0x0C00;
@@ -479,14 +668,32 @@ index 2044d15..ba017ff 100644
 +	renderThreadRegister32(gba, address, value);
 +}
 +
++void renderBatchBegin(struct GBA* gba, struct RenderBatch* batch) {
++	struct HookSlot* any = emulatedHooks;
++	if (!any || any->gba != gba) {
++		any = emulatedHooks = findHooks(gba);
++	}
++	bool const masks = any && any->hooks->second && any->hooks->maskedBits;
++	batch->count = 0;
++	batch->maskedRegister = masks ? any->hooks->maskedRegister : 0xFFFF;
++	batch->maskedBits = masks ? any->hooks->maskedBits : 0;
++}
++
++void renderBatchFlush(struct GBA* gba, struct RenderBatch* batch) {
++	if (batch->count) {
++		renderThreadRegisters(gba, batch->words, batch->count / 2);
++		batch->count = 0;
++	}
++}
++
  void renderReset(struct GBA* gba) {
  	struct HookSlot* slot = findHooks(gba);
  	if (slot) {
 diff --git a/src/video/render.h b/src/video/render.h
-index 5112fc2..1c4e961 100644
+index 5112fc2..3c271fe 100644
 --- a/src/video/render.h
 +++ b/src/video/render.h
-@@ -278,6 +278,24 @@ void renderForget(struct Renderer*);
+@@ -278,6 +278,43 @@ void renderForget(struct Renderer*);
  // Chooses the SIMD paths if the CPU has them; ARMGBA_RENDER=reference keeps to the scalar ones.
  void renderInit(void);
  uint16_t renderWriteRegister(struct GBA*, uint32_t address, uint16_t value);
@@ -508,10 +715,29 @@ index 5112fc2..1c4e961 100644
 +// renderWriteRegisterLean and renderThreadRegister make it, with the value as it reads back put in io.
 +void renderWriteVideo(struct GBA*, uint32_t address, uint16_t value);
 +void renderWriteVideo32(struct GBA*, uint32_t address, uint32_t value);
++// CSIDE_BATCH: the register writes of one DMA run to video registers, kept in a batch and logged as one entry (the
++// copies play them at the same times). The batch is flushed before anything that may log, and at the run's end.
++struct RenderBatch {
++	uint32_t count;
++	// What the hooks mask out of a register's value, as they stand when the run starts.
++	uint16_t maskedRegister;
++	uint16_t maskedBits;
++	// For each write, the register and its value, and the time in its line.
++	uint32_t words[2 * 32];
++};
++enum {
++	RENDER_BATCH_MAX = 32,
++	RENDER_LOG_REGISTERS = 8,
++};
++void renderBatchBegin(struct GBA*, struct RenderBatch*);
++// What the lean writes keep of each register's value (renderBatchWrite, in gba.h; renderWriteRegisterLean).
++extern const uint16_t renderLeanMask[0x30];
++void renderBatchFlush(struct GBA*, struct RenderBatch*);
++void renderThreadRegisters(struct GBA*, const uint32_t* words, uint32_t count);
  void renderScanline(struct GBA*, int y);
  void renderSkipScanline(struct GBA*, int y);
  // At the start of each line, the affine backgrounds finish the last line and take on new reference
-@@ -302,6 +320,8 @@ void renderThreadClone(struct GBA*);
+@@ -302,6 +339,8 @@ void renderThreadClone(struct GBA*);
  // Returns the copy's renderer, with everything logged so far drawn.
  const struct Renderer* renderThreadRenderer(struct GBA*);
  void renderThreadRegister(struct GBA*, uint32_t address, uint16_t value);
