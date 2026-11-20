@@ -13,6 +13,7 @@
 #define STBI_NO_STDIO_WARNINGS
 #include "stb_image.h"
 #pragma GCC diagnostic pop
+#include "bench.h"
 
 #include <SDL.h>
 #include <stdbool.h>
@@ -69,6 +70,7 @@ SDL_Surface* image_load(const char* path) {
 	if (!f) return NULL;
 	got = fread(head, 1, sizeof(head), f);
 	fclose(f);
+	bench_mark("image: open+head");
 	if (is_webp(head, got)) {
 		size_t size = 0;
 		unsigned char* b = read_all(path, &size);
@@ -79,12 +81,14 @@ SDL_Surface* image_load(const char* path) {
 	}
 	int w, h, n;
 	unsigned char* px = stbi_load(path, &w, &h, &n, 4);
+	bench_markf("stbi_load %dx%d", px ? w : 0, px ? h : 0);
 	if (!px) return NULL;
 	SDL_Surface* s = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_RGBA32);
 	if (s) {
 		for (int y = 0; y < h; ++y) memcpy((Uint8*) s->pixels + y * s->pitch, px + y * w * 4, w * 4);
 	}
 	stbi_image_free(px);
+	bench_mark("image: surface copy");
 	return s;
 }
 
