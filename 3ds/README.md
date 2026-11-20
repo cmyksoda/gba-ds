@@ -279,6 +279,13 @@ frame in armGBA itself. What cut it, with the same pictures, RAM and sound
   frame, each a call through the multiplier's stages). With
   `armgba_lazy_carry = 1` (off as built, to compare on a console) only that
   check's way out to the exact CPU works it out.
+- A return into the middle of a block (an interrupt's return, or where the
+  exact CPU stopped after stepping up to an event) can carry on in the block's
+  careful copy, which has a way in before every instruction, instead of the
+  exact CPU stepping the rest of the block: GT Advance 3 stepped about 260
+  instructions a frame that way (`armgba_mid_careful = 1` where a copy is
+  there, `2` also making one as an event inside the block would; 0 as built, to
+  compare on a console).
 - `armgba_compile_budget` (ms of compiling a frame of the game may take before code met for the first times is put off,
   1.5 as built; 1000 never puts any off) is a knob for comparing on a console: careful copies no longer wait for it.
 - The interrupt pipeline's events and a halfword store to an I/O register

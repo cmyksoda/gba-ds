@@ -911,6 +911,7 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 	if (getenv("GBADS_ARMGBA_MID_AFTER")) jitSetMidAfter(gba, atoi(getenv("GBADS_ARMGBA_MID_AFTER"))); /* (armgba_mid_after: 0 steps every return into a block) */
 	if (getenv("GBADS_ARMGBA_DEFER")) jitSetDeferMore(gba, atoi(getenv("GBADS_ARMGBA_DEFER")) != 0); /* (armgba_defer = 0: only events that start no DMA run after the instruction they fall in) */
 	if (getenv("GBADS_ARMGBA_LAZY_CARRY")) jitSetLazyCarry(gba, atoi(getenv("GBADS_ARMGBA_LAZY_CARRY")) != 0); /* (armgba_lazy_carry = 1: a console A/B) */
+	if (getenv("GBADS_ARMGBA_MID_CAREFUL")) jitSetMidCareful(gba, atoi(getenv("GBADS_ARMGBA_MID_CAREFUL"))); /* (armgba_mid_careful = 1 or 2: a console A/B) */
 	c->hooks.context = c;
 	renderSetHooks(gba, &c->hooks);
 	gbaLoadBios(gba, armgbaBios, SIZE_BIOS);
