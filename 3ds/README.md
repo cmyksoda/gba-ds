@@ -76,6 +76,11 @@ The CIA takes armGBA-3DS's `.rsf` (the 80 MB mode, among others), so `make cia` 
   53 games' slowest stretches). `render_workers = 2` in `gba-ds.cfg` draws every other line on the fourth
   core too, as armGBA-3DS does; `armgba_picture_thread = 0` widens on the game thread. The fourth core is
   also the hidden copy's (map captures).
+- The picture's copy to its GPU texture is queued in the frame being drawn and runs while the next frame emulates
+  (`async_upload = 1`, the default; 0 waits for it in the frame, as before). With one drawing thread the picture
+  thread also writes the picture in the GPU's byte order into linear memory and flushes it, so the game thread does
+  no byte swap and no cache flush (`gpu_twin = 1`, the default, once a start-up self-test passes; the log says
+  "GPU twin self-test"). Both draw the same pictures at the same time.
 - The HUD pictures on the bottom screen (Mario Kart, Crash Nitro Kart, Sonic Advance, V-Rally 3 and the
   like) can be a backdrop with the HUD's pieces laid over it by the GPU, so a frame sends only the rows
   that changed (`hud_layers = 1`, the default on the 3DS); `hud_layers = 0` makes it a third at a time over
