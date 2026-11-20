@@ -147,7 +147,7 @@ index 1f2ded8..1f2a4d3 100644
  		aB(e, C_AL, block->entries[index + 1]);
  		emit32(e, next);
 diff --git a/src/cpu/jit-internal.h b/src/cpu/jit-internal.h
-index df53d84..96e85c4 100644
+index df53d84..bdb71f1 100644
 --- a/src/cpu/jit-internal.h
 +++ b/src/cpu/jit-internal.h
 @@ -472,6 +472,12 @@ struct Jit {
@@ -158,13 +158,13 @@ index df53d84..96e85c4 100644
 +	// there (the a32 backend).
 +	bool lazyCarry;
 +	// jitSetMidCareful: a return into a block's middle carries on in its careful copy (1), made for it
-+	// once enough returns have come (2).
++	// once enough returns have come (2), not where they keep coming (3).
 +	uint8_t midCareful;
  	uint32_t midCompiled;
  	bool coldThumb;
  	int coldLeft;
 diff --git a/src/cpu/jit.c b/src/cpu/jit.c
-index 0daa5af..b31cbef 100644
+index 0daa5af..a8af0bf 100644
 --- a/src/cpu/jit.c
 +++ b/src/cpu/jit.c
 @@ -160,10 +160,10 @@ static struct Block* findBlock(struct Jit* jit, uint32_t key) {
@@ -192,7 +192,7 @@ index 0daa5af..b31cbef 100644
 +
 +void jitSetMidCareful(struct GBA* gba, int level) {
 +	if (gba->jit) {
-+		gba->jit->midCareful = (uint8_t) (level < 0 ? 0 : level > 2 ? 2 : level);
++		gba->jit->midCareful = (uint8_t) (level < 0 ? 0 : level > 3 ? 3 : level);
 +	}
 +}
 +
@@ -234,25 +234,34 @@ index 0daa5af..b31cbef 100644
  // Patches a block's exit to jump straight to its target, now that the target exists.
  static void linkExit(struct Jit* jit, struct Link* link, struct Block* target) {
  	if (!link->from->valid || link->to || !target->valid || link->formMiss) {
-@@ -2229,8 +2269,11 @@ void jitRunLoop(struct GBA* gba) {
+@@ -2229,11 +2269,19 @@ void jitRunLoop(struct GBA* gba) {
  			jit->irqReturn = ~0u;
  		}
  		if (!entry && mid && !gba->traceFile && !findBlock(jit, key)) {
 -			const struct Block* within = blockWithin(jit, pc, thumb);
 -			if (within) {
 +			struct Block* within = blockWithin(jit, pc, thumb);
-+			if (within && jit->midCareful) {
++			uint8_t* seen = &jit->seenCount[lookupHash(key)];
++			// At 3 a place returned to often still gets a block of its own, which runs it faster than the copy.
++			bool const often = jit->midCareful >= 3 && jit->midAfter && *seen >= jit->midAfter;
++			if (within && jit->midCareful && !often) {
 +				entry = midCareful(gba, within, pc, thumb);
++				if (entry && jit->midCareful >= 3 && jit->midAfter) {
++					++*seen;
++				}
 +			}
 +			if (within && !entry) {
  				// A place that keeps being returned to, as an interrupt returns to the same instruction line
  				// after line, gets a block of its own; the rest, whose events fall all over, are stepped.
- 				uint8_t* seen = &jit->seenCount[lookupHash(key)];
+-				uint8_t* seen = &jit->seenCount[lookupHash(key)];
+ 				if (!jit->midAfter || *seen < jit->midAfter || jit->midCompiled >= jit->codeSize >> MID_BLOCK_SHIFT || compileBusy(jit)) {
+ 					if (jit->midAfter && *seen < jit->midAfter) {
+ 						++*seen;
 diff --git a/src/cpu/jit.h b/src/cpu/jit.h
-index fe20759..fee7041 100644
+index fe20759..0a7388a 100644
 --- a/src/cpu/jit.h
 +++ b/src/cpu/jit.h
-@@ -38,6 +38,12 @@ void jitSetCompileAfter(int times);
+@@ -38,6 +38,13 @@ void jitSetCompileAfter(int times);
  void jitSetCompileBudget(struct GBA*, uint64_t ticks);
  // false: a careful copy lets only events that start no DMA run after an instruction, as it did before it let more.
  void jitSetDeferMore(struct GBA*, bool on);
@@ -260,7 +269,8 @@ index fe20759..fee7041 100644
 +// else reads it (the a32 backend; the others ignore it). Off at first.
 +void jitSetLazyCarry(struct GBA*, bool on);
 +// A return into a block's middle carries on in its careful copy instead of stepping the rest: 1 where
-+// it has one, 2 also making one as an event inside it would; 0 (at first) steps.
++// it has one, 2 also making one as an event inside it would, 3 as 2 except that a place returned to
++// again and again gets a block of its own, as at 0; 0 (at first) steps.
 +void jitSetMidCareful(struct GBA*, int level);
  // The code memory compiled code takes so far, and (size) all there is: for a frontend that empties it
  // (jitFlush) at a moment of its choosing, before it fills at one of the game's.

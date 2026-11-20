@@ -284,8 +284,9 @@ frame in armGBA itself. What cut it, with the same pictures, RAM and sound
   careful copy, which has a way in before every instruction, instead of the
   exact CPU stepping the rest of the block: GT Advance 3 stepped about 260
   instructions a frame that way (`armgba_mid_careful = 1` where a copy is
-  there, `2` also making one as an event inside the block would; 0 as built, to
-  compare on a console).
+  there, `2` also making one as an event inside the block would, `3` as 2 except
+  that a place returned to again and again still gets a block of its own, which
+  runs it faster than the copy; 0 as built, to compare on a console).
 - `armgba_compile_budget` (ms of compiling a frame of the game may take before code met for the first times is put off,
   1.5 as built; 1000 never puts any off) is a knob for comparing on a console: careful copies no longer wait for it.
 - The interrupt pipeline's events and a halfword store to an I/O register
