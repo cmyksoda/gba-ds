@@ -10,6 +10,24 @@
 #include <stdio.h>
 #include <time.h>
 
+/* The hidden copy's scratch states (0.8 MiB each on armGBA) are made at its first capture, mid-game, and given back with the game
+ * (profile_live_end): kept, one sits above the heap's peak and holds malloc's break there for the rest of the run. */
+enum { SCRATCH_COMPOSE = 0, SCRATCH_COMPOSE2, SCRATCH_DBZ, SCRATCH_DBZ2, SCRATCH_TO, SCRATCH_N };
+static struct {
+	uint8_t* p;
+	size_t cap;
+} scratch[SCRATCH_N];
+
+static uint8_t* scratch_state(Emu* s, int slot) {
+	size_t n = emu_state_size(s);
+	if (n > scratch[slot].cap) {
+		free(scratch[slot].p);
+		scratch[slot].p = malloc(n);
+		scratch[slot].cap = scratch[slot].p ? n : 0;
+	}
+	return scratch[slot].p;
+}
+
 /* Values below were found with tools/harness + tools/ramdiff.py against the
  * USA releases. Each profile describes how to bring up the in-game map and
  * how to tell, from memory and from the picture, that it is really showing. */
@@ -2067,14 +2085,7 @@ static bool dbz_pause_up(Emu* s) {
 	return emu_io16(s, 0x00) == DBZ_PAUSE_DISP && emu_io16(s, 0x08) == DBZ_PAUSE_BG0;
 }
 static const char* dbz_compose(Emu* s, const void* state, uint32_t* out, int w, int h) {
-	static uint8_t* st;
-	static size_t stSize;
-	size_t sz = emu_state_size(s);
-	if (sz > stSize) {
-		free(st);
-		st = malloc(sz);
-		stSize = st ? sz : 0;
-	}
+	uint8_t* st = scratch_state(s, SCRATCH_DBZ);
 	if (!st) return "no memory";
 	if (!emu_state_load(s, state)) return "state load failed";
 	if (emu_io16(s, 0x00) != DBZ_FIELD_DISP) return "not walking about";
@@ -2157,15 +2168,8 @@ static bool dbz2_line(uint32_t c) {
 	return r > 150 && g > 60 && b < 100; /* (orange, yellow) */
 }
 static const char* dbz2_status_prompts(Emu* s, uint32_t* out, int w, int h) {
-	static uint8_t* st;
-	static size_t stSize;
 	static uint32_t noBg1[GBA_W * GBA_H];
-	size_t sz = emu_state_size(s);
-	if (sz > stSize) {
-		free(st);
-		st = malloc(sz);
-		stSize = st ? sz : 0;
-	}
+	uint8_t* st = scratch_state(s, SCRATCH_DBZ2);
 	if (!st) return "no memory";
 	if (!emu_state_save(s, st)) return "state save failed";
 	emu_layers(s, 0x0C);
@@ -3764,10 +3768,7 @@ static bool to_bbox(const uint32_t* fb, uint32_t c, int x0, int y0, int x1, int 
  * the prompt at the bottom right has no box); then BG2 and BG3 drawn,
  * into out. */
 static bool to_cut_boxes(Emu* s, uint32_t* out, int r[2][4]) {
-	static uint8_t* tmp;
-	static size_t tmpSize;
-	size_t sz = emu_state_size(s);
-	if (sz > tmpSize) free(tmp), tmp = malloc(sz), tmpSize = tmp ? sz : 0;
+	uint8_t* tmp = scratch_state(s, SCRATCH_TO);
 	if (!tmp || !emu_state_save(s, tmp)) return false;
 	emu_layers(s, 0x08);
 	emu_state_load(s, tmp);
@@ -4559,6 +4560,8 @@ void profile_live_end(void) {
 	free(mmbnMap.px);
 	memset(&mmbnMap, 0, sizeof(mmbnMap));
 	mmbnBusy = false;
+	for (int i = 0; i < SCRATCH_N; ++i) free(scratch[i].p);
+	memset(scratch, 0, sizeof(scratch));
 }
 
 /* A state of the hidden copy's for a composer that takes the picture apart and
@@ -4567,15 +4570,7 @@ void profile_live_end(void) {
  * was written past). Two (slot 0 and 1); composers run one at a time, on the
  * capture's thread. */
 static uint8_t* compose_state(Emu* s, int slot) {
-	static uint8_t* buf[2];
-	static size_t cap[2];
-	size_t n = emu_state_size(s);
-	if (n > cap[slot]) {
-		free(buf[slot]);
-		buf[slot] = malloc(n);
-		cap[slot] = buf[slot] ? n : 0;
-	}
-	return buf[slot];
+	return scratch_state(s, SCRATCH_COMPOSE + slot);
 }
 
 static const char* mmbn_compose(Emu* s, const void* state, uint32_t* out, int w, int h) {
