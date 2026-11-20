@@ -26,11 +26,8 @@ void bench_check(struct Emu* e, uint64_t frame);
 /* A frame that spent 100 ms or more before emulating: a line saying where in the top of the loop it went. */
 void bench_pre_note(uint64_t frame, double preMs, double inputMs, double midMs, double healthMs, double restMs);
 
-/* Hitch timers (the game thread's calls only): bench_mark("what") says the code since the last mark was `what`. A frame's marks
- * are written when its second screen, drawing or "pre" took 40 ms or more (and for up to 24 frames of a job, when its second
- * screen took 2.5 ms or more), by bench_frame. */
-void bench_marks_begin(void);
-void bench_mark(const char* what);
-void bench_markf(const char* format, ...) __attribute__((format(printf, 1, 2)));
+/* Hitch timers: a frame whose second screen, drawing or "pre" took 40 ms or more (and, for up to 24 frames of a job, whose second
+ * screen took 2.5 ms or more) is written as "bench JOB marks at frame N ...: label ms, ..." (a build with GBADS_HITCH_MARKS, hitch.h). */
+#include "hitch.h"
 
 #endif

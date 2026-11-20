@@ -120,6 +120,7 @@ static void threads_line(void) {
 #endif
 }
 
+#ifdef GBADS_HITCH_MARKS
 /* ---- hitch timers (see bench.h) */
 enum { MARKS = 320, MARK_NAME = 30 };
 static struct {
@@ -191,15 +192,18 @@ static void marks_report(uint64_t frame, double preMs, double screenMs, double d
 	snprintf(line + len, sizeof(line) - (size_t) len, " the rest %.1f (%d marks%s)", rest, nMarks, droppedMarks ? ", some dropped" : "");
 	put(line);
 }
+#endif
 
 void bench_frame(uint64_t frame, double emuMs, double drawMs, double screenMs, bool captureBusy, double preMs, double loopMs) {
 	if (!active) return;
 	++jobFrames;
+#ifdef GBADS_HITCH_MARKS
 	if (nMarks && (screenMs >= 40 || drawMs >= 40 || preMs >= 40 || (screenMs >= 2.5 && reported < 24))) {
 		if (screenMs < 40 && drawMs < 40 && preMs < 40) ++reported;
 		marks_report(frame, preMs, screenMs, drawMs);
 	}
 	nMarks = 0;
+#endif
 	Uint64 now = SDL_GetPerformanceCounter();
 	if (!lastT) {
 		lastT = now;
@@ -445,7 +449,10 @@ bool bench_run(Config* cfg) {
 		cfg->quitAfter = atoi(f[3]);
 		memset(&w, 0, sizeof(w));
 		lastT = 0;
-		jobFrames = 0, reported = 0;
+		jobFrames = 0;
+#ifdef GBADS_HITCH_MARKS
+		reported = 0;
+#endif
 		{
 			uint8_t h[0xB0];
 			char code[5] = "????";

@@ -7782,8 +7782,8 @@ static void hud_logo_surface_drop(void) {
 	hudLogoSurf = NULL;
 }
 
-/* A game with a HUD or a fight picture draws its logo into the frame, so the decoded logo is kept (the fight's first frame read
- * and decoded the file from the SD card: 68-70 ms in Zoids: Legacy, Advance Wars 2 and Kingdom Hearts: Chronicle of Memories). */
+/* A game with a HUD or a fight picture draws its logo in a frame, so the decoded logo is kept (a fight's first frame read and
+ * decoded the file: 68-70 ms in Zoids: Legacy and Advance Wars 2) */
 static bool logo_kept(void) {
 	return hudProf || combatProf || tallProf;
 }
@@ -7809,9 +7809,8 @@ static void hud_logo_prime(void) {
 	hud_logo_surface(&pixelArt, &sub);
 }
 
-/* The logo (nearest-neighbour to w x h) blended over the canvas at x0, y0, `alpha` of 255 times each pixel's own. A division a
- * pixel took most of this (11 ms of a 372x142 logo on a New 2DS XL): each column's source is worked out once, and a pixel that's
- * wholly opaque is the value the blend comes to, with none of its arithmetic. */
+/* The logo (nearest-neighbour to w x h) blended over the canvas at x0, y0. Each column's source is worked out once (a division a
+ * pixel was most of the 11 ms of a 372x142 logo), and a wholly opaque pixel is stored as the blend comes to, not worked out. */
 static void logo_blit(uint32_t* px, int cw, const SDL_Surface* lg, int w, int h, int x0, int y0, int alpha) {
 	int* col = malloc(sizeof(int) * (size_t) w);
 	if (col) {
@@ -7840,9 +7839,8 @@ static void logo_blit(uint32_t* px, int cw, const SDL_Surface* lg, int w, int h,
 	free(col);
 }
 
-/* The HUD's logo pictures that depend on the logo alone, drawn where the frame has no hurry (the first HUD frame took 11 ms of
- * the logo's blend for the title card's, and 17 for the one under the HUD, on a New 2DS XL; the held picture and the level's
- * name decide the picture under the HUD: that one is drawn when it's used) */
+/* The HUD's logo pictures that depend on the logo alone, drawn where the frame has no hurry (a held picture or the level's
+ * name decides the one under the HUD: that one waits for its use) */
 static void hud_logo_pictures(void) {
 	if (!hudProf) return;
 	const typeof(hudProf->hud)* h = &hudProf->hud;

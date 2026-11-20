@@ -19,9 +19,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 
-/* the bench's hitch timers (src/bench.c) */
-void bench_mark(const char* what);
-void bench_markf(const char* format, ...) __attribute__((format(printf, 1, 2)));
+#include "hitch.h"
 
 /* ------------------------------------------------------------ the basics */
 
