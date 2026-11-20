@@ -199,7 +199,8 @@ void* jitHostAllocCode(size_t* size) {
 			spare = least;
 		}
 		for (; spare >= least; spare -= 1 << 20) {
-			uint8_t* code = main ? host_top_alloc_code(spare) : NULL;
+			/* (on a smaller heap the top block crashed in the game's code memory at under 1 MiB free) */
+			uint8_t* code = main && __ctru_heap_size >= 64u << 20 ? host_top_alloc_code(spare) : NULL;
 			if (!code) {
 				code = memalign(0x1000, spare);
 			}
