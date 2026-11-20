@@ -22,7 +22,7 @@
 /* ------------------------------------------------------------ the basics */
 
 static char sdlError[160] = "";
-static u64 startMs;
+static u64 startTick;
 
 static void set_error(const char* fmt, ...) {
 	va_list ap;
@@ -50,8 +50,14 @@ int SDL_ShowCursor(int toggle) {
 	return 0;
 }
 
+/* The system tick, not osGetTime: that clock steps back, which the game loop took for a pause of over 2 s (and rebuilt the pictures). */
+static u64 mono_ms(void) {
+	if (!startTick) startTick = svcGetSystemTick();
+	return (svcGetSystemTick() - startTick) * 1000 / SYSCLOCK_ARM11;
+}
+
 Uint32 SDL_GetTicks(void) {
-	return (Uint32) (osGetTime() - startMs);
+	return (Uint32) mono_ms();
 }
 
 Uint64 SDL_GetPerformanceCounter(void) {
@@ -1963,8 +1969,17 @@ static void pump(void) {
 		/* (a diagnosis: the frames that keep the buttons waiting) */
 		static u64 last;
 		static int told;
-		u64 now = osGetTime();
+		u64 now = mono_ms();
 		if (last && now - last > 150 && told < 200) ++told, logLine("slow frame: %u ms", (unsigned) (now - last));
+		/* (osGetTime against the tick, a frame apart: shows the clock steps SDL_GetTicks avoids) */
+		static u64 lastWall;
+		static int stepsTold;
+		u64 wall = osGetTime();
+		if (last && lastWall && stepsTold < 20) {
+			int drift = (int) ((int64_t) (wall - lastWall) - (int64_t) (now - last));
+			if (drift > 5 || drift < -5) ++stepsTold, logLine("clock: osGetTime moved %+d ms against the tick in a frame of %u ms", drift, (unsigned) (now - last));
+		}
+		lastWall = wall;
 		last = now;
 		static unsigned pumps;
 		if (++pumps % 900 == 0) host_mem_note("now");
@@ -2023,7 +2038,7 @@ int SDL_PollEvent(SDL_Event* ev) {
 /* ------------------------------------------------------------ start, end */
 
 int SDL_Init(Uint32 flags) {
-	if (!startMs) startMs = osGetTime();
+	mono_ms();
 	if ((flags & SDL_INIT_VIDEO) && !videoUp) {
 		logLine("start: screens");
 		gfxInitDefault();

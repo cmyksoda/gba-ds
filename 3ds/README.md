@@ -82,6 +82,9 @@ The CIA takes armGBA-3DS's `.rsf` (the 80 MB mode, among others), so `make cia` 
   no byte swap and no cache flush (`gpu_twin = 1`, off by default: on a New 2DS XL its extra pass slowed the game
   thread more than it saved; it needs a start-up self-test to pass, and the log says "GPU twin self-test"). Both
   draw the same pictures at the same time.
+- `SDL_GetTicks` on the 3DS counts the system tick, not `osGetTime`: that clock steps (the log says "clock:
+  osGetTime moved ..."), and a step back looked like a pause of over two seconds to the game loop, which rebuilt
+  every picture (one 200-370 ms frame, seen as the bench's "pre stall" in "events and buttons").
 - The HUD pictures on the bottom screen (Mario Kart, Crash Nitro Kart, Sonic Advance, V-Rally 3 and the
   like) can be a backdrop with the HUD's pieces laid over it by the GPU, so a frame sends only the rows
   that changed (`hud_layers = 1`, the default on the 3DS); `hud_layers = 0` makes it a third at a time over
