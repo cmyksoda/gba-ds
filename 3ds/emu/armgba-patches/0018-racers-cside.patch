@@ -1,0 +1,522 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: armGBA speedups <none@example.invalid>
+Date: Fri, 20 Nov 2026 18:00:00 -0500
+Subject: armGBA: with a render thread the machine's own renderer keeps only what is read of it, and the render log is written without the ring's checks (gbaCside)
+
+
+diff --git a/src/gba.h b/src/gba.h
+index cd3714b..e513000 100644
+--- a/src/gba.h
++++ b/src/gba.h
+@@ -1125,6 +1125,15 @@ enum {
+ // Whether the render and sound logs are published and read with the fewest barriers (false: a barrier
+ // at every entry, as they were).
+ extern bool threadLogsLean;
++// The ways the emulation thread's own work is made cheaper (gbaCside, a bit mask, each exact): with a
++// render thread, the machine's renderer keeps only what it is read for.
++extern uint32_t gbaCside;
++enum {
++	CSIDE_LEAN_VIDEO = 1,
++	// The render log's entries are written without the checks until the ring's end or the workers' progress needs them,
++	// and a 32-bit write to two video registers is one entry. Needs threadLogsLean (no publishing at each entry).
++	CSIDE_FAST_LOG = 2,
++};
+ // The console whose sound a thread makes, if any, and whether its calls are inside one already
+ // logged whole.
+ extern struct GBA* audioThreaded;
+diff --git a/src/io/io.c b/src/io/io.c
+index cd7f0c1..8891229 100644
+--- a/src/io/io.c
++++ b/src/io/io.c
+@@ -104,16 +104,46 @@ static inline bool isVideoRegister(uint32_t address) {
+ }
+ 
+ static inline void writeVideoRegister(struct GBA* gba, uint32_t address, uint16_t value) {
+-	gba->io[address >> 1] = renderWriteRegister(gba, address, value);
++	if (gba->renderThread && (gbaCside & (CSIDE_LEAN_VIDEO | CSIDE_FAST_LOG)) == (CSIDE_LEAN_VIDEO | CSIDE_FAST_LOG)) {
++		renderWriteVideo(gba, address, value);
++		return;
++	}
+ 	if (gba->renderThread) {
++		gba->io[address >> 1] = gbaCside & CSIDE_LEAN_VIDEO ? renderWriteRegisterLean(gba, address, value) : renderWriteRegister(gba, address, value);
+ 		renderThreadRegister(gba, address, value);
++		return;
+ 	}
++	gba->io[address >> 1] = renderWriteRegister(gba, address, value);
++}
++
++// A 32-bit write to two video registers, made on a machine whose copies draw: the copies are logged one entry for both.
++static void writeVideoRegisters(struct GBA* gba, uint32_t address, uint32_t value) {
++	if ((gbaCside & (CSIDE_LEAN_VIDEO | CSIDE_FAST_LOG)) == (CSIDE_LEAN_VIDEO | CSIDE_FAST_LOG)) {
++		renderWriteVideo32(gba, address, value);
++		return;
++	}
++	bool const lean = gbaCside & CSIDE_LEAN_VIDEO;
++	gba->io[address >> 1] = lean ? renderWriteRegisterLean(gba, address, value & 0xFFFF) : renderWriteRegister(gba, address, value & 0xFFFF);
++	gba->io[(address >> 1) + 1] = lean ? renderWriteRegisterLean(gba, address | 2, value >> 16) : renderWriteRegister(gba, address | 2, value >> 16);
++	renderThreadRegister32(gba, address, value);
+ }
+ 
+ // Handles a 16-bit write to an I/O register at address (an offset into the I/O space). Each case
+ // does what the write does and masks value down to the bits that read back; a case that returns has
+ // stored its own.
++static __attribute__((noinline)) void ioWriteGeneral(struct GBA* gba, uint32_t address, uint16_t value);
++
+ void ioWrite(struct GBA* gba, uint32_t address, uint16_t value) {
++	// (the video registers first, in a function of their own that needs no frame for the rest)
++	if (gbaCside & CSIDE_FAST_LOG && isVideoRegister(address)) {
++		videoSync(gba);
++		writeVideoRegister(gba, address, value);
++		return;
++	}
++	ioWriteGeneral(gba, address, value);
++}
++
++static void ioWriteGeneral(struct GBA* gba, uint32_t address, uint16_t value) {
+ 	if (isVideoRegister(address)) {
+ 		// Lines that have started have taken what they latch at their start.
+ 		videoSync(gba);
+@@ -460,7 +490,23 @@ void ioWrite8(struct GBA* gba, uint32_t address, uint8_t value) {
+ 
+ // Handles a 32-bit write: the registers that are 32 bits wide, otherwise two 16-bit writes, low
+ // half first.
++static __attribute__((noinline)) void ioWrite32General(struct GBA* gba, uint32_t address, uint32_t value);
++
+ void ioWrite32(struct GBA* gba, uint32_t address, uint32_t value) {
++	if (gbaCside & CSIDE_FAST_LOG && isVideoRegister(address) && isVideoRegister(address | 2)) {
++		videoSync(gba);
++		if (gba->renderThread) {
++			writeVideoRegisters(gba, address, value);
++		} else {
++			writeVideoRegister(gba, address, value & 0xFFFF);
++			writeVideoRegister(gba, address | 2, value >> 16);
++		}
++		return;
++	}
++	ioWrite32General(gba, address, value);
++}
++
++static void ioWrite32General(struct GBA* gba, uint32_t address, uint32_t value) {
+ 	switch (address) {
+ 	case 0x090:
+ 	case 0x094:
+@@ -503,6 +549,10 @@ void ioWrite32(struct GBA* gba, uint32_t address, uint32_t value) {
+ 		if (isVideoRegister(address) && isVideoRegister(address | 2)) {
+ 			// No time passes between the halves, so the second sync would find nothing to do.
+ 			videoSync(gba);
++			if (gba->renderThread && gbaCside & CSIDE_FAST_LOG) {
++				writeVideoRegisters(gba, address, value);
++				return;
++			}
+ 			writeVideoRegister(gba, address, value & 0xFFFF);
+ 			writeVideoRegister(gba, address | 2, value >> 16);
+ 			return;
+diff --git a/src/video/render-thread.c b/src/video/render-thread.c
+index 2b57d37..af96228 100644
+--- a/src/video/render-thread.c
++++ b/src/video/render-thread.c
+@@ -52,7 +52,7 @@ enum {
+ };
+ 
+ enum {
+-	LOG_REGISTER,
++	LOG_REGISTER = RENDER_LOG_REGISTER,
+ 	// The rest of the log up to its end is unused, since entries don't wrap around.
+ 	LOG_SKIP,
+ 	LOG_LINE,
+@@ -60,6 +60,8 @@ enum {
+ 	LOG_LATCH,
+ 	LOG_FINISH,
+ 	LOG_SKIP_LINE,
++	// Both halves of a 32-bit register write, made at one time.
++	LOG_REGISTER2 = RENDER_LOG_REGISTER2,
+ };
+ 
+ struct RenderThread;
+@@ -82,16 +84,17 @@ struct Worker {
+ };
+ 
+ struct RenderThread {
++	// First, so that render.c's writes can go straight into the log (CSIDE_FAST_LOG).
++	struct RenderLogEnd end;
+ 	pthread_mutex_t mutex;
+ 	pthread_cond_t idle;
+ 	struct Worker workers[2];
+ 	int count;
+-	// A ring: positions only grow, and an entry is at its position modulo LOG_SIZE.
+-	uint8_t* log;
+-	// How much the workers can see of the log, and (the emulation thread's) how much is logged: the rest
+-	// waits for the next line, since nothing draws before one.
++	// How much the workers can see of the log, and (the emulation thread's) how much is logged (end.head): the rest
++	// waits for the next line, since nothing draws before one. The log is a ring: positions only grow, and an
++	// entry is at its position modulo LOG_SIZE.
+ 	atomic_ullong written;
+-	uint64_t head, published;
++	uint64_t published;
+ 	// The emulation thread's: up to where the log is known to be clear of what the workers have yet
+ 	// to do.
+ 	uint64_t roomUntil;
+@@ -209,6 +212,7 @@ struct Sharer {
+ // from a worker, lines taken as they were last frame, and times its copy was made anew.
+ unsigned long renderShareCounts[4];
+ bool threadLogsLean = true;
++uint32_t gbaCside;
+ #if !defined(__3DS__)
+ // ARMGBA_RENDER_STALL=n: a worker stops for 2 ms holding about one line in n, to test taking over.
+ static int stallEvery = -1;
+@@ -321,6 +325,11 @@ static uint32_t play(struct GBA* copy, const uint8_t* entry, uint32_t* size) {
+ 		copy->renderer.copyCycle = head[3];
+ 		renderWriteRegister(copy, head[1], head[2]);
+ 		break;
++	case LOG_REGISTER2:
++		copy->renderer.copyCycle = head[3];
++		renderWriteRegister(copy, head[1], (uint16_t) head[2]);
++		renderWriteRegister(copy, head[1] | 2, head[2] >> 16);
++		break;
+ 	case LOG_START_LINE:
+ 		renderStartLine(copy, head[1]);
+ 		break;
+@@ -436,7 +445,7 @@ static void* work(void* context) {
+ #if defined(__3DS__)
+ 		uint64_t const began = HOST_TICKS();
+ #endif
+-		bool finish = play(w->copy, &t->log[done & (LOG_SIZE - 1)], &size) == LOG_FINISH;
++		bool finish = play(w->copy, &t->end.log[done & (LOG_SIZE - 1)], &size) == LOG_FINISH;
+ #if defined(__3DS__)
+ 		// One worker's time: with two, each draws half the lines.
+ 		if (!w->index) {
+@@ -489,16 +498,16 @@ static void publish(struct RenderThread* t);
+ // Waits until the worker has done everything written so far.
+ static void drain(struct RenderThread* t) {
+ 	publish(t);
+-	await(t, t->head);
++	await(t, t->end.head);
+ }
+ 
+ // Makes what is logged visible to the workers, and wakes one that sleeps.
+ static void publish(struct RenderThread* t) {
+-	if (t->published == t->head) {
++	if (t->published == t->end.head) {
+ 		return;
+ 	}
+-	t->published = t->head;
+-	atomic_store(&t->written, t->head);
++	t->published = t->end.head;
++	atomic_store(&t->written, t->end.head);
+ 	if (atomic_load(&t->asleep)) {
+ 		pthread_mutex_lock(&t->mutex);
+ 		pthread_cond_signal(&t->workers[0].wake);
+@@ -512,13 +521,13 @@ static void shareBegin(struct GBA* gba);
+ 
+ // Finds room for the biggest entry, in one piece and clear of what the worker has yet to do.
+ static uint8_t* reserve(struct RenderThread* t) {
+-	uint64_t written = t->head;
++	uint64_t written = t->end.head;
+ 	uint32_t at = written & (LOG_SIZE - 1);
+ 	if (at + LOG_MOST > LOG_SIZE) {
+ 		uint32_t head[4] = { LOG_SKIP, LOG_SIZE - at, 0, 0 };
+-		memcpy(&t->log[at], head, sizeof(head));
+-		t->head += LOG_SIZE - at;
+-		written = t->head;
++		memcpy(&t->end.log[at], head, sizeof(head));
++		t->end.head += LOG_SIZE - at;
++		written = t->end.head;
+ 		at = 0;
+ 	}
+ 	// The workers only get further, so room found once is still there: they are asked how far they
+@@ -532,26 +541,50 @@ static uint8_t* reserve(struct RenderThread* t) {
+ 		}
+ 		t->roomUntil = logNeededFrom(t) + LOG_SIZE;
+ 	}
+-	return &t->log[at];
++	// Until where an entry finds, without asking again, the room asked for here.
++	uint64_t const ringEnd = (t->end.head & ~(uint64_t) (LOG_SIZE - 1)) + LOG_SIZE;
++	t->end.quickUntil = (ringEnd < t->roomUntil ? ringEnd : t->roomUntil) - LOG_MOST + 1;
++	return &t->end.log[at];
+ }
+ 
+ // Logs an entry that is a call with up to three arguments.
+-static void entry(struct GBA* gba, uint32_t kind, uint32_t a, uint32_t b, uint32_t c) {
++static __attribute__((noinline)) void entrySlow(struct GBA* gba, uint32_t kind, uint32_t a, uint32_t b) {
+ 	struct RenderThread* t = gba->renderThread;
++	// (a register write's time, as its callers work it out; the other kinds have none)
++	uint32_t const c = kind == LOG_REGISTER || kind == LOG_REGISTER2 ? (uint32_t) (timingCurrentTime(gba) - gba->video.lineStart) : 0;
+ 	uint32_t head[4] = { kind, a, b, c };
+ 	memcpy(reserve(t), head, sizeof(head));
+-	t->head += sizeof(head);
++	t->end.head += sizeof(head);
+ 	if (kind == LOG_FINISH || !threadLogsLean) {
+ 		publish(t);
+ 	}
+ }
+ 
++static inline void entry(struct GBA* gba, uint32_t kind, uint32_t a, uint32_t b, uint32_t c) {
++	struct RenderThread* t = gba->renderThread;
++	uint64_t const at = t->end.head;
++	if (gbaCside & CSIDE_FAST_LOG && kind != LOG_FINISH && at < t->end.quickUntil) {
++		uint32_t* const slot = (uint32_t*) &t->end.log[at & (LOG_SIZE - 1)];
++		slot[0] = kind;
++		slot[1] = a;
++		slot[2] = b;
++		slot[3] = c;
++		t->end.head = at + 16;
++		return;
++	}
++	entrySlow(gba, kind, a, b);
++}
++
+ // The calls the emulation thread logs instead of making: a register write, a line start, a latch, a
+ // line to draw or one left undrawn, and the end of a frame.
+ void renderThreadRegister(struct GBA* gba, uint32_t address, uint16_t value) {
+ 	entry(gba, LOG_REGISTER, address, value, timingCurrentTime(gba) - gba->video.lineStart);
+ }
+ 
++void renderThreadRegister32(struct GBA* gba, uint32_t address, uint32_t value) {
++	entry(gba, LOG_REGISTER2, address, value, timingCurrentTime(gba) - gba->video.lineStart);
++}
++
+ void renderThreadStartLine(struct GBA* gba, int y) {
+ 	entry(gba, LOG_START_LINE, y, 0, 0);
+ }
+@@ -564,7 +597,7 @@ void renderThreadLatch(struct GBA* gba) {
+ static void logLine(struct GBA* gba, uint32_t kind, int y) {
+ 	struct RenderThread* t = gba->renderThread;
+ 	struct Renderer* renderer = &gba->renderer;
+-	uint8_t* start = reserve(t);
++	uint8_t* start = gbaCside & CSIDE_FAST_LOG && t->end.head < t->end.quickUntil ? &t->end.log[t->end.head & (LOG_SIZE - 1)] : reserve(t);
+ 	uint8_t* data = start + 16;
+ 	uint32_t changed = renderer->memoryChanged;
+ 	renderer->memoryChanged = 0;
+@@ -596,7 +629,7 @@ static void logLine(struct GBA* gba, uint32_t kind, int y) {
+ 	}
+ 	memcpy(start, head, sizeof(head));
+ 	// Entries start on word boundaries.
+-	t->head += (data - start + 3) & ~3u;
++	t->end.head += (data - start + 3) & ~3u;
+ 	publish(t);
+ }
+ 
+@@ -636,11 +669,12 @@ static void helperClone(struct RenderThread* t) {
+ 		}
+ 	}
+ 	sharerSet(t->helper, t, HELPER, t->frameSeq);
+-	t->helperDone = t->head;
++	t->helperDone = t->end.head;
+ 	t->helperActive = true;
+ 	++renderShareCounts[3];
+ 	t->idleFrames = 0;
+ 	t->roomUntil = 0;
++	t->end.quickUntil = 0;
+ }
+ 
+ // Lines are shared from here on, if they can be: two workers, each frame waited for, a copy for the
+@@ -714,10 +748,10 @@ static void finishShared(struct GBA* gba) {
+ 		if (t->idleFrames > 30) {
+ 			t->helperActive = false;
+ 		} else {
+-			uint64_t const end = t->head;
++			uint64_t const end = t->end.head;
+ 			while (t->helperDone < end) {
+ 				uint32_t size;
+-				play(t->helper, &t->log[t->helperDone & (LOG_SIZE - 1)], &size);
++				play(t->helper, &t->end.log[t->helperDone & (LOG_SIZE - 1)], &size);
+ 				t->helperDone += size;
+ 			}
+ 		}
+@@ -795,7 +829,7 @@ void renderThreadFinishFrame(struct GBA* gba) {
+ 		renderHooksPublish(gba);
+ 	}
+ 	entry(gba, LOG_FINISH, 0, 0, 0);
+-	t->finishLogged = t->head;
++	t->finishLogged = t->end.head;
+ }
+ 
+ void renderThreadSetWiden(struct GBA* gba, void (*widen)(uint32_t* dst, const uint16_t* src), uint32_t* first, uint32_t* second) {
+@@ -877,16 +911,17 @@ bool renderThreadStart(struct GBA* gba, bool late, bool second) {
+ 	struct RenderThread* t = calloc(1, sizeof(*t));
+ 	if (t) {
+ 		t->workers[0].copy = calloc(1, sizeof(struct GBA));
+-		t->log = malloc(LOG_SIZE);
++		t->end.log = malloc(LOG_SIZE);
+ 	}
+-	if (!t || !t->workers[0].copy || !t->log) {
++	if (!t || !t->workers[0].copy || !t->end.log) {
+ 		if (t) {
+ 			free(t->workers[0].copy);
+-			free(t->log);
++			free(t->end.log);
+ 		}
+ 		free(t);
+ 		return false;
+ 	}
++	t->end.mask = LOG_SIZE - 1;
+ 	pthread_mutex_init(&t->mutex, NULL);
+ 	pthread_cond_init(&t->workers[0].wake, NULL);
+ 	pthread_cond_init(&t->workers[1].wake, NULL);
+@@ -905,7 +940,7 @@ bool renderThreadStart(struct GBA* gba, bool late, bool second) {
+ 	if (pthread_create(&t->workers[0].thread, NULL, work, &t->workers[0])) {
+ #endif
+ 		free(t->workers[0].copy);
+-		free(t->log);
++		free(t->end.log);
+ 		free(t);
+ 		return false;
+ 	}
+@@ -967,6 +1002,6 @@ void renderThreadStop(struct GBA* gba) {
+ 	free(t->workers[1].copy);
+ 	free(t->helper);
+ 	free(t->merged);
+-	free(t->log);
++	free(t->end.log);
+ 	free(t);
+ }
+diff --git a/src/video/render.c b/src/video/render.c
+index 2044d15..ba017ff 100644
+--- a/src/video/render.c
++++ b/src/video/render.c
+@@ -3242,6 +3242,9 @@ void renderSkipScanline(struct GBA* gba, int y) {
+ }
+ 
+ void renderStartLine(struct GBA* gba, int y) {
++	if (gbaCside & CSIDE_LEAN_VIDEO && gba->renderThread) {
++		return;
++	}
+ 	struct HookSlot* slot = twinOf(gba);
+ 	if (slot) {
+ 		oneStartLine(slot->twin, y);
+@@ -3250,6 +3253,10 @@ void renderStartLine(struct GBA* gba, int y) {
+ }
+ 
+ void renderLatchDispcnt(struct GBA* gba) {
++	if (gbaCside & CSIDE_LEAN_VIDEO && gba->renderThread) {
++		oneLatchDispcnt(gba);
++		return;
++	}
+ 	struct HookSlot* slot = twinOf(gba);
+ 	if (slot) {
+ 		oneLatchDispcnt(slot->twin);
+@@ -3300,6 +3307,86 @@ uint16_t renderWriteRegister(struct GBA* gba, uint32_t address, uint16_t value)
+ 	return oneWriteRegister(gba, address, value) | kept;
+ }
+ 
++// Copies draw for this machine, so what it reads of its renderer is DISPCNT and its latch (video.c) and the
++// registers' values as they read back; the rest stays as it was, and a copy takes the whole state from
++// renderThreadClone (and this machine takes it back from the copies in renderThreadStop).
++static uint16_t const leanMask[0x30] = {
++	[0x000 >> 1] = 0xFFF7, [0x002 >> 1] = 0xFFFF, [0x004 >> 1] = 0xFFFF, [0x006 >> 1] = 0xFFFF,
++	[0x008 >> 1] = 0xDFFF, [0x00A >> 1] = 0xDFFF, [0x00C >> 1] = 0xFFFF, [0x00E >> 1] = 0xFFFF,
++	[0x010 >> 1] = 0x01FF, [0x012 >> 1] = 0x01FF, [0x014 >> 1] = 0x01FF, [0x016 >> 1] = 0x01FF,
++	[0x018 >> 1] = 0x01FF, [0x01A >> 1] = 0x01FF, [0x01C >> 1] = 0x01FF, [0x01E >> 1] = 0x01FF,
++	[0x020 >> 1] = 0xFFFF, [0x022 >> 1] = 0xFFFF, [0x024 >> 1] = 0xFFFF, [0x026 >> 1] = 0xFFFF,
++	[0x028 >> 1] = 0xFFFF, [0x02A >> 1] = 0xFFFF, [0x02C >> 1] = 0xFFFF, [0x02E >> 1] = 0xFFFF,
++	[0x030 >> 1] = 0xFFFF, [0x032 >> 1] = 0xFFFF, [0x034 >> 1] = 0xFFFF, [0x036 >> 1] = 0xFFFF,
++	[0x038 >> 1] = 0xFFFF, [0x03A >> 1] = 0xFFFF, [0x03C >> 1] = 0xFFFF, [0x03E >> 1] = 0xFFFF,
++	[0x040 >> 1] = 0xFFFF, [0x042 >> 1] = 0xFFFF, [0x044 >> 1] = 0xFFFF, [0x046 >> 1] = 0xFFFF,
++	[0x048 >> 1] = 0x3F3F, [0x04A >> 1] = 0x3F3F, [0x04C >> 1] = 0xFFFF, [0x04E >> 1] = 0xFFFF,
++	[0x050 >> 1] = 0x3FFF, [0x052 >> 1] = 0x1F1F, [0x054 >> 1] = 0x001F, [0x056 >> 1] = 0xFFFF,
++	[0x058 >> 1] = 0xFFFF, [0x05A >> 1] = 0xFFFF, [0x05C >> 1] = 0xFFFF, [0x05E >> 1] = 0xFFFF,
++};
++
++// The slot of the machine this thread emulates, found by renderWriteRegisterLean alone (so no other thread writes it).
++static struct HookSlot* emulatedHooks;
++
++// The value of a video register as it reads back, with the hooks' masked bits kept out of it.
++static inline uint16_t leanValue(struct GBA* gba, uint32_t address, uint16_t value) {
++	struct HookSlot* any = emulatedHooks;
++	if (!any || any->gba != gba) {
++		any = emulatedHooks = findHooks(gba);
++	}
++	uint16_t kept = 0;
++	if (any && any->hooks->second && any->hooks->maskedBits && address == any->hooks->maskedRegister) {
++		kept = value & any->hooks->maskedBits;
++		value &= ~any->hooks->maskedBits;
++	}
++	value &= leanMask[address >> 1];
++	if (address == 0x000) {
++		gba->renderer.dispcnt = value;
++		gba->vramStall = (value & 7) == 2 && (value & 0x0C00) == 0x0C00;
++		videoDispcntWritten(gba);
++	} else if (address == 0x054 && value > 0x10) {
++		value = 0x10;
++	}
++	return value | kept;
++}
++
++uint16_t renderWriteRegisterLean(struct GBA* gba, uint32_t address, uint16_t value) {
++	return leanValue(gba, address, value);
++}
++
++void renderWriteVideo(struct GBA* gba, uint32_t address, uint16_t value) {
++	gba->io[address >> 1] = leanValue(gba, address, value);
++	struct RenderLogEnd* end = (struct RenderLogEnd*) gba->renderThread;
++	uint64_t const at = end->head;
++	if (at < end->quickUntil) {
++		uint32_t* slot = (uint32_t*) (end->log + (at & end->mask));
++		slot[0] = RENDER_LOG_REGISTER;
++		slot[1] = address;
++		slot[2] = value;
++		slot[3] = (uint32_t) (timingCurrentTime(gba) - gba->video.lineStart);
++		end->head = at + 16;
++		return;
++	}
++	renderThreadRegister(gba, address, value);
++}
++
++void renderWriteVideo32(struct GBA* gba, uint32_t address, uint32_t value) {
++	gba->io[address >> 1] = leanValue(gba, address, (uint16_t) value);
++	gba->io[(address >> 1) + 1] = leanValue(gba, address | 2, value >> 16);
++	struct RenderLogEnd* end = (struct RenderLogEnd*) gba->renderThread;
++	uint64_t const at = end->head;
++	if (at < end->quickUntil) {
++		uint32_t* slot = (uint32_t*) (end->log + (at & end->mask));
++		slot[0] = RENDER_LOG_REGISTER2;
++		slot[1] = address;
++		slot[2] = value;
++		slot[3] = (uint32_t) (timingCurrentTime(gba) - gba->video.lineStart);
++		end->head = at + 16;
++		return;
++	}
++	renderThreadRegister32(gba, address, value);
++}
++
+ void renderReset(struct GBA* gba) {
+ 	struct HookSlot* slot = findHooks(gba);
+ 	if (slot) {
+diff --git a/src/video/render.h b/src/video/render.h
+index 5112fc2..1c4e961 100644
+--- a/src/video/render.h
++++ b/src/video/render.h
+@@ -278,6 +278,24 @@ void renderForget(struct Renderer*);
+ // Chooses the SIMD paths if the CPU has them; ARMGBA_RENDER=reference keeps to the scalar ones.
+ void renderInit(void);
+ uint16_t renderWriteRegister(struct GBA*, uint32_t address, uint16_t value);
++// The same for a machine whose copies draw (CSIDE_LEAN_VIDEO): only what the machine reads of its own renderer is kept.
++uint16_t renderWriteRegisterLean(struct GBA*, uint32_t address, uint16_t value);
++// The emulation thread's end of the render log (render-thread.c), the first member of a machine's RenderThread, so that
++// a register write can go straight in while head is below quickUntil (CSIDE_FAST_LOG).
++struct RenderLogEnd {
++	uint8_t* log;
++	uint64_t head;
++	uint64_t quickUntil;
++	uint32_t mask;
++};
++enum {
++	RENDER_LOG_REGISTER = 0,
++	RENDER_LOG_REGISTER2 = 7,
++};
++// With CSIDE_LEAN_VIDEO and CSIDE_FAST_LOG: a write to a video register (or to two, the 32-bit one), made as
++// renderWriteRegisterLean and renderThreadRegister make it, with the value as it reads back put in io.
++void renderWriteVideo(struct GBA*, uint32_t address, uint16_t value);
++void renderWriteVideo32(struct GBA*, uint32_t address, uint32_t value);
+ void renderScanline(struct GBA*, int y);
+ void renderSkipScanline(struct GBA*, int y);
+ // At the start of each line, the affine backgrounds finish the last line and take on new reference
+@@ -302,6 +320,8 @@ void renderThreadClone(struct GBA*);
+ // Returns the copy's renderer, with everything logged so far drawn.
+ const struct Renderer* renderThreadRenderer(struct GBA*);
+ void renderThreadRegister(struct GBA*, uint32_t address, uint16_t value);
++// Both halves of a 32-bit write to two video registers, as one entry (CSIDE_FAST_LOG).
++void renderThreadRegister32(struct GBA*, uint32_t address, uint32_t value);
+ void renderThreadScanline(struct GBA*, int y);
+ void renderThreadSkipScanline(struct GBA*, int y);
+ void renderThreadStartLine(struct GBA*, int y);

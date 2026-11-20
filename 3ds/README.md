@@ -287,6 +287,17 @@ frame in armGBA itself. What cut it, with the same pictures, RAM and sound
   there, `2` also making one as an event inside the block would, `3` as 2 except
   that a place returned to again and again still gets a block of its own, which
   runs it faster than the copy; 0 as built, to compare on a console).
+- With the picture drawn on threads, the machine's own renderer is read only for
+  DISPCNT, its latch and what a register reads back: the copies that draw take
+  their state from the log and from `renderThreadClone`. `armgba_cside` is a bit
+  mask of ways the emulation thread does less for that (0 as built, to compare
+  on a console): 1 keeps only those in the machine's renderer (a register write
+  no longer updates the renderer's backgrounds, windows, blends and per-line
+  caches, and a line start no longer runs its affine step); 2 writes the render
+  log's entries straight into the ring while it has room, as one entry for the
+  two registers of a 32-bit write, and takes video registers first in
+  `ioWrite` and `ioWrite32`. Crash Nitro Kart and GT Advance 3 write about 1300
+  video registers a frame from their H-blank DMA.
 - `armgba_compile_budget` (ms of compiling a frame of the game may take before code met for the first times is put off,
   1.5 as built; 1000 never puts any off) is a knob for comparing on a console: careful copies no longer wait for it.
 - The interrupt pipeline's events and a halfword store to an I/O register
