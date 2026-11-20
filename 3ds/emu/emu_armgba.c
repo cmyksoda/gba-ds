@@ -104,6 +104,11 @@ void emu_read_cancel(const volatile bool* flag) {
 #define rom_free free
 #endif
 
+#ifdef __3DS__
+static _Thread_local uint8_t* romRoomNow; /* (the room emu_open set aside at the top for the read that follows, and its size) */
+static _Thread_local size_t romRoomSize;
+#endif
+
 /* top (3DS): read into a cartridge's whole buffer at the top of the heap's range, where a long session's
  * small allocations can't cut up the room the next game's cartridge needs. */
 static uint8_t* read_file_to(const char* path, size_t* n, bool top) {
@@ -114,7 +119,9 @@ static uint8_t* read_file_to(const char* path, size_t* n, bool top) {
 	uint8_t* p = NULL;
 #ifdef __3DS__
 	size_t const whole = gbaRomBufferSize((size_t) st.st_size);
-	if (f && top && (p = host_top_alloc(whole))) memset(p + st.st_size, 0, whole - (size_t) st.st_size);
+	if (f && top && romRoomNow && romRoomSize == whole) p = romRoomNow, romRoomNow = NULL;
+	else if (f && top) p = host_top_alloc(whole);
+	if (p) memset(p + st.st_size, 0, whole - (size_t) st.st_size);
 #else
 	(void) top;
 #endif
@@ -860,6 +867,7 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 	 * the heap had 30 MiB free but not 8 in one piece once the game's code
 	 * memory was placed, and Pokémon Pinball didn't start) */
 	void* romRoom = NULL;
+	size_t romRoomBytes = 0;
 	{
 		/* (the ROM is read after the machine is made: its size, so that the
 		 * recompiler leaves it room; a .zip's isn't known, taken as 16 MiB) */
@@ -868,8 +876,9 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 		for (int i = 0; i < SHARED_MAX; ++i) held |= sharedRoms[i].users && !strcmp(sharedRoms[i].path, romPath);
 		struct stat rst;
 		if (!held) toLoad = emu_is_archive_name(romPath) || stat(romPath, &rst) ? 16u << 20 : (size_t) rst.st_size;
-		/* (a plain file goes to the top of the heap's range, which a hole of its size in the heap would push out of reach) */
-		if (toLoad && emu_is_archive_name(romPath)) romRoom = malloc(gbaRomBufferSize(toLoad));
+		/* (a plain file's room is at the top of the heap's range: the code memory placed first can push the break up past it) */
+		romRoomBytes = gbaRomBufferSize(toLoad);
+		if (toLoad) romRoom = emu_is_archive_name(romPath) ? malloc(romRoomBytes) : host_top_alloc(romRoomBytes);
 		/* (set aside already: the heap free doesn't count it, so nothing more
 		 * is kept for it) */
 		host_jit_main(audio, romRoom ? 0 : toLoad, emuHiddenCopy);
@@ -942,9 +951,15 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 #endif
 	if (!s) {
 #ifdef __3DS__
-		free(romRoom), romRoom = NULL;
+		/* (a plain file's room goes to its read as it is: given back first, another core's start could take it) */
+		if (romRoom && host_top_owns(romRoom)) romRoomNow = romRoom, romRoomSize = romRoomBytes;
+		else host_rom_free(romRoom);
+		romRoom = NULL;
 #endif
 		rom = read_played(romPath, &size, &e->patch, e->patchName, &e->fileCrc, true);
+#ifdef __3DS__
+		host_rom_free(romRoomNow), romRoomNow = NULL;
+#endif
 		{
 			/* (the names of the ones left out, as src/emu.c reports them) */
 			int r;
@@ -1020,7 +1035,7 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 	}
 
 #ifdef __3DS__
-	free(romRoom), romRoom = NULL; /* (a cartridge borrowed from another core: not needed) */
+	host_rom_free(romRoom), romRoom = NULL; /* (a cartridge borrowed from another core: not needed) */
 #endif
 	gba->savedata.backed = true;
 	if (savePath) {
@@ -1087,7 +1102,7 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 	return true;
 fail:
 #ifdef __3DS__
-	free(romRoom);
+	host_rom_free(romRoom);
 #endif
 	close_core(c);
 	e->core = NULL;
