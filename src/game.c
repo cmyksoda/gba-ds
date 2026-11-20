@@ -8583,7 +8583,8 @@ static enum GameExit game_run_inner(Config* c, const char* rom, bool fromLibrary
 	host_set_async_upload(cfg->asyncUpload);
 	host_set_gpu_twin(cfg->gpuTwin);
 	host_set_twin_check(cfg->twinCheck);
-	host_set_raw_picture(cfg->rawPicture);
+	host_set_raw_picture(cfg->rawForce ? cfg->rawForce : cfg->rawPicture, cfg->rawForce != 0);
+	host_set_raw_swizzle(cfg->rawSwizzle);
 	host_set_raw_check(cfg->rawCheck);
 	host_set_tex_check(cfg->texCheck);
 	emu_threaded_video(cfg->threadedVideo && isNew3ds()); /* (mGBA's drawing thread on the New 3DS's third core) */

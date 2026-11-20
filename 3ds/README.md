@@ -91,6 +91,10 @@ The CIA takes armGBA-3DS's `.rsf` (the 80 MB mode, among others), so `make cia` 
   copy that leaves a gap after each row, then the usual transfer), in case the copy engine can't do the one transfer.
   `raw_check = 1` and `tex_check = 1` are tests: each picture drawn both ways offscreen and compared, each texture read
   back; their verdicts are bench lines.
+  The self-test tries five setups of the combiner in turn (two with an all-or-nothing mask that rely on the GPU's
+  arithmetic being exact, one drawing the quad once for each channel) and uses the first that matches; its bench lines
+  say which, and give a test card's words for those that don't. `raw_swizzle = 1` to `5` uses only that setup, and
+  `raw_force = 1` or `2` skips the self-test (a test, to time the copy whatever the colours come out as).
 - `SDL_GetTicks` on the 3DS counts the system tick, not `osGetTime`: that clock steps (the log says "clock:
   osGetTime moved ..."), and a step back looked like a pause of over two seconds to the game loop, which rebuilt
   every picture (one 200-370 ms frame, seen as the bench's "pre stall" in "events and buttons").

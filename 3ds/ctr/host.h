@@ -70,7 +70,8 @@ void host_picture_twin(const void* fb, const void* gpuOrder);
 /* gba-ds.cfg's raw_picture: the render worker's picture buffers are linear memory it flushes itself, so the copy engine tiles them as they are and the
  * GPU's combiner puts the channels right. host_raw_picture_ready: on, and the self-test passed; host_picture_raw(fb): fb is such a buffer (NULL: none). */
 #define HOST_RAW_SLACK_WORDS 64 /* (the copy engine reads 16 words past a picture's last row) */
-void host_set_raw_picture(int mode); /* 0 off, 1 the copy in one transfer, 2 in two (a linear copy with gaps, then the usual transfer) */
+void host_set_raw_picture(int mode, bool force); /* 0 off, 1 the copy in one transfer, 2 in two (a linear copy with gaps, then the usual transfer); force: no self-test (raw_force) */
+void host_set_raw_swizzle(int which); /* gba-ds.cfg's raw_swizzle: 1 to 5, only that combiner setup; 0 the first the self-test passes */
 void host_set_raw_check(bool on); /* gba-ds.cfg's raw_check (a test): each raw picture is also drawn the old way, offscreen, and compared */
 bool host_raw_picture_ready(void);
 void host_picture_raw(const void* fb);

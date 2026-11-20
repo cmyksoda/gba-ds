@@ -621,33 +621,79 @@ int SDL_RenderFillRect(SDL_Renderer* r, const SDL_Rect* rect) {
 	return SDL_RenderFillRects(r, rect, 1);
 }
 
-/* The GPU reads a raw texture's words as RGBA8: red is the picture's alpha, green its blue, blue its green. Two stages mix the channels right
- * (all-or-nothing masks are exact) and citro2d's own first stage reads their result instead of the texture; the quad is drawn at once. */
-static void raw_draw_flush(void) {
-	C3D_TexEnv keep[3];
-	for (int i = 0; i < 3; ++i) keep[i] = *C3D_GetTexEnv(i);
-	C3D_TexEnv* early = C3D_GetTexEnv(0);
-	C3D_TexEnv* mid = C3D_GetTexEnv(1);
-	C3D_TexEnv* late = C3D_GetTexEnv(2);
-	*late = keep[0];
-	for (int shift = 0; shift < 12; shift += 4) {
-		if (((late->srcRgb >> shift) & 0xF) == GPU_TEXTURE0) late->srcRgb = (u16) ((late->srcRgb & ~(0xF << shift)) | (GPU_PREVIOUS << shift));
-		if (((late->srcAlpha >> shift) & 0xF) == GPU_TEXTURE0) late->srcAlpha = (u16) ((late->srcAlpha & ~(0xF << shift)) | (GPU_PREVIOUS << shift));
+/* The GPU reads a raw texture's words as RGBA8: red is the picture's alpha, green its blue, blue its green. A setup of the combiner puts the
+ * channels right, and citro2d's own first stage reads its result instead of the texture; the quad is drawn at once. The first three do it in
+ * two or three stages with an all-or-nothing mask (the console's arithmetic may not be exact there); the last draws the quad once for each
+ * channel with the others masked off, which does no arithmetic at all. */
+typedef enum { SWZ_LERP, SWZ_LERP_REV, SWZ_MULADD, SWZ_MULADD_REV, SWZ_PASSES, SWZ_COUNT } RawSwizzle;
+static const char* const swzName[SWZ_COUNT] = { "mix", "mix, mask bytes reversed", "multiply-add", "multiply-add, mask bytes reversed", "a pass a channel" };
+static int rawSwz = SWZ_LERP, rawSwzChosen = SWZ_LERP; /* (in use; the self-test's) */
+static int rawSwzForce; /* raw_swizzle: 1 to SWZ_COUNT, only that one; 0 the first that passes the self-test */
+
+static int raw_passes(void) {
+	return rawSwz == SWZ_PASSES ? 3 : 1;
+}
+
+/* The mask that takes channel c (0 red, 1 green, 2 blue) whole. */
+static u32 swz_mask(int c) {
+	const bool rev = rawSwz == SWZ_LERP_REV || rawSwz == SWZ_MULADD_REV;
+	return 0xFFu << (8 * (rev ? 2 - c : c));
+}
+
+static void raw_draw_flush(int pass) {
+	C3D_TexEnv keep[4];
+	C3D_TexEnv* env[4];
+	for (int i = 0; i < 4; ++i) {
+		env[i] = C3D_GetTexEnv(i);
+		keep[i] = *env[i];
 	}
-	C3D_TexEnvInit(early);
-	C3D_TexEnvSrc(early, C3D_RGB, GPU_TEXTURE0, GPU_TEXTURE0, GPU_CONSTANT);
-	C3D_TexEnvOpRgb(early, GPU_TEVOP_RGB_SRC_ALPHA, GPU_TEVOP_RGB_SRC_B, GPU_TEVOP_RGB_SRC_COLOR);
-	C3D_TexEnvFunc(early, C3D_RGB, GPU_INTERPOLATE);
-	C3D_TexEnvSrc(early, C3D_Alpha, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
-	C3D_TexEnvOpAlpha(early, GPU_TEVOP_A_SRC_R, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA);
-	C3D_TexEnvColor(early, 0x000000FF); /* (red from alpha, green and blue from blue) */
-	C3D_TexEnvInit(mid);
-	C3D_TexEnvSrc(mid, C3D_RGB, GPU_TEXTURE0, GPU_PREVIOUS, GPU_CONSTANT);
-	C3D_TexEnvOpRgb(mid, GPU_TEVOP_RGB_SRC_G, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
-	C3D_TexEnvFunc(mid, C3D_RGB, GPU_INTERPOLATE);
-	C3D_TexEnvColor(mid, 0x00FF0000); /* (blue from green, the rest as it is) */
+	const int moved = rawSwz == SWZ_PASSES ? 1 : rawSwz == SWZ_MULADD || rawSwz == SWZ_MULADD_REV ? 3 : 2;
+	*env[moved] = keep[0];
+	for (int shift = 0; shift < 12; shift += 4) {
+		C3D_TexEnv* m = env[moved];
+		if (((m->srcRgb >> shift) & 0xF) == GPU_TEXTURE0) m->srcRgb = (u16) ((m->srcRgb & ~(0xF << shift)) | (GPU_PREVIOUS << shift));
+		if (((m->srcAlpha >> shift) & 0xF) == GPU_TEXTURE0) m->srcAlpha = (u16) ((m->srcAlpha & ~(0xF << shift)) | (GPU_PREVIOUS << shift));
+	}
+	for (int i = 0; i < moved; ++i) C3D_TexEnvInit(env[i]);
+	/* (stage 0 always takes the alpha from the texel's red) */
+	C3D_TexEnvSrc(env[0], C3D_Alpha, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+	C3D_TexEnvOpAlpha(env[0], GPU_TEVOP_A_SRC_R, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA);
+	switch (rawSwz) {
+	case SWZ_LERP:
+	case SWZ_LERP_REV:
+		C3D_TexEnvSrc(env[0], C3D_RGB, GPU_TEXTURE0, GPU_TEXTURE0, GPU_CONSTANT);
+		C3D_TexEnvOpRgb(env[0], GPU_TEVOP_RGB_SRC_ALPHA, GPU_TEVOP_RGB_SRC_B, GPU_TEVOP_RGB_SRC_COLOR);
+		C3D_TexEnvFunc(env[0], C3D_RGB, GPU_INTERPOLATE);
+		C3D_TexEnvColor(env[0], swz_mask(0)); /* (red from alpha, green and blue from blue) */
+		C3D_TexEnvSrc(env[1], C3D_RGB, GPU_TEXTURE0, GPU_PREVIOUS, GPU_CONSTANT);
+		C3D_TexEnvOpRgb(env[1], GPU_TEVOP_RGB_SRC_G, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
+		C3D_TexEnvFunc(env[1], C3D_RGB, GPU_INTERPOLATE);
+		C3D_TexEnvColor(env[1], swz_mask(2)); /* (blue from green, the rest as it is) */
+		break;
+	case SWZ_MULADD:
+	case SWZ_MULADD_REV: {
+		static const GPU_TEVOP_RGB from[3] = { GPU_TEVOP_RGB_SRC_ALPHA, GPU_TEVOP_RGB_SRC_B, GPU_TEVOP_RGB_SRC_G };
+		for (int c = 0; c < 3; ++c) {
+			C3D_TexEnvSrc(env[c], C3D_RGB, GPU_TEXTURE0, GPU_CONSTANT, GPU_PREVIOUS);
+			C3D_TexEnvOpRgb(env[c], from[c], GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
+			C3D_TexEnvFunc(env[c], C3D_RGB, c ? GPU_MULTIPLY_ADD : GPU_MODULATE);
+			C3D_TexEnvColor(env[c], swz_mask(c));
+		}
+		break;
+	}
+	default: {
+		/* (red and alpha, then green, then blue and depth) */
+		static const GPU_TEVOP_RGB from[3] = { GPU_TEVOP_RGB_SRC_ALPHA, GPU_TEVOP_RGB_SRC_B, GPU_TEVOP_RGB_SRC_G };
+		static const GPU_WRITEMASK mask[3] = { GPU_WRITE_RED | GPU_WRITE_ALPHA, GPU_WRITE_GREEN, GPU_WRITE_BLUE | GPU_WRITE_DEPTH };
+		C3D_TexEnvSrc(env[0], C3D_RGB, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+		C3D_TexEnvOpRgb(env[0], from[pass], GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
+		C3D_DepthTest(true, GPU_GEQUAL, mask[pass]);
+		break;
+	}
+	}
 	C2D_Flush();
-	for (int i = 0; i < 3; ++i) C3D_SetTexEnv(i, &keep[i]);
+	for (int i = 0; i < 4; ++i) C3D_SetTexEnv(i, &keep[i]);
+	if (rawSwz == SWZ_PASSES) C3D_DepthTest(true, GPU_GEQUAL, GPU_WRITE_ALL);
 }
 
 int SDL_RenderCopy(SDL_Renderer* r, SDL_Texture* t, const SDL_Rect* src, const SDL_Rect* dst) {
@@ -688,8 +734,12 @@ int SDL_RenderCopy(SDL_Renderer* r, SDL_Texture* t, const SDL_Rect* src, const S
 		bool coloured = t->r != 255 || t->g != 255 || t->b != 255;
 		C2D_PlainImageTint(&tint, C2D_Color32(t->r, t->g, t->b, t->a), coloured ? 1.0f : 0.0f);
 	}
-	const bool queued = C2D_DrawImageAt(img, dst->x, dst->y, 0.5f, tinted ? &tint : NULL, (float) dst->w / src->w, (float) dst->h / src->h);
-	if (t->raw && queued) raw_draw_flush();
+	const int passes = t->raw ? raw_passes() : 1;
+	for (int pass = 0; pass < passes; ++pass) {
+		const bool queued = C2D_DrawImageAt(img, dst->x, dst->y, 0.5f, tinted ? &tint : NULL, (float) dst->w / src->w, (float) dst->h / src->h);
+		if (!queued) break;
+		if (t->raw) raw_draw_flush(pass);
+	}
 	return 0;
 }
 
@@ -1268,16 +1318,25 @@ static void twin_selftest(void) {
 
 /* gba-ds.cfg's raw_picture: the render worker's picture (linear memory it writes back itself) is copied to the texture as it is, and the GPU
  * puts the channels right when it draws (raw_draw_flush). host_picture_raw is told, each frame, which pixels are such a picture. */
-static bool rawOn, rawOk, rawCheckOn;
+static bool rawOn, rawOk, rawCheckOn, rawForceOn;
 static int rawMode; /* 1: one transfer; 2: a copy with gaps, then the usual transfer */
 static signed char rawVerdict[3]; /* the self-test of each mode: 1 passed, -1 failed, 0 not run */
 static const void* rawKey;
 static u64 upRawTicks;
 
-void host_set_raw_picture(int mode) {
+void host_set_raw_picture(int mode, bool force) {
 	rawMode = mode == 2 ? 2 : mode ? 1 : 0;
 	rawOn = rawMode != 0;
-	rawOk = rawVerdict[rawMode] > 0;
+	rawForceOn = rawOn && force;
+	rawOk = rawVerdict[rawMode] > 0 || rawForceOn;
+}
+
+void host_set_raw_swizzle(int which) {
+	static int last = -1;
+	rawSwzForce = which >= 1 && which <= SWZ_COUNT ? which : 0;
+	if (rawSwzForce != last) memset(rawVerdict, 0, sizeof(rawVerdict)); /* (another setup is another self-test) */
+	last = rawSwzForce;
+	rawOk = rawVerdict[rawMode] > 0 || rawForceOn;
 }
 
 void host_set_raw_check(bool on) {
@@ -1286,11 +1345,19 @@ void host_set_raw_check(bool on) {
 
 static void raw_selftest(void);
 static void frame_end_now(void);
+static void raw_said_forced(void);
 
 /* The self-test runs once for each mode, the first time a game asks with the option on: the copy's two dimensions are not what the GPU's
  * documentation covers, so a build or job that doesn't use raw_picture never sends it. */
 bool host_raw_picture_ready(void) {
 	if (!rawOn || !gpu_tiling()) return false;
+	if (rawForceOn) {
+		rawSwz = rawSwzForce ? rawSwzForce - 1 : SWZ_LERP;
+		rawOk = true;
+		raw_said_forced();
+		return true; /* (a test: timing whatever the colours come out as) */
+	}
+	rawSwz = rawSwzChosen;
 	if (!rawVerdict[rawMode]) {
 		frame_end_now(); /* (the first job of a run finds the start's last frame still open: the test begins frames of its own) */
 		raw_selftest();
@@ -1450,7 +1517,7 @@ static void rawcheck_verify(void) {
 }
 
 static bool update_from_raw(SDL_Texture* t, const void* pixels, int pitch) {
-	if (!pixels || pixels != rawKey || !rawOn || !rawOk || pitch != 240 * 4) return false;
+	if (!pixels || pixels != rawKey || !rawOn || !rawOk || pitch != 240 * 4 || t->blend != SDL_BLENDMODE_NONE) return false;
 	if (t->format != SDL_PIXELFORMAT_ABGR8888 || !t->streaming || t->w != 240 || t->h != 160 || t->tw != 240 || t->th != 160 ||
 	    t->tex.width != HOST_TWIN_STRIDE || !gpu_tiling()) {
 		return false;
@@ -1464,20 +1531,39 @@ static bool update_from_raw(SDL_Texture* t, const void* pixels, int pitch) {
 	return true;
 }
 
-/* (TEST, at the start: another core writes a picture and writes it back, as the render worker does; it is copied raw and drawn next to the
- * same picture swapped, and every word must be the same. Off if not.) */
+/* (TEST: another core writes a picture and writes it back, as the render worker does; it is copied raw and drawn next to the same picture
+ * swapped, and every word must be the same. The first rows are a test card (the lab lines say how each setup of the combiner did on it).) */
 typedef struct {
 	u32* buf;
 	u32* copy;
 	u32 seed;
 } RawWriter;
 
+#define CARD_ROWS 10
+static const char* const cardName[CARD_ROWS] = { "colours", "red 0-239", "green 0-239", "blue 0-239", "alpha 0-239",
+	                                               "grey 0-239", "red 240-255", "green 240-255", "blue 240-255", "alpha 240-255" };
+
+static u32 card_word(int x, int y) {
+	static const u32 first[8] = { 0xFF0000FFu, 0xFF00FF00u, 0xFFFF0000u, 0xFFFFFFFFu, 0xFF000000u, 0x00000000u, 0x11223344u, 0x80808080u };
+	const u32 v = (u32) (y < 6 ? x : x < 16 ? 240 + x : 0);
+	switch (y) {
+	case 0: return x < 8 ? first[x] : 0xFF808080u;
+	case 1: case 6: return 0xFF000000u | v;
+	case 2: case 7: return 0xFF000000u | v << 8;
+	case 3: case 8: return 0xFF000000u | v << 16;
+	case 4: case 9: return v << 24;
+	default: return 0xFF000000u | v | v << 8 | v << 16;
+	}
+}
+
 static void raw_writer(void* arg) {
 	RawWriter* w = arg;
 	u32 seed = w->seed;
 	for (int i = 0; i < 240 * 160; ++i) {
-		/* (the first 256 hold every byte value in each channel) */
-		if (i < 256) w->buf[i] = (u32) i | (u32) ((i + 37) & 255) << 8 | (u32) ((i * 5 + 11) & 255) << 16 | (u32) (255 - i) << 24;
+		const int y = i / 240, x = i % 240;
+		if (y < CARD_ROWS) w->buf[i] = card_word(x, y);
+		/* (then every byte value in each channel, each in another order) */
+		else if (i < CARD_ROWS * 240 + 256) w->buf[i] = (u32) (i & 255) | (u32) (((i & 255) + 37) & 255) << 8 | (u32) (((i & 255) * 5 + 11) & 255) << 16 | (u32) (255 - (i & 255)) << 24;
 		else w->buf[i] = seed = seed * 1664525u + 1013904223u;
 		w->copy[i] = w->buf[i];
 	}
@@ -1515,10 +1601,54 @@ static void raw_said(const char* line) {
 	if (bench_active()) bench_note(line);
 }
 
+static void raw_said_forced(void) {
+	char line[160];
+	snprintf(line, sizeof(line), "raw picture: forced (raw_force), no self-test: %s, combiner setup %d, %s", rawMode == 2 ? "two passes" : "one transfer", rawSwz + 1, swzName[rawSwz]);
+	raw_said(line);
+}
+
+/* The lab: how a setup of the combiner did on the test card (the GPU is done). Per row: the pixels that came out differently from the swapped
+ * draw and the first two, as the picture's word, the swapped draw's word and this setup's (the targets' words are in the GPU's order). */
+static void raw_lab(RawRig* g, const u32* picture, int swz) {
+	SDL_Texture *a = g->target[0][0], *b = g->target[0][1];
+	svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32) a->tex.data, a->tex.size);
+	svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32) b->tex.data, b->tex.size);
+	const u32 *ga = a->tex.data, *gb = b->tex.data;
+	const u32 w = a->tex.width;
+	/* (a target's rows may run bottom up: the orientation is what makes the swapped draw match the picture's swapped words) */
+	int plain = 0, flipped = 0;
+	for (int x = 0; x < 240; ++x) {
+		plain += ga[tiled((u32) x, 0, w)] == __builtin_bswap32(picture[x]);
+		flipped += ga[tiled((u32) x, 159, w)] == __builtin_bswap32(picture[x]);
+	}
+	const bool flip = flipped > plain;
+	char line[300];
+	snprintf(line, sizeof(line), "raw lab (%s): the swapped draw has the picture's rows %s (%d of 240 words of the first row match)", swzName[swz], flip ? "bottom up" : "top down",
+	         flip ? flipped : plain);
+	raw_said(line);
+	for (int y = 0; y < CARD_ROWS; ++y) {
+		int bad = 0, shown = 0, len = 0;
+		len = snprintf(line, sizeof(line), "raw lab (%s) row %d %s:", swzName[swz], y, cardName[y]);
+		for (int x = 0; x < 240; ++x) {
+			const u32 i = tiled((u32) x, (u32) (flip ? 159 - y : y), w);
+			if (ga[i] == gb[i]) continue;
+			++bad;
+			if (shown < 2) {
+				len += snprintf(line + len, sizeof(line) - (size_t) len, " x%d in %08lx want %08lx got %08lx;", x, (unsigned long) picture[y * 240 + x], (unsigned long) ga[i], (unsigned long) gb[i]);
+				++shown;
+			}
+		}
+		if (bad) {
+			snprintf(line + len, sizeof(line) - (size_t) len, " %d of 240 differ", bad);
+			raw_said(line);
+		}
+	}
+}
+
 static void raw_selftest(void) {
 	const int mode = rawMode;
 	const char* how = mode == 2 ? "two passes" : "one transfer";
-	char line[260];
+	char line[300];
 	rawOk = false;
 	if (!gpu_tiling()) return;
 	const size_t bytes = (size_t) (240 * 160 + HOST_RAW_SLACK_WORDS) * 4;
@@ -1539,45 +1669,55 @@ static void raw_selftest(void) {
 	const bool wasOn = rawOn;
 	const void* wasKey = rawKey;
 	rawOn = rawOk = true;
-	int made = 0, badCopy = 0, badDraw = 0, whichDraw = 0;
-	for (int k = 0; k < 2; ++k) {
-		RawWriter w = { buf, copy, 9001u + (u32) k * 313u };
-		s32 prio = 0x30;
-		svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
-		Thread th = threadCreate(raw_writer, &w, 32 * 1024, prio, host_side_core(), false);
-		if (!th) continue;
-		threadJoin(th, U64_MAX);
-		threadFree(th);
-		++made;
-		frame_begin();
-		rawKey = buf;
-		const int rc = SDL_UpdateTexture(t, NULL, buf, 240 * 4);
-		rawKey = NULL;
-		if (rc || !t->raw) {
+	/* (each setup of the combiner in turn, the first that matches is the one used; a wrong copy ends it at once, whatever the setup) */
+	const int firstSwz = rawSwzForce ? rawSwzForce - 1 : 0, lastSwz = rawSwzForce ? firstSwz : SWZ_COUNT - 1;
+	int chosen = -1, made = 0, badCopy = 0, tried = 0;
+	int bad[SWZ_COUNT];
+	for (int v = 0; v < SWZ_COUNT; ++v) bad[v] = -1;
+	for (int v = firstSwz; v <= lastSwz && chosen < 0 && !badCopy; ++v) {
+		rawSwz = v;
+		made = 0;
+		bad[v] = 0;
+		for (int k = 0; k < 2; ++k) {
+			RawWriter w = { buf, copy, 9001u + (u32) k * 313u };
+			s32 prio = 0x30;
+			svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+			Thread th = threadCreate(raw_writer, &w, 32 * 1024, prio, host_side_core(), false);
+			if (!th) continue;
+			threadJoin(th, U64_MAX);
+			threadFree(th);
+			++made;
+			frame_begin();
+			rawKey = buf;
+			const int rc = SDL_UpdateTexture(t, NULL, buf, 240 * 4);
+			rawKey = NULL;
+			if (rc || !t->raw) {
+				frame_end_now();
+				++badCopy;
+				break;
+			}
+			rig_draw(&g, t, buf);
 			frame_end_now();
-			++badCopy;
-			break;
+			if (!gpu_settle_within(3000)) {
+				snprintf(line, sizeof(line), "raw picture self-test (%s): the GPU did not finish the pictures in 3 s, the copy or the drawing hangs it", how);
+				raw_said(line);
+				rawOn = wasOn;
+				rawOk = false;
+				rawVerdict[mode] = -1;
+				rawKey = wasKey;
+				return; /* (the targets are not freed: the GPU may still hold them) */
+			}
+			svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32) t->tex.data, t->tex.size);
+			const u32* got = t->tex.data;
+			for (int y = 0; y < 160; ++y) {
+				for (int x = 0; x < 240; ++x) badCopy += got[tiled((u32) x, (u32) y, t->tex.width)] != copy[y * 240 + x];
+			}
+			const int differ = rig_compare(&g, NULL);
+			if (differ && k == 0) raw_lab(&g, copy, v);
+			bad[v] += differ;
 		}
-		rig_draw(&g, t, buf);
-		frame_end_now();
-		if (!gpu_settle_within(3000)) {
-			snprintf(line, sizeof(line), "raw picture self-test (%s): the GPU did not finish the pictures in 3 s, the copy or the drawing hangs it", how);
-			raw_said(line);
-			rawOn = wasOn;
-			rawOk = false;
-			rawVerdict[mode] = -1;
-			rawKey = wasKey;
-			return; /* (the targets are not freed: the GPU may still hold them) */
-		}
-		svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32) t->tex.data, t->tex.size);
-		const u32* got = t->tex.data;
-		for (int y = 0; y < 160; ++y) {
-			for (int x = 0; x < 240; ++x) badCopy += got[tiled((u32) x, (u32) y, t->tex.width)] != copy[y * 240 + x];
-		}
-		int first = 0;
-		const int bad = rig_compare(&g, &first);
-		if (bad && !badDraw) whichDraw = first;
-		badDraw += bad;
+		++tried;
+		if (made == 2 && !badCopy && !bad[v]) chosen = v;
 	}
 	rawOn = wasOn;
 	rawKey = wasKey;
@@ -1585,12 +1725,19 @@ static void raw_selftest(void) {
 	texture_free(t);
 	linearFree(buf);
 	free(copy);
-	rawOk = made == 2 && !badCopy && !badDraw;
+	if (chosen >= 0) rawSwz = rawSwzChosen = chosen;
+	rawOk = chosen >= 0;
 	rawVerdict[mode] = rawOk ? 1 : -1;
-	if (rawOk) snprintf(line, sizeof(line), "raw picture self-test (%s): all words match (2 pictures, written on another core: copied as they are, drawn 1:1 and smooth, the same as swapped)", how);
-	else if (made < 2) snprintf(line, sizeof(line), "raw picture self-test (%s): no thread", how);
-	else snprintf(line, sizeof(line), "raw picture self-test (%s): %s (%d words of the copy, %d of the drawing, the first in the %s draw)", how,
-	              badCopy ? "the copy differs" : "the drawing differs", badCopy, badDraw, whichDraw ? "smooth" : "1:1");
+	if (rawOk) snprintf(line, sizeof(line), "raw picture self-test (%s): all words match with the combiner setup %d, %s (2 pictures, written on another core: copied as they are, drawn 1:1 and smooth, the same as swapped; setups tried: %d)",
+	                    how, chosen + 1, swzName[chosen], tried);
+	else if (made < 2 && !badCopy) snprintf(line, sizeof(line), "raw picture self-test (%s): no thread", how);
+	else {
+		int len = snprintf(line, sizeof(line), "raw picture self-test (%s): %s (%d words of the copy; words of the drawing by setup:", how, badCopy ? "the copy differs" : "the drawing differs", badCopy);
+		for (int v = 0; v < SWZ_COUNT; ++v) {
+			if (bad[v] >= 0) len += snprintf(line + len, sizeof(line) - (size_t) len, " %d=%d", v + 1, bad[v]);
+		}
+		snprintf(line + len, sizeof(line) - (size_t) len, ")");
+	}
 	raw_said(line);
 }
 
