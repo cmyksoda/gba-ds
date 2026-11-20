@@ -5,7 +5,7 @@ Subject: armGBA: a flag-setting multiply's carry that only the next check's way 
 
 
 diff --git a/src/cpu/a32/backend.c b/src/cpu/a32/backend.c
-index 1f2ded8..352e774 100644
+index 1f2ded8..1f2a4d3 100644
 --- a/src/cpu/a32/backend.c
 +++ b/src/cpu/a32/backend.c
 @@ -1193,6 +1193,9 @@ struct Stub {
@@ -45,7 +45,7 @@ index 1f2ded8..352e774 100644
  	stub->site = aB(e, C_GE, NULL);
  }
  
-@@ -1929,6 +1936,19 @@ static void emitMultiplyFlags(struct Compiler* c, int kind, int lo, int hi, bool
+@@ -1929,6 +1936,18 @@ static void emitMultiplyFlags(struct Compiler* c, int kind, int lo, int hi, bool
  	canonical(c);
  }
  
@@ -53,19 +53,18 @@ index 1f2ded8..352e774 100644
 +// can read the carry: the code that goes on sets C first, so that check's cold code works it out.
 +static bool carryLazy(const struct Compiler* c, const struct Inst* in) {
 +	int next = c->cur + 1;
-+	if (!c->jit->lazyCarry || in->poly || in->cond != COND_AL || next >= c->count || !c->checkpoint[next]) {
++	// A rewritten word holding a form not seen yet leaves the block before running, C unset.
++	if (!c->jit->lazyCarry || in->poly || in->cond != COND_AL || next >= c->count || !c->checkpoint[next] || c->insts[next].poly) {
 +		return false;
 +	}
 +	const struct Inst* after = &c->insts[next];
-+	uint8_t reads = after->poly ? polyReads(after) : flagReads(after);
-+	uint8_t writes = after->poly ? polyWrites(after) : flagWrites(after);
-+	return !((reads | (c->liveAfter[next] & ~writes)) & F_C);
++	return !((flagReads(after) | (c->liveAfter[next] & ~flagWrites(after))) & F_C);
 +}
 +
  // Compiles MUL and MLA. The cycle count depends on the multiplier's value, so it is worked out at
  // run time.
  static void emitMul(struct Compiler* c, const struct Inst* in) {
-@@ -1944,6 +1964,7 @@ static void emitMul(struct Compiler* c, const struct Inst* in) {
+@@ -1944,6 +1963,7 @@ static void emitMul(struct Compiler* c, const struct Inst* in) {
  	emitMulWait(c, in, multiplier, true, in->accumulate ? 1 : 0);
  	uint8_t live = in->setFlags ? c->liveAfter[c->cur] : 0;
  	bool carry = live & F_C;
@@ -73,7 +72,7 @@ index 1f2ded8..352e774 100644
  	if (carry) {
  		storeScratch(c, 0, multiplicand, in);
  		storeScratch(c, 1, multiplier, in);
-@@ -1965,8 +1986,9 @@ static void emitMul(struct Compiler* c, const struct Inst* in) {
+@@ -1965,8 +1985,9 @@ static void emitMul(struct Compiler* c, const struct Inst* in) {
  		storeGuest(c, in->rd, R0);
  	}
  	if (live & (F_N | F_Z | F_C)) {
@@ -84,7 +83,7 @@ index 1f2ded8..352e774 100644
  }
  
  // Compiles the 64-bit multiplies.
-@@ -1980,6 +2002,7 @@ static void emitMulLong(struct Compiler* c, const struct Inst* in) {
+@@ -1980,6 +2001,7 @@ static void emitMulLong(struct Compiler* c, const struct Inst* in) {
  	emitMulWait(c, in, in->rs, in->signedMul, in->accumulate ? 2 : 1);
  	uint8_t live = in->setFlags ? c->liveAfter[c->cur] : 0;
  	bool carry = live & F_C;
@@ -92,7 +91,7 @@ index 1f2ded8..352e774 100644
  	if (carry) {
  		storeScratch(c, 0, in->rm, in);
  		storeScratch(c, 1, in->rs, in);
-@@ -2002,8 +2025,9 @@ static void emitMulLong(struct Compiler* c, const struct Inst* in) {
+@@ -2002,8 +2024,9 @@ static void emitMulLong(struct Compiler* c, const struct Inst* in) {
  	storeGuest(c, in->rd, R0);
  	storeGuest(c, in->rdHi, R2);
  	if (live & (F_N | F_Z | F_C)) {
@@ -103,7 +102,7 @@ index 1f2ded8..352e774 100644
  }
  
  // A word access through the stack pointer, which points into IWRAM: inline when it lands there
-@@ -2892,6 +2916,7 @@ static void emitInst(struct Compiler* c, int index) {
+@@ -2892,6 +2915,7 @@ static void emitInst(struct Compiler* c, int index) {
  			ldrbF(&c->e, R3, OFF(jitDeferred));
  			aDpI(&c->e, C_AL, D_CMP, true, 0, R3, 0);
  			c->deferred[c->deferredCount].site = aB(&c->e, C_NE, NULL);
@@ -111,7 +110,7 @@ index 1f2ded8..352e774 100644
  			c->deferred[c->deferredCount++].index = index;
  		}
  	}
-@@ -3006,6 +3031,15 @@ static void emitIdleHead(struct Compiler* c) {
+@@ -3006,6 +3030,15 @@ static void emitIdleHead(struct Compiler* c) {
  	patchHere(e, same);
  }
  
@@ -127,7 +126,7 @@ index 1f2ded8..352e774 100644
  // Compiles a block into the current stretch: the analysis, then each instruction, then the cold code
  // the instructions left for the end (slow paths, exits and stubs). Returns false, having written
  // nothing outside the free space there, if its code didn't fit.
-@@ -3110,6 +3144,9 @@ static bool compileInStretch(struct Jit* jit, struct Block* block, struct Inst*
+@@ -3110,6 +3143,9 @@ static bool compileInStretch(struct Jit* jit, struct Block* block, struct Inst*
  		struct Stub* stub = &c.stubs[i];
  		patchHere(e, stub->site);
  		stub->code = e->p;
@@ -137,7 +136,7 @@ index 1f2ded8..352e774 100644
  		if (stub->pending) {
  			aAddI(e, R_CYC, R_CYC, stub->pending, R12);
  		}
-@@ -3156,6 +3193,9 @@ static bool compileInStretch(struct Jit* jit, struct Block* block, struct Inst*
+@@ -3156,6 +3192,9 @@ static bool compileInStretch(struct Jit* jit, struct Block* block, struct Inst*
  		int index = c.deferred[i].index;
  		uint32_t next = c.insts[0].address + (index + 1) * c.width;
  		patchHere(e, c.deferred[i].site);
