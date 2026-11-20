@@ -121,7 +121,11 @@ static uint8_t* read_file_to(const char* path, size_t* n, bool top) {
 	if (f && !p) p = malloc((size_t) st.st_size);
 #ifdef __3DS__
 	if (!f) fprintf(stderr, "%s: can't be opened\n", path);
-	else if (!p) fprintf(stderr, "%s: no memory for its %u KiB (%u KiB of the heap free)\n", path, (unsigned) (st.st_size >> 10), (unsigned) (host_heap_free() >> 10));
+	else if (!p) {
+		char shape[400];
+		host_heap_shape(shape, sizeof(shape));
+		fprintf(stderr, "%s: no memory for its %u KiB (%u KiB of the heap free): %s\n", path, (unsigned) (st.st_size >> 10), (unsigned) (host_heap_free() >> 10), shape);
+	}
 #endif
 #ifdef __3DS__
 	/* In pieces: one read of a whole ROM holds the SD card for seconds, and

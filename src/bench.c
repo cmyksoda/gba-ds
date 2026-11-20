@@ -356,6 +356,10 @@ bool bench_run(Config* cfg) {
 		/* (in the job's own lines: a leak from one game to the next shows here) */
 		snprintf(msg, sizeof(msg), "bench %s heap: %u KiB free at the start", jobId, (unsigned) (host_heap_free() >> 10));
 		put(msg);
+		char shape[400];
+		host_heap_shape(shape, sizeof(shape));
+		snprintf(msg, sizeof(msg), "bench %s heap shape at the start: %s", jobId, shape);
+		put(msg);
 #endif
 		snprintf(path, sizeof(path), "%s/%s", dir, f[2]);
 		ui_script_restart(path);
@@ -392,6 +396,9 @@ bool bench_run(Config* cfg) {
 		if (optioned) *cfg = before;
 #ifdef __3DS__
 		snprintf(msg, sizeof(msg), "bench %s heap: %u KiB free at the end", jobId, (unsigned) (host_heap_free() >> 10));
+		put(msg);
+		host_heap_shape(shape, sizeof(shape));
+		snprintf(msg, sizeof(msg), "bench %s heap shape at the end: %s", jobId, shape);
 		put(msg);
 #endif
 		if (!jobFrames) {

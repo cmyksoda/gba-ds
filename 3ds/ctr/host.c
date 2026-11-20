@@ -588,6 +588,38 @@ size_t host_heap_free(void) {
 	return __ctru_heap_size > used ? __ctru_heap_size - used : 0;
 }
 
+/* Walks malloc's chunks (newlib's: a size word at +4 with flags below 8, a chunk in use when the next one's PREV_INUSE bit
+ * says so) to say where the heap's break sits and which live blocks hold it up. */
+void host_heap_shape(char* out, size_t n) {
+	enum { LIVE = 4 };
+	struct {
+		unsigned at, size;
+	} high[LIVE] = { { 0, 0 } };
+	unsigned base = (unsigned) fake_heap_start, brk = (unsigned) sbrk(0), p = base, hole = 0, ends, romBytes;
+	__malloc_lock(_REENT);
+	while (p + 16 <= brk) {
+		unsigned size = *(unsigned*) (p + 4) & ~7u;
+		if (size < 16 || p + size > brk) break;
+		unsigned next = p + size;
+		bool inUse = next + 8 <= brk && (*(unsigned*) (next + 4) & 1);
+		if (inUse) {
+			memmove(&high[1], &high[0], (LIVE - 1) * sizeof(high[0])); /* (the walk climbs: the newest is the highest) */
+			high[0].at = p, high[0].size = size;
+		} else if (next < brk - 64 && size > hole) {
+			hole = size;
+		}
+		p = next;
+	}
+	ends = (unsigned) fake_heap_end, romBytes = (unsigned) hostTopBytes;
+	__malloc_unlock(_REENT);
+	int len = snprintf(out, n, "break at %u KiB, heap end at %u KiB, ROMs %u KiB, room for another ROM %u KiB, biggest hole %u KiB, highest live:",
+	                   (brk - base) >> 10, (ends - base) >> 10, romBytes >> 10, brk + HEAP_ROOM < ends ? (ends - brk - HEAP_ROOM) >> 10 : 0, hole >> 10);
+	for (int i = 0; i < LIVE && high[i].at && len > 0 && (size_t) len < n; ++i) {
+		len += snprintf(out + len, n - len, " %uK+%u", (high[i].at - base) >> 10, high[i].size);
+	}
+	if (p + 16 <= brk && len > 0 && (size_t) len < n) snprintf(out + len, n - len, " (the walk stopped at %uK)", (p - base) >> 10);
+}
+
 /* Between a background thread's reads of a large file: a moment for the
  * screen's own thread to get its reads in, longer while the buttons are in use. */
 static volatile u64 uiBusyUntil;
