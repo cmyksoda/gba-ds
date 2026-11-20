@@ -99,7 +99,7 @@ void config_defaults(Config* c) {
 /* The armGBA core's switches (3ds/emu/emu_armgba.c, 3ds/ctr/jitmem.c), in Config.armgba in this order; the core reads them
  * from the environment (GBADS_ARMGBA_SAVE...). */
 enum { ARMGBA_KEYS = sizeof(((Config*) 0)->armgba) / sizeof(((Config*) 0)->armgba[0]) };
-static const char* const armgbaKeys[ARMGBA_KEYS] = { "save", "stats", "code_mib", "render_workers", "later_mib", "icache", "copy_code_mib", "mid_after", "lean_logs", "picture_thread", "compile_after", "defer", "compile_budget" };
+static const char* const armgbaKeys[ARMGBA_KEYS] = { "save", "stats", "code_mib", "render_workers", "later_mib", "icache", "copy_code_mib", "mid_after", "lean_logs", "picture_thread", "compile_after", "defer", "compile_budget", "lazy_carry" };
 
 void config_apply_core_env(const Config* c) {
 	static bool set[ARMGBA_KEYS]; /* (only what this put there is taken back: the environment may have its own) */
