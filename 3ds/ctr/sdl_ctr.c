@@ -19,8 +19,6 @@
 #include <stdarg.h>
 #include <stdio.h>
 
-#include "hitch.h"
-
 /* ------------------------------------------------------------ the basics */
 
 static char sdlError[160] = "";
@@ -476,13 +474,9 @@ static void frame_begin(void) {
 		if (windows[i].ren) windows[i].ren->presented = false;
 	}
 	doomed_targets_free(); /* (citro3d stops the app if a render target goes inside a frame) */
-	bench_mark("(before C3D_FrameBegin)");
 	GPU_WAIT_IN(waitBegin, C3D_FrameBegin(sync ? C3D_FRAME_SYNCDRAW : 0));
-	bench_mark("C3D_FrameBegin");
 	tex_verify();
-	bench_mark("tex_verify");
 	doomed_free();
-	bench_mark("doomed_free");
 	inFrame = true;
 	++frameSerial;
 	bound = NULL;
@@ -735,14 +729,10 @@ static bool texture_alloc(SDL_Texture* t, int access) {
 			}
 		}
 	} else {
-		bench_mark("(before C3D_TexInit)");
 		ok = C3D_TexInit(&t->tex, (u16) pow2(t->tw), (u16) pow2(t->th), t->format == SDL_PIXELFORMAT_RGB565 ? GPU_RGB565 : GPU_RGBA8);
-		bench_markf("C3D_TexInit %dx%d", t->tw, t->th);
 		if (ok) {
 			memset(t->tex.data, 0, t->tex.size);
-			bench_markf("tex memset %dx%d", t->tw, t->th);
 			cache_flush(t->tex.data, t->tex.size);
-			bench_markf("tex flush %dx%d", t->tw, t->th);
 		}
 	}
 	return ok;
@@ -993,12 +983,9 @@ static u32* stage_take(SDL_Texture* t, size_t words, bool queued, u64 bands, int
 		const bool pending = queued && t->stage[i] && t->stageFrame[i] == frameSerial;
 		if (pending && (t->stageBands[i] & bands)) continue;
 		if (!t->stage[i]) {
-			bench_mark("(before stage alloc)");
 			t->stage[i] = linearAlloc(words * 4);
-			bench_markf("stage linearAlloc %zuK", words * 4 >> 10);
 			if (!t->stage[i]) continue;
 			memset(t->stage[i], 0, words * 4);
-			bench_markf("stage memset %zuK", words * 4 >> 10);
 		}
 		t->stageBands[i] = (pending ? t->stageBands[i] : 0) | bands;
 		*slot = i;
@@ -1020,10 +1007,8 @@ static bool update_by_gpu(SDL_Texture* t, const void* pixels, int pitch, int y0,
 	int slot = 0;
 	const int band0 = y0 / 8, band1 = (y0 + rows - 1) / 8;
 	const u64 bands = band1 > 63 ? ~0ull : (2ull << band1) - (1ull << band0);
-	bench_mark("(before stage_take)");
 	u32* stage = stage_take(t, (size_t) texW * (size_t) h, inFrame, bands, &slot);
 	if (!stage) return false;
-	bench_markf("stage_take %dx%d", w, h);
 	u64 t0 = svcGetSystemTick();
 	bool argb = t->format == SDL_PIXELFORMAT_ARGB8888;
 	u32 alpha = t->format == SDL_PIXELFORMAT_XBGR8888 ? 0xFF000000u : 0;
@@ -1037,10 +1022,8 @@ static bool update_by_gpu(SDL_Texture* t, const void* pixels, int pitch, int y0,
 		}
 	}
 	u64 t1 = svcGetSystemTick();
-	bench_markf("up swap %dx%d", w, rows);
 	cache_flush(stage + (size_t) y0 * texW, (size_t) rows * texW * 4);
 	u64 t2 = svcGetSystemTick();
-	bench_markf("up flush %dx%d", w, rows);
 	if (inFrame) t->stageFrame[slot] = frameSerial;
 	/* (a strip of tile rows is a stretch of the texture's memory of its own) */
 	GPU_WAIT(C3D_SyncDisplayTransfer(stage + (size_t) y0 * texW, GX_BUFFER_DIM(texW, rows), (u32*) t->tex.data + (size_t) y0 * texW,
@@ -1048,7 +1031,6 @@ static bool update_by_gpu(SDL_Texture* t, const void* pixels, int pitch, int y0,
 	                                 GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
 	                                     GX_TRANSFER_OUT_TILED(1)));
 	if (w == 240 && h == 160) upSwapTicks += t1 - t0, upFlushTicks8 += t2 - t1, upXferTicks8 += svcGetSystemTick() - t2;
-	bench_markf("up xfer %dx%d", w, rows);
 	return true;
 }
 
@@ -1347,7 +1329,6 @@ int SDL_UpdateTexture(SDL_Texture* t, const SDL_Rect* rect, const void* pixels, 
 		if (!done) done = update_by_gpu(t, pixels, pitch, 0, t->h);
 		if (!done) done = update_by_cpu(t, rect, pixels, pitch) == 0;
 		if (done) tex_note(t, pixels, pitch);
-		bench_markf("UpdateTexture %dx%d", t->w, t->h);
 		if (t->w == 240 && t->h == 160) {
 			upTicks += svcGetSystemTick() - t0;
 			if (++upCount == 600) {

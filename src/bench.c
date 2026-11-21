@@ -20,8 +20,6 @@
 
 #include <SDL.h>
 #include <limits.h>
-#include <pthread.h>
-#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -120,90 +118,9 @@ static void threads_line(void) {
 #endif
 }
 
-#ifdef GBADS_HITCH_MARKS
-/* ---- hitch timers (see bench.h) */
-enum { MARKS = 320, MARK_NAME = 30 };
-static struct {
-	char what[MARK_NAME];
-	Uint64 at;
-} marks[MARKS];
-static int nMarks, droppedMarks;
-static Uint64 marksT0;
-static pthread_t markThread;
-static bool markThreadSet;
-static int reported;
-
-void bench_marks_begin(void) {
-	if (!active) return;
-	markThread = pthread_self();
-	markThreadSet = true;
-	nMarks = droppedMarks = 0;
-	marksT0 = SDL_GetPerformanceCounter();
-}
-
-static void mark_add(const char* what) {
-	Uint64 now = SDL_GetPerformanceCounter();
-	if (nMarks >= MARKS) {
-		++droppedMarks;
-		return;
-	}
-	snprintf(marks[nMarks].what, MARK_NAME, "%s", what);
-	marks[nMarks++].at = now;
-}
-
-void bench_mark(const char* what) {
-	if (!active || !markThreadSet || !pthread_equal(markThread, pthread_self())) return;
-	mark_add(what);
-}
-
-void bench_markf(const char* format, ...) {
-	if (!active || !markThreadSet || !pthread_equal(markThread, pthread_self())) return;
-	char what[MARK_NAME];
-	va_list args;
-	va_start(args, format);
-	vsnprintf(what, sizeof(what), format, args);
-	va_end(args);
-	mark_add(what);
-}
-
-/* The frame's marks, each as the ms since the one before, those of 0.4 ms or more by name */
-static void marks_report(uint64_t frame, double preMs, double screenMs, double drawMs) {
-	char line[600];
-	const double toMs = 1000.0 / (double) SDL_GetPerformanceFrequency();
-	int len = snprintf(line, sizeof(line), "bench %s marks at frame %llu (pre %.1f, second screen %.1f, drawing %.1f):", jobId,
-	                   (unsigned long long) frame, preMs, screenMs, drawMs);
-	Uint64 prev = marksT0;
-	double rest = 0;
-	for (int i = 0; i < nMarks; ++i) {
-		double ms = (double) (marks[i].at - prev) * toMs;
-		prev = marks[i].at;
-		if (ms < 0.4) {
-			rest += ms;
-			continue;
-		}
-		char item[48];
-		int n = snprintf(item, sizeof(item), " %s %.1f,", marks[i].what, ms);
-		if (len + n >= (int) sizeof(line) - 40) {
-			put(line);
-			len = snprintf(line, sizeof(line), "bench %s marks at frame %llu (cont.):", jobId, (unsigned long long) frame);
-		}
-		len += snprintf(line + len, sizeof(line) - (size_t) len, "%s", item);
-	}
-	snprintf(line + len, sizeof(line) - (size_t) len, " the rest %.1f (%d marks%s)", rest, nMarks, droppedMarks ? ", some dropped" : "");
-	put(line);
-}
-#endif
-
 void bench_frame(uint64_t frame, double emuMs, double drawMs, double screenMs, bool captureBusy, double preMs, double loopMs) {
 	if (!active) return;
 	++jobFrames;
-#ifdef GBADS_HITCH_MARKS
-	if (nMarks && (screenMs >= 40 || drawMs >= 40 || preMs >= 40 || (screenMs >= 2.5 && reported < 24))) {
-		if (screenMs < 40 && drawMs < 40 && preMs < 40) ++reported;
-		marks_report(frame, preMs, screenMs, drawMs);
-	}
-	nMarks = 0;
-#endif
 	Uint64 now = SDL_GetPerformanceCounter();
 	if (!lastT) {
 		lastT = now;
@@ -450,9 +367,6 @@ bool bench_run(Config* cfg) {
 		memset(&w, 0, sizeof(w));
 		lastT = 0;
 		jobFrames = 0;
-#ifdef GBADS_HITCH_MARKS
-		reported = 0;
-#endif
 		{
 			uint8_t h[0xB0];
 			char code[5] = "????";

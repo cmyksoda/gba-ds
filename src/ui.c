@@ -7,7 +7,6 @@ void ui_stick_dpad(bool on) {
 	stickDpad = on;
 }
 #include "android.h"
-#include "bench.h"
 #include "brand.h"
 #include "font.h"
 #include "textfont.h"
@@ -2621,9 +2620,7 @@ SDL_Surface* ui_logo_surface(const Config* c, const char* rom, const char* code,
 	if (!sub) sub = &one;
 	*sub = 1;
 	scrapedProvisional = false;
-	const int source = ui_logo_source(c, rom, code, path, sizeof(path));
-	bench_mark("logo source");
-	if (source != LOGO_EXTRACTED) {
+	if (ui_logo_source(c, rom, code, path, sizeof(path)) != LOGO_EXTRACTED) {
 		/* the player's own or a scraped logo, as tall as the extracted one (GEN-11) */
 		SDL_Surface* s = sized_surface(c, path, code, sub);
 		if (s) {
@@ -2633,9 +2630,7 @@ SDL_Surface* ui_logo_surface(const Config* c, const char* rom, const char* code,
 		extracted_path(c, code, path, sizeof(path));
 	}
 	*pixelArt = true;
-	SDL_Surface* s = image_load(path);
-	bench_mark("logo image_load");
-	return s;
+	return image_load(path);
 }
 
 bool ui_load_logo(const Config* c, const char* rom, const char* code, SDL_Texture* tex[2], int* w, int* h,
