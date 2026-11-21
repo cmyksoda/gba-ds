@@ -8377,6 +8377,7 @@ static void ss_setup(const char* rom, const char* code) {
 	logoOnly = false;
 	snapProf = NULL;
 	tallProf = NULL;
+	combatProf = NULL;
 	tallOn = false;
 	tallLive = false;
 	hudProf = NULL;
