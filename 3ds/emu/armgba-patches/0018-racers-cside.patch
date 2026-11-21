@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: armGBA speedups <none@example.invalid>
 Date: Fri, 20 Nov 2026 18:00:00 -0500
-Subject: armGBA: with a render thread the machine's own renderer keeps only what is read of it, the render log is written without the ring's checks, a DMA run's register writes to the video are one log entry, and the exact CPU's decode clears without a call (gbaCside)
+Subject: armGBA: with a render thread the machine's own renderer keeps only what is read of it, the render log is written without the ring's checks, a DMA run's register writes to the video are one log entry, the exact CPU's decode clears without a call, and the interrupt controller's changes that only clear a flag don't stop compiled code (gbaCside)
 
 
 diff --git a/src/cpu/decode.c b/src/cpu/decode.c
@@ -57,11 +57,355 @@ index 0a805ab..cdcc4f7 100644
  	in->address = address;
  	in->opcode = opcode;
  	in->thumb = true;
+diff --git a/src/cpu/jit.c b/src/cpu/jit.c
+index a8af0bf..c1d9aab 100644
+--- a/src/cpu/jit.c
++++ b/src/cpu/jit.c
+@@ -1693,7 +1693,7 @@ static bool romEntryOk(struct GBA* gba, uint32_t pc, bool thumb) {
+ // Whether an IRQ is waiting to be taken at the next instruction, with nothing else asking the exact
+ // CPU to step it first.
+ static bool irqEntry(struct GBA* gba) {
+-	return gba->irq.line && !gba->cpu.irqMasked && !gba->traceFile && !gba->cartTrapped;
++	return gbaIrqLine(gba) && !gba->cpu.irqMasked && !gba->traceFile && !gba->cartTrapped;
+ }
+ 
+ // Takes the IRQ that is waiting, and no more, so that compiled code runs the vector's branch. A frame
+@@ -1709,7 +1709,7 @@ static void enterIrq(struct GBA* gba) {
+ // take, the prefetch holding what memory holds, and the prefetch buffer as compiled for.
+ static bool compiledMayRun(struct GBA* gba, uint32_t pc, bool thumb) {
+ 	struct CPU* cpu = &gba->cpu;
+-	if (gba->dmaRunnable || gba->lastAccessDma || (gba->irq.line && (!cpu->irqMasked || !(cpu->cpsr & PSR_I)))) {
++	if (gba->dmaRunnable || gba->lastAccessDma || (gbaIrqLine(gba) && (!cpu->irqMasked || !(cpu->cpsr & PSR_I)))) {
+ 		return false;
+ 	}
+ 	if (!compilable(gba, pc, thumb) || (inRom(pc) && !romEntryOk(gba, pc, thumb))) {
+@@ -2556,14 +2556,14 @@ uint32_t jitHelperSystem(struct GBA* gba, uint32_t opcode, uint32_t address) {
+ 	if (!writesPc) {
+ 		// Once unmasked, an IRQ comes one instruction later: the mask from before still holds for
+ 		// the next instruction.
+-		if (((before & PSR_I) && !(cpu->cpsr & PSR_I) && gba->irq.line) || ((before ^ cpu->cpsr) & PSR_T)) {
++		if (((before & PSR_I) && !(cpu->cpsr & PSR_I) && gbaIrqLine(gba)) || ((before ^ cpu->cpsr) & PSR_T)) {
+ 			cpu->irqMasked = before & PSR_I;
+ 			return JIT_EXACT;
+ 		}
+ 		return ~0u;
+ 	}
+ 	// After a refill, the IRQ check uses the mask as it is now.
+-	if (gba->irq.line && !cpu->irqMasked) {
++	if (gbaIrqLine(gba) && !cpu->irqMasked) {
+ 		return JIT_EXACT;
+ 	}
+ 	bool thumb = cpu->cpsr & PSR_T;
+@@ -2584,7 +2584,7 @@ uint32_t jitHelperPsrWrite(struct GBA* gba, uint32_t value, uint32_t packed) {
+ 	} else {
+ 		uint32_t before = cpu->cpsr;
+ 		uint32_t after = cpuMsrCpsr(cpu, value, packed);
+-		if (((before & PSR_I) && !(after & PSR_I) && gba->irq.line) || ((before ^ after) & PSR_T)) {
++		if (((before & PSR_I) && !(after & PSR_I) && gbaIrqLine(gba)) || ((before ^ after) & PSR_T)) {
+ 			return 1;
+ 		}
+ 		cpuWriteCpsr(gba, after);
+@@ -2598,7 +2598,7 @@ uint32_t jitHelperPsrWrite(struct GBA* gba, uint32_t value, uint32_t packed) {
+ uint32_t jitHelperReturn(struct GBA* gba) {
+ 	struct CPU* cpu = &gba->cpu;
+ 	uint32_t spsr = cpu->spsr;
+-	if (!cpuModeHasSpsr(cpu->cpsr & 0x1F) || (gba->irq.line && !(spsr & PSR_I))) {
++	if (!cpuModeHasSpsr(cpu->cpsr & 0x1F) || (gbaIrqLine(gba) && !(spsr & PSR_I))) {
+ 		return ~0u;
+ 	}
+ 	uint32_t target = cpu->r[15];
+@@ -2614,7 +2614,7 @@ uint32_t jitHelperReturn(struct GBA* gba) {
+ static bool continuable(struct GBA* gba, uint32_t pc, bool thumb) {
+ 	struct CPU* cpu = &gba->cpu;
+ 	int width = thumb ? 2 : 4;
+-	if (gba->dmaRunnable || gba->lastAccessDma || (gba->irq.line && (!cpu->irqMasked || !(cpu->cpsr & PSR_I)))) {
++	if (gba->dmaRunnable || gba->lastAccessDma || (gbaIrqLine(gba) && (!cpu->irqMasked || !(cpu->cpsr & PSR_I)))) {
+ 		return false;
+ 	}
+ 	if (!compilable(gba, pc, thumb) || gba->activeRegion != (int32_t) (pc >> 24)) {
+@@ -2662,7 +2662,7 @@ static bool boundaryOk(struct GBA* gba, const struct Block* block) {
+ 	struct CPU* cpu = &gba->cpu;
+ 	struct Jit* jit = gba->jit;
+ 	return block->valid && !gba->jitLeave && !cpu->halted && !jit->flushRequested && !jit->waitsChanged && !jit->staleValid && gba->video.frameCounter == jit->frame &&
+-	       !gba->returnRequested && !gba->dmaRunnable && !gba->lastAccessDma && !(gba->irq.line && (!cpu->irqMasked || !(cpu->cpsr & PSR_I)));
++	       !gba->returnRequested && !gba->dmaRunnable && !gba->lastAccessDma && !(gbaIrqLine(gba) && (!cpu->irqMasked || !(cpu->cpsr & PSR_I)));
+ }
+ 
+ // Runs the events due by now at an instruction boundary. Returns false when compiled code has to
+diff --git a/src/cpu/step.c b/src/cpu/step.c
+index 1e085d1..92b2a34 100644
+--- a/src/cpu/step.c
++++ b/src/cpu/step.c
+@@ -647,7 +647,7 @@ void stepTrace(struct GBA* gba) {
+ // runs.
+ static void step(struct GBA* gba) {
+ 	struct CPU* cpu = &gba->cpu;
+-	if (gba->irq.line && !cpu->irqMasked) {
++	if (gbaIrqLine(gba) && !cpu->irqMasked) {
+ 		takeIrq(gba);
+ 	}
+ 	if (gba->traceFile) {
+diff --git a/src/gba.c b/src/gba.c
+index 2d3fc6e..0a8f091 100644
+--- a/src/gba.c
++++ b/src/gba.c
+@@ -36,6 +36,11 @@ static void freeChange(void* context) {
+ // (timingScheduleCpu): with the CPU Clock away from 100%, an interrupt handler can still acknowledge
+ // IF and let interrupts nest a few instructions later, as on the console, without the one it
+ // acknowledged coming back.
++static void availableChanged(struct GBA* gba, void* context, uint32_t late);
++static void lineChanged(struct GBA* gba, void* context, uint32_t late);
++static void availableLazy(struct GBA* gba, void* context, uint32_t late);
++static void lineLazy(struct GBA* gba, void* context, uint32_t late);
++
+ static void scheduleChange(struct GBA* gba, struct IrqChange* slots, bool value, int32_t cycles, int32_t late) {
+ 	struct IrqChange* change = &slots[0];
+ 	while (change->busy && change < &slots[3]) {
+@@ -44,12 +49,85 @@ static void scheduleChange(struct GBA* gba, struct IrqChange* slots, bool value,
+ 	// With every slot in flight, the newest change takes the last one's place.
+ 	if (change->busy) {
+ 		timingDeschedule(gba, &change->event);
++		if (change->event.lazy) {
++			change->event.lazy = false;
++			change->event.callback = slots == gba->irq.availableChange ? availableChanged : lineChanged;
++			--gba->irq.lazy;
++		}
+ 	}
+ 	change->value = value;
+ 	change->busy = true;
+ 	timingScheduleCpu(gba, &change->event, cycles, late);
+ }
+ 
++static void scheduleChange(struct GBA* gba, struct IrqChange* slots, bool value, int32_t cycles, int32_t late);
++
++// A change that clears its stage's flag as a lazy event (CSIDE_LAZY_IRQ): in the list as any event, but compiled code
++// doesn't stop for it. Out of line, so applyStage stays as small as without it.
++static __attribute__((noinline)) void scheduleLazy(struct GBA* gba, struct IrqChange* slots, int32_t cycles, int32_t late) {
++	if (gba->cpu.overclock) {
++		scheduleChange(gba, slots, false, cycles, late);
++		return;
++	}
++	struct IrqChange* change = &slots[0];
++	while (change->busy && change < &slots[3]) {
++		++change;
++	}
++	if (change->busy) {
++		timingDeschedule(gba, &change->event);
++		if (change->event.lazy) {
++			--gba->irq.lazy;
++		}
++	}
++	change->value = false;
++	change->busy = true;
++	change->event.lazy = true;
++	change->event.callback = slots == gba->irq.availableChange ? availableLazy : lineLazy;
++	++gba->irq.lazy;
++	timingScheduleLazy(gba, &change->event, cycles - late);
++}
++
++// Whether the first event in the list is a lazy one that is due (the CPU Clock at 100%: gbaIrqSettle decides otherwise).
++static bool lazyDue(struct GBA* gba) {
++	const struct Event* first = gba->timing.root;
++	return first && first->lazy && (gba->cpu.overclock || (int32_t) (first->when - gba->timing.masterCycles - gba->cpu.cycles) <= 0);
++}
++
++static void settleDue(struct GBA* gba) {
++	if (lazyDue(gba)) {
++		gbaIrqSettle(gba);
++	}
++}
++
++static inline void settle(struct GBA* gba) {
++	if (__builtin_expect(gba->irq.lazy, 0)) {
++		settleDue(gba);
++	}
++}
++
++// Runs the lazy changes that are due, at the front of the list in order, before what they change is looked at: the
++// registers' writes, the CPU's IRQ line, a state. Events run their own in order, and an event's callback looks at
++// what earlier ones left.
++void gbaIrqSettle(struct GBA* gba) {
++	struct Timing* timing = &gba->timing;
++	if (gba->inEvent || timing->reroot) {
++		return;
++	}
++	while (gba->irq.lazy) {
++		struct Event* next = timing->root;
++		if (!next || !next->lazy || (gba->cpu.overclock ? timingUntil(gba, next) : (int32_t) (next->when - timing->masterCycles - gba->cpu.cycles)) > 0) {
++			return;
++		}
++		timing->root = next->next;
++		next->callback(gba, next->context, 0);
++	}
++}
++
++bool gbaIrqLineSettled(struct GBA* gba) {
++	settleDue(gba);
++	return gba->irq.line;
++}
++
+ // The second stage: IE & IF as the halt logic sees it.
+ static void availableChanged(struct GBA* gba, void* context, uint32_t late) {
+ 	(void) late;
+@@ -64,21 +142,46 @@ static void lineChanged(struct GBA* gba, void* context, uint32_t late) {
+ 	gba->irq.line = ((struct IrqChange*) context)->value;
+ }
+ 
++// The same for a lazy change, which gives the event back its usual callback.
++static void availableLazy(struct GBA* gba, void* context, uint32_t late) {
++	struct IrqChange* change = context;
++	change->event.lazy = false;
++	change->event.callback = availableChanged;
++	--gba->irq.lazy;
++	availableChanged(gba, context, late);
++}
++
++static void lineLazy(struct GBA* gba, void* context, uint32_t late) {
++	struct IrqChange* change = context;
++	change->event.lazy = false;
++	change->event.callback = lineChanged;
++	--gba->irq.lazy;
++	lineChanged(gba, context, late);
++}
++
+ // The first stage: the registers take their new values, and the later stages are scheduled if they
+ // change. delay is the cycles from now to the moment this stands for.
+-static void applyStage(struct GBA* gba, int32_t delay, int32_t late) {
++static inline __attribute__((always_inline)) void applyStage(struct GBA* gba, int32_t delay, int32_t late) {
+ 	struct Irq* irq = &gba->irq;
+ 	gba->io[IO(REG_IE)] = irq->ie;
+ 	gba->io[IO(REG_IF)] = irq->iflags;
+ 	gba->io[IO(REG_IME)] = irq->ime;
+ 	bool available = irq->ie & irq->iflags;
+ 	if (available != irq->available) {
+-		scheduleChange(gba, irq->availableChange, available, delay + 1, late);
++		if (!available && (gbaCside & CSIDE_LAZY_IRQ)) {
++			scheduleLazy(gba, irq->availableChange, delay + 1, late);
++		} else {
++			scheduleChange(gba, irq->availableChange, available, delay + 1, late);
++		}
+ 	}
+ 	bool line = irq->ime && available;
+ 	if (line != irq->lineDriven) {
+ 		irq->lineDriven = line;
+-		scheduleChange(gba, irq->lineChange, line, delay + 2, late);
++		if (!line && (gbaCside & CSIDE_LAZY_IRQ)) {
++			scheduleLazy(gba, irq->lineChange, delay + 2, late);
++		} else {
++			scheduleChange(gba, irq->lineChange, line, delay + 2, late);
++		}
+ 	}
+ }
+ 
+@@ -93,6 +196,7 @@ static void applyIrq(struct GBA* gba, void* context, uint32_t late) {
+ // quietKnown is for a write whose quiet mode is accounted for already (see writeIe).
+ static bool appliesAtOnce(struct GBA* gba, bool quietKnown) {
+ 	struct Irq* irq = &gba->irq;
++	settle(gba);
+ 	const struct Event* next = gba->timing.root;
+ 	bool wait = gba->performingDma || gba->cpu.overclock || gba->inEvent || gba->timing.reroot || (!quietKnown && (irq->quietPending || gbaQuietHblank(gba)));
+ 	return !wait && !(next && timingUntil(gba, (struct Event*) next) <= 1);
+@@ -109,7 +213,7 @@ static void applyWrite(struct GBA* gba) {
+ // Whether an event is one of the pipeline's stages: none starts DMA, so each can run after the
+ // instruction it falls in.
+ bool gbaIrqEvent(const struct Event* event) {
+-	return event->callback == applyIrq || event->callback == availableChanged || event->callback == lineChanged;
++	return event->callback == applyIrq || event->callback == availableChanged || event->callback == lineChanged || event->lazy;
+ }
+ 
+ // Sets up a pool's four events, all with the same callback.
+@@ -131,11 +235,28 @@ static void irqReset(struct GBA* gba) {
+ 	irq->line = false;
+ 	irq->lineDriven = false;
+ 	irq->quietPending = false;
++	irq->lazy = 0;
+ 	irq->ifStable = timingCpuTime(gba) + INT32_MAX;
+ 	for (int i = 0; i < 4; ++i) {
+ 		irq->apply[i].busy = false;
+ 		irq->availableChange[i].busy = false;
+ 		irq->lineChange[i].busy = false;
++		irq->availableChange[i].event.lazy = false;
++		irq->lineChange[i].event.lazy = false;
++		irq->availableChange[i].event.callback = availableChanged;
++		irq->lineChange[i].event.callback = lineChanged;
++	}
++}
++
++// After a state's events are in the list: none is lazy (a state keeps them as plain events), whatever the machine had before.
++void gbaIrqLoaded(struct GBA* gba) {
++	struct Irq* irq = &gba->irq;
++	irq->lazy = 0;
++	for (int i = 0; i < 4; ++i) {
++		irq->availableChange[i].event.lazy = false;
++		irq->lineChange[i].event.lazy = false;
++		irq->availableChange[i].event.callback = availableChanged;
++		irq->lineChange[i].event.callback = lineChanged;
+ 	}
+ }
+ 
+@@ -586,6 +707,7 @@ void gbaIrqQuietChanged(struct GBA* gba, bool wasQuiet) {
+ // The three interrupt registers. Each write goes through the pipeline's first stage one cycle
+ // later.
+ static void writeIe(struct GBA* gba, uint16_t value, bool applyAtOnce) {
++	settle(gba);
+ 	gbaIrqSync(gba);
+ 	bool wasQuiet = gbaQuietHblank(gba);
+ 	uint16_t old = gba->irq.ie;
+@@ -626,6 +748,7 @@ void gbaWriteIeIf(struct GBA* gba, uint16_t ie, uint16_t acknowledge) {
+ 
+ // Writing a 1 to an IF bit acknowledges that interrupt.
+ void gbaWriteIf(struct GBA* gba, uint16_t value) {
++	settle(gba);
+ 	gbaIrqSync(gba);
+ 	gba->irq.iflags &= ~value;
+ 	if ((value & (1 << IRQ_HBLANK)) && gbaQuietHblank(gba)) {
+@@ -638,6 +761,7 @@ void gbaWriteIf(struct GBA* gba, uint16_t value) {
+ }
+ 
+ void gbaWriteIme(struct GBA* gba, uint16_t value) {
++	settle(gba);
+ 	gba->irq.ime = value & 1;
+ 	applyWrite(gba);
+ }
 diff --git a/src/gba.h b/src/gba.h
-index cd3714b..6aed76b 100644
+index cd3714b..c87bb40 100644
 --- a/src/gba.h
 +++ b/src/gba.h
-@@ -1030,6 +1030,39 @@ static inline void videoSync(struct GBA* gba) {
+@@ -196,6 +196,9 @@ struct Event {
+ 	unsigned priority;
+ 	// When set, the run loop returns at the instruction boundary after this event.
+ 	bool endsRun;
++	// A change of the interrupt controller that only clears a flag (CSIDE_LAZY_IRQ): it waits in the list as any event does
++	// but compiled code doesn't stop for it; gbaIrqSettle runs it before anything looks at what it changes.
++	bool lazy;
+ 	HOST_POINTER(struct Event* next, next);
+ };
+ 
+@@ -268,6 +271,8 @@ struct Irq {
+ 	// H-blank IRQ requests since quietFrom that aren't in IF yet, because IE leaves them out (see
+ 	// gbaIrqSync).
+ 	bool quietPending;
++	// How many events of the two later stages' pools are lazy and in the list (zero in a state).
++	uint8_t lazy;
+ 	uint32_t quietFrom;
+ 	// The time until which IF in io stays valid without calling gbaIrqSync.
+ 	uint32_t ifStable;
+@@ -995,6 +1000,14 @@ enum {
+ // Whether the events due by time can run late, at the next instruction boundary: for the kinds above.
+ bool timingDeferrable(struct GBA*, int32_t time, int kind);
+ bool gbaIrqEvent(const struct Event*);
++void gbaIrqSettle(struct GBA*);
++void gbaIrqLoaded(struct GBA*);
++// The CPU's IRQ line as of now. Lazy changes only clear it, so when it is clear there is nothing to settle.
++bool gbaIrqLineSettled(struct GBA*);
++static inline bool gbaIrqLine(struct GBA* gba) {
++	return gba->irq.line && (__builtin_expect(!gba->irq.lazy, 1) || gbaIrqLineSettled(gba));
++}
++void timingScheduleLazy(struct GBA*, struct Event*, int32_t when);
+ void processEvents(struct GBA*);
+ 
+ // step.c: the exact CPU, used for the instructions around events.
+@@ -1030,6 +1043,39 @@ static inline void videoSync(struct GBA* gba) {
  		videoSyncDue(gba);
  	}
  }
@@ -101,7 +445,7 @@ index cd3714b..6aed76b 100644
  int videoLine(struct GBA*);
  void videoHblankDmaArmed(struct GBA*);
  uint32_t videoNextHblank(struct GBA*, uint32_t from);
-@@ -1125,6 +1158,19 @@ enum {
+@@ -1125,6 +1171,21 @@ enum {
  // Whether the render and sound logs are published and read with the fewest barriers (false: a barrier
  // at every entry, as they were).
  extern bool threadLogsLean;
@@ -117,6 +461,8 @@ index cd3714b..6aed76b 100644
 +	CSIDE_BATCH = 4,
 +	// The exact CPU's steps: an instruction is decoded without a call to clear it.
 +	CSIDE_FAST_STEP = 8,
++	// The interrupt controller's changes that only clear available or line don't stop compiled code (Event.lazy).
++	CSIDE_LAZY_IRQ = 16,
 +};
  // The console whose sound a thread makes, if any, and whether its calls are inside one already
  // logged whole.
@@ -188,6 +534,20 @@ index cd7f0c1..5a23b7d 100644
  			return;
  		}
  		ioWrite(gba, address, value & 0xFFFF);
+diff --git a/src/io/timer.c b/src/io/timer.c
+index 3c38b31..eda4d68 100644
+--- a/src/io/timer.c
++++ b/src/io/timer.c
+@@ -298,6 +298,9 @@ static bool writeAtOnce(struct GBA* gba, const struct Timer* written, bool contr
+ 	if (gba->performingDma || gba->cpu.overclock || gba->inEvent || timing->reroot) {
+ 		return false;
+ 	}
++	if (gba->irq.lazy) {
++		gbaIrqSettle(gba);
++	}
+ 	if (timing->root && timingUntil(gba, timing->root) <= 1) {
+ 		return false;
+ 	}
 diff --git a/src/memory.c b/src/memory.c
 index 72f21cc..a64515a 100644
 --- a/src/memory.c
@@ -286,6 +646,107 @@ index 72f21cc..a64515a 100644
  	struct CPU* cpu = &gba->cpu;
  	const uint8_t* waits = wide ? gba->waitS32 : gba->waitS16;
  	uint32_t s = dma->nextSource;
+diff --git a/src/state.c b/src/state.c
+index 58de921..6978586 100644
+--- a/src/state.c
++++ b/src/state.c
+@@ -137,6 +137,12 @@ static void leaveOutHost(const struct GBA* gba, struct GBA* saved) {
+ 	if (!saved->irq.quietPending) {
+ 		saved->irq.ifStable = timingCpuTime(saved) + INT32_MAX;
+ 	}
++	// Lazy changes wait as events in a state, with the flag a load doesn't need.
++	saved->irq.lazy = 0;
++	for (int i = 0; i < 4; ++i) {
++		saved->irq.availableChange[i].event.lazy = false;
++		saved->irq.lineChange[i].event.lazy = false;
++	}
+ 	saved->idleMark = 0;
+ 	saved->idleCycles = 0;
+ 	saved->idleRuns = 0;
+@@ -192,6 +198,7 @@ static void leaveOutHost(const struct GBA* gba, struct GBA* saved) {
+ void gbaSaveState(struct GBA* gba, void* state) {
+ 	// With a sound thread, the sound so far is in its copy.
+ 	audioThreadSync(gba);
++	gbaIrqSettle(gba);
+ 	struct StateHeader header = { .magic = STATE_MAGIC, .size = sizeof(struct GBA), .base = 0 };
+ 	struct Event* all[EVENTS];
+ 	events(gba, all);
+@@ -345,6 +352,7 @@ bool gbaLoadState(struct GBA* gba, const void* state, size_t size) {
+ 		all[i]->context = was[i]->context;
+ 		all[i]->next = NULL;
+ 	}
++	gbaIrqLoaded(gba);
+ 	videoEventRestore(gba, header.hblank);
+ 	gba->timing.root = NULL;
+ 	gba->timing.reroot = NULL;
+diff --git a/src/timing.c b/src/timing.c
+index 1d58bc4..0c4ae4d 100644
+--- a/src/timing.c
++++ b/src/timing.c
+@@ -122,6 +122,24 @@ void timingSchedule(struct GBA* gba, struct Event* event, int32_t when) {
+ 	*previous = event;
+ }
+ 
++// The same for a lazy event, which compiled code doesn't stop for (CPU clock at 100% only): nextEvent stays as it is.
++void timingScheduleLazy(struct GBA* gba, struct Event* event, int32_t when) {
++	struct Timing* timing = &gba->timing;
++	event->when = when + gba->cpu.cycles + timing->masterCycles;
++	struct Event** previous = timing->reroot ? &timing->reroot : &timing->root;
++	struct Event* next = *previous;
++	while (next) {
++		int32_t after = next->when - event->when;
++		if (after > 0 || (after == 0 && next->priority > event->priority)) {
++			break;
++		}
++		previous = &next->next;
++		next = next->next;
++	}
++	event->next = next;
++	*previous = event;
++}
++
+ // The same, with when on the clock itself.
+ void timingScheduleAbsolute(struct GBA* gba, struct Event* event, int32_t when) {
+ 	timingSchedule(gba, event, when - timingCurrentTime(gba));
+@@ -176,9 +194,17 @@ bool timingIsScheduled(struct GBA* gba, struct Event* event) {
+ 	return false;
+ }
+ 
++// The first event in a list that compiled code stops for.
++static struct Event* firstHard(struct Event* event) {
++	while (event && event->lazy) {
++		event = event->next;
++	}
++	return event;
++}
++
+ // Returns the cycles until the first event, as the CPU's cycle counter counts them.
+ int32_t timingNextEvent(struct GBA* gba) {
+-	struct Event* next = gba->timing.root;
++	struct Event* next = firstHard(gba->timing.root);
+ 	if (!next) {
+ 		return INT_MAX;
+ 	}
+@@ -212,6 +238,10 @@ int32_t timingTick(struct GBA* gba, int32_t cycles) {
+ 		struct Event* next = timing->root;
+ 		int32_t nextWhen = untilEvent(gba, next);
+ 		if (nextWhen > 0) {
++			if (next->lazy) {
++				next = firstHard(next);
++				return next ? untilEvent(gba, next) : INT_MAX;
++			}
+ 			return nextWhen;
+ 		}
+ 		timing->root = next->next;
+@@ -250,7 +280,7 @@ bool timingDeferrable(struct GBA* gba, int32_t time, int kind) {
+ 
+ // After compiled code moved nextEvent up to leave early.
+ void timingResetNextEvent(struct GBA* gba) {
+-	struct Event* next = gba->timing.root;
++	struct Event* next = firstHard(gba->timing.root);
+ 	gba->cpu.nextEvent = next ? untilEvent(gba, next) : INT_MAX;
+ }
+ 
 diff --git a/src/video/render-thread.c b/src/video/render-thread.c
 index 2b57d37..3b06a99 100644
 --- a/src/video/render-thread.c

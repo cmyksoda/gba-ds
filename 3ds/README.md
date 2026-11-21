@@ -301,6 +301,12 @@ frame in armGBA itself. What cut it, with the same pictures, RAM and sound
   moves them 16 bits at a time); 8 makes the exact CPU's decode clear an
   instruction with stores rather than a call to `memset`. Crash Nitro Kart and
   GT Advance 3 write about 1300 video registers a frame from their H-blank DMA.
+  16 is for interrupts: the changes of the interrupt controller that only clear
+  a flag (what acknowledging an interrupt does to IE & IF and then to the CPU's
+  IRQ line, a cycle or two after the write) wait in the event list as before,
+  but compiled code no longer stops for them, and whatever looks at what they
+  change (a write to IE, IF or IME, the IRQ line, a saved state) runs the ones
+  due first; GT Advance 3 acknowledges about 220 a frame.
 - `armgba_compile_budget` (ms of compiling a frame of the game may take before code met for the first times is put off,
   1.5 as built; 1000 never puts any off) is a knob for comparing on a console: careful copies no longer wait for it.
 - The interrupt pipeline's events and a halfword store to an I/O register
