@@ -82,7 +82,8 @@ The CIA takes armGBA-3DS's `.rsf` (the 80 MB mode, among others), so `make cia` 
   no byte swap and no cache flush (`gpu_twin = 1`, off by default: on a New 2DS XL its extra pass slowed the game
   thread more than it saved; it needs a start-up self-test to pass, and the log says "GPU twin self-test"). Both
   draw the same pictures at the same time.
-- `raw_picture = 1` (off by default, until the console has timed it) has no second copy at all: with one drawing
+- `raw_picture = 1` (the default on the 3DS; 0 for the byte swap: on a New 2DS XL it took 0.5 to 0.8 ms a frame off Crash
+  Nitro Kart, GT Advance 3 and Tactics Ogre in the same program's A/B) has no second copy at all: with one drawing
   thread the picture thread widens each picture straight into linear memory with its rows 256 words apart, as the
   texture's are, writes it back itself, and one transfer of the copy engine tiles it as it is, so the game thread does
   no byte swap and no cache flush (what reads the picture as rows of 240 words, `emu_fb()`, gets a copy of it made
@@ -289,7 +290,7 @@ frame in armGBA itself. What cut it, with the same pictures, RAM and sound
   operands), so its carry was worked out even where the next instruction sets C
   again, as almost every one in Crash Nitro Kart's races does (about 800 a
   frame, each a call through the multiplier's stages). With
-  `armgba_lazy_carry = 1` (off as built, to compare on a console) only that
+  `armgba_lazy_carry = 1` (the default on the 3DS, 0 to compare) only that
   check's way out to the exact CPU works it out.
 - A return into the middle of a block (an interrupt's return, or where the
   exact CPU stopped after stepping up to an event) can carry on in the block's
@@ -298,12 +299,14 @@ frame in armGBA itself. What cut it, with the same pictures, RAM and sound
   instructions a frame that way (`armgba_mid_careful = 1` where a copy is
   there, `2` also making one as an event inside the block would, `3` as 2 except
   that a place returned to again and again still gets a block of its own, which
-  runs it faster than the copy; 0 as built, to compare on a console).
+  runs it faster than the copy; the 3DS default is 3, 0 to compare). On a New 2DS XL
+  these two (at level 2; 3 timed the same) took 0.05 to 0.3 ms a frame off Crash Nitro Kart, Tactics Ogre and Super Mario Advance 2.
 - With the picture drawn on threads, the machine's own renderer is read only for
   DISPCNT, its latch and what a register reads back: the copies that draw take
   their state from the log and from `renderThreadClone`. `armgba_cside` is a bit
-  mask of ways the emulation thread does less for that (0 as built, to compare
-  on a console): 1 keeps only those in the machine's renderer (a register write
+  mask of ways the emulation thread does less for that (31 by default on the 3DS, 0 to
+  compare; on a New 2DS XL bits 1 and 2 took about 0.7 ms a frame off Crash Nitro Kart and
+  GT Advance 3, 4 and 8 another 0.2 off GT Advance 3, and 16 0.2 more there): 1 keeps only those in the machine's renderer (a register write
   no longer updates the renderer's backgrounds, windows, blends and per-line
   caches, and a line start no longer runs its affine step); 2 makes a 32-bit
   write to two video registers one log entry, and with 1 writes the render log's

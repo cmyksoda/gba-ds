@@ -70,12 +70,16 @@ void config_defaults(Config* c) {
 	c->tallLive = false; /* (Pinball's live view runs two more copies of the game, two frames each, every frame) */
 	c->threadedVideo = true;
 	c->asyncUpload = true;
-	c->rawPicture = 0; /* (off until the console has timed it, 2026-11-20) */
+	c->rawPicture = 1; /* (on: 0.5 to 0.8 ms a frame off Crash, GT3 and Tactics Ogre on a New 2DS XL, 2026-11-20) */
 	c->gpuTwin = false; /* (off: on the console its extra pass on the render worker slowed the game thread more than it saved, 2026-11-19) */
 	c->hudLayers = true;
 	/* (one worker that also widens the picture beat two without it in 46 of 53 games' slowest stretches on a New 2DS XL) */
 	c->renderWorkers = 1;
 	strcpy(c->armgba[9], "1"); /* armgba_picture_thread */
+	/* (the racers' emulating knobs: timed on a New 2DS XL and exact in the sim and Azahar, 2026-11-20) */
+	strcpy(c->armgba[13], "1"); /* armgba_lazy_carry */
+	strcpy(c->armgba[14], "3"); /* armgba_mid_careful */
+	strcpy(c->armgba[15], "31"); /* armgba_cside */
 #else
 	c->renderWorkers = 1;
 #endif
