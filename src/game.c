@@ -4439,6 +4439,13 @@ static void hud_upload(void) {
 	}
 }
 
+/* No pieces or map over the canvas */
+static void hud_layers_off(void) {
+	hud_over_begin();
+	hud_over_end();
+	if (hudMapSrc.w) hudMapSrc.w = 0, ++hudLayerGen;
+}
+
 /* hudCanvas holds the whole picture (no pieces or map over it) and has to be sent: the layers off */
 static void hud_canvas_whole(void) {
 	if (!hudLayered) {
@@ -4446,9 +4453,7 @@ static void hud_canvas_whole(void) {
 		return;
 	}
 	hud_base_changed(0);
-	hud_over_begin();
-	hud_over_end();
-	if (hudMapSrc.w) hudMapSrc.w = 0, ++hudLayerGen;
+	hud_layers_off();
 }
 
 /* A view's textures, made when it first shows the HUD (not for the screen that never does) */
@@ -5274,8 +5279,16 @@ static void update_hud(void) {
 			else if (side && hudBackValid) card_backdrop();
 		}
 		if (hudBackValid) {
-			memcpy(hudCanvas, hudBack, sizeof(hudCanvas));
-			hud_canvas_whole();
+			/* (a take already on the canvas as sent, with no level's name over it, isn't copied and sent again every
+			 * frame: 600 KB each way, a few ms of a New 3DS's frame for as long as the card is up) */
+			uint64_t key = HUD_KEY(3, hudBackGen);
+			if (hudLayered && hudBaseKey == key && hudTitleSerial != hudBaseSerial) {
+				hud_layers_off();
+			} else {
+				memcpy(hudCanvas, hudBack, sizeof(hudCanvas));
+				if (hudLayered) hud_base_changed(key), hud_layers_off();
+				else hud_upload();
+			}
 			hudShown = true;
 		} else if (h->card.drop[0].addr && hudFrames == 1) {
 			/* (hud.card.drop, Sonic Advance 3, no take yet: its HUD stays

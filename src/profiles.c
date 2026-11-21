@@ -168,6 +168,11 @@ static void aw_run(Emu* s, uint32_t keys, int n) {
 	}
 }
 
+/* ... none drawn: for frames whose picture nobody looks at before the state is loaded again */
+static void aw_run_blind(Emu* s, uint32_t keys, int n) {
+	for (int i = 0; i < n; ++i) emu_frame_blind(s, keys);
+}
+
 static void aw_tap(Emu* s, uint32_t keys, int n) {
 	/* the quickest the game takes presses reliably */
 	for (int i = 0; i < n; ++i) {
@@ -3792,13 +3797,13 @@ static bool to_cut_boxes(Emu* s, uint32_t* out, int r[2][4]) {
  * where R's menu opens on the field (TO-5): 0, or (just after the enemy's
  * phase, the player's has its banner up for ~4 seconds and moves the
  * cursor to the leader, R doing nothing meanwhile) up to 4.5 seconds on,
- * so the turn's first picture comes with it (TO-13). -1: not there. */
-static int to_field_ready(Emu* s, const void* state) {
-	if (!emu_state_load(s, state)) return -1;
-	emu_frame(s, 0);
+ * so the turn's first picture comes with it (TO-13). -1: not there.
+ * From the state's first frame, where to_compose_ leaves the copy; every
+ * caller loads the state again after, so none of these frames is drawn. */
+static int to_field_ready(Emu* s) {
 	bool enemy = emu_read8(s, TO_PHASE(s)) & 0x80;
-	aw_run(s, K_R, 6);
-	aw_run(s, 0, 34);
+	aw_run_blind(s, K_R, 6);
+	aw_run_blind(s, 0, 34);
 	if (emu_read8(s, TO_MENU_UP(s)) == 2) return 0;
 	if (enemy || !toAfterEnemy) return -1;
 	/* (one run on, R every 40 frames, until its menu opens: the guests'
@@ -3806,8 +3811,8 @@ static int to_field_ready(Emu* s, const void* state) {
 	 * restart for each) */
 	for (int extra = 40; extra <= 280; extra += 40) {
 		if (emu_cancelled(s) || (emu_read8(s, TO_PHASE(s)) & 0x80)) return -1;
-		aw_run(s, K_R, 6);
-		aw_run(s, 0, 34);
+		aw_run_blind(s, K_R, 6);
+		aw_run_blind(s, 0, 34);
 		if (emu_read8(s, TO_MENU_UP(s)) == 2) return extra;
 	}
 	return -1;
@@ -4055,18 +4060,18 @@ static const char* to_compose_(Emu* s, const void* state, uint32_t* const* out, 
 	 * BLDCNT darkening, 0x00FF): B there wouldn't open the details yet. The
 	 * last pictures stay; the next refresh takes them (TO-5). */
 	if ((emu_io16(s, 0x50) & 0xC0) >= 0x80) return "the field is fading in";
-	/* (the box comes 2 frames after the darkening ends: 4 more) */
-	aw_run(s, 0, 4);
 	int n = 0;
 	const char* err;
-	int extra = to_field_ready(s, state);
+	int extra = to_field_ready(s);
 	if (extra < 0) return "R's menu didn't open";
 	if (!to_field_back(s, state, extra)) return "state load failed";
 	/* (the unit on the cursor's square: 0 while a screen closes, until the
 	 * field is back; R's menu opened on it, so a few frames on it is) */
-	for (int f = 0; f < 40 && !to_on_unit(s); ++f) emu_frame(s, 0);
+	int waited = 0;
+	for (; waited < 40 && !to_on_unit(s); ++waited) emu_frame_blind(s, 0);
 	bool onUnit = to_on_unit(s);
-	if (!to_field_back(s, state, extra)) return "state load failed";
+	/* (with no frame waited the copy is where loading again would put it; to_aims loads it itself) */
+	if (onUnit && waited && !to_field_back(s, state, extra)) return "state load failed";
 	if (!onUnit) {
 		/* an empty square: the battle's conditions (TO-9) */
 		err = to_aims(s, state, extra, page[0], &n);
