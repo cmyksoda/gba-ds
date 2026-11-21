@@ -78,6 +78,8 @@ typedef struct ArmCore {
 	 * e->fb points at the one that holds the frame taken (fbOwn is the one this machine made) */
 	uint32_t* fbOwn;
 	uint32_t* wideBuf[2];
+	bool wideLinear;   /* raw_picture: wideBuf is linear memory, written back by the worker, that the copy engine reads as it is */
+	unsigned widePitch; /* ... and the words a row of it has (256: one transfer tiles it; 240: two passes) */
 	uint32_t* twin[2]; /* gpu_twin: wideBuf's pictures again in the GPU's byte order (linear memory, HOST_TWIN_STRIDE words a row) */
 } ArmCore;
 
@@ -810,7 +812,9 @@ static void jit_stats(ArmCore* c, unsigned frame, bool game, bool closing) {
 #ifdef __3DS__
 static void twin_open(ArmCore* c, bool oneWorker);
 static void twin_close(ArmCore* c);
+static bool raw_open(ArmCore* c);
 #endif
+static void wide_free(ArmCore* c);
 static void close_core(ArmCore* c) {
 	if (!c) return;
 #ifdef __3DS__
@@ -846,8 +850,7 @@ static void close_core(ArmCore* c) {
 #ifdef __3DS__
 	twin_close(c);
 #endif
-	free(c->wideBuf[0]);
-	free(c->wideBuf[1]);
+	wide_free(c);
 	free(c->savePath);
 #ifdef __3DS__
 	free(c->seen);
@@ -864,6 +867,7 @@ bool emuHiddenCopy;
 
 bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 	memset(e, 0, sizeof(*e));
+	e->fbPitch = GBA_W;
 	ArmCore* c = calloc(1, sizeof(*c));
 	if (!c) return false;
 	e->core = (struct mCore*) c;
@@ -1087,18 +1091,21 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 	e->fb = c->fbOwn = calloc(GBA_W * GBA_H, sizeof(uint32_t));
 	e->audio = audio;
 	if (c->late && getenv("GBADS_ARMGBA_PICTURE_THREAD") && atoi(getenv("GBADS_ARMGBA_PICTURE_THREAD")) == 1) {
-		c->wideBuf[0] = calloc(GBA_W * GBA_H, sizeof(uint32_t));
-		c->wideBuf[1] = calloc(GBA_W * GBA_H, sizeof(uint32_t));
+#ifdef __3DS__
+		c->wideLinear = emuRenderWorkers == 1 && raw_open(c);
+#endif
+		if (!c->wideLinear) {
+			c->wideBuf[0] = calloc(GBA_W * GBA_H, sizeof(uint32_t));
+			c->wideBuf[1] = calloc(GBA_W * GBA_H, sizeof(uint32_t));
+		}
 		if (c->wideBuf[0] && c->wideBuf[1]) {
 			widen_tables();
 #ifdef __3DS__
-			twin_open(c, emuRenderWorkers == 1);
+			if (!c->wideLinear) twin_open(c, emuRenderWorkers == 1);
 #endif
 			renderThreadSetWiden(gba, widen_row, c->wideBuf[0], c->wideBuf[1]);
 		} else {
-			free(c->wideBuf[0]);
-			free(c->wideBuf[1]);
-			c->wideBuf[0] = c->wideBuf[1] = NULL;
+			wide_free(c);
 		}
 	}
 #ifdef __3DS__
@@ -1129,8 +1136,17 @@ fail:
 
 static Emu* rewindOwner;
 void emu_close(Emu* e) {
+#ifdef __3DS__
+	if (e->fbCompactCopies) {
+		char line[120];
+		snprintf(line, sizeof(line), "the picture was copied to rows of 240 words %u times in %llu frames (raw_picture)", e->fbCompactCopies, (unsigned long long) e->frames);
+		logLine("%s", line);
+		if (bench_active()) bench_note(line);
+	}
+#endif
 	if (e->core) {
 		if (AC(e)->fbOwn) e->fb = AC(e)->fbOwn;
+		e->fbPitch = GBA_W;
 		if (rewindOwner == e) emu_rewind_deinit();
 		close_core(AC(e));
 		e->core = NULL;
@@ -1138,6 +1154,10 @@ void emu_close(Emu* e) {
 	free(e->fb);
 	e->fb = NULL;
 	e->fbGpu = NULL;
+	free(e->fbCompact);
+	e->fbCompact = NULL;
+	e->fbCompactOk = false;
+	e->fbPitch = GBA_W;
 }
 
 bool emu_cancelled(const Emu* e) {
@@ -1251,7 +1271,90 @@ static void twin_close(ArmCore* c) {
 		c->twin[k] = NULL;
 	}
 }
+
+/* raw_picture: wideBuf is what the copy engine reads (with some slack after it), written back by the one
+ * worker when its last row is in, as the twin's. */
+static const uint32_t* rawBase[2];
+static const uint32_t* rawDirty;
+static uint64_t rawFlushTicks;
+static unsigned rawFrames;
+
+static unsigned rawPitch;
+
+/* The buffer that row dst (as armGBA counts them: GBA_W words apart from the buffer's start) belongs to, and which row it is. */
+static uint32_t* raw_row_at(const uint32_t* dst, int* y, const uint32_t** base) {
+	*base = dst >= rawBase[1] && dst < rawBase[1] + GBA_W * GBA_H ? rawBase[1] : rawBase[0];
+	*y = (int) ((dst - *base) / GBA_W);
+	return (uint32_t*) *base + (size_t) *y * rawPitch;
+}
+
+static void raw_row_done(const uint32_t* base, int y) {
+	const size_t bytes = (size_t) rawPitch * GBA_H * sizeof(uint32_t);
+	if (rawDirty && rawDirty != base) host_flush_data(rawDirty, bytes);
+	if (y == GBA_H - 1) {
+		const uint64_t t0 = host_ticks();
+		host_flush_data(base, bytes);
+		rawFlushTicks += host_ticks() - t0;
+		rawDirty = NULL;
+		++rawFrames;
+	} else {
+		rawDirty = base;
+	}
+}
+
+static bool raw_open(ArmCore* c) {
+	if (!host_raw_picture_ready()) return false;
+	c->widePitch = host_raw_picture_pitch();
+	const size_t bytes = ((size_t) c->widePitch * GBA_H + HOST_RAW_SLACK_WORDS) * sizeof(uint32_t);
+	for (int k = 0; k < 2; ++k) {
+		c->wideBuf[k] = host_linear_alloc(bytes);
+		if (!c->wideBuf[k]) break;
+		memset(c->wideBuf[k], 0, bytes);
+		host_flush_data(c->wideBuf[k], bytes);
+	}
+	if (!c->wideBuf[0] || !c->wideBuf[1]) {
+		for (int k = 0; k < 2; ++k) {
+			if (c->wideBuf[k]) host_linear_free(c->wideBuf[k]);
+			c->wideBuf[k] = NULL;
+		}
+		logLine("raw picture: no linear memory for the picture buffers, the byte swap stays");
+		return false;
+	}
+	rawDirty = NULL;
+	rawPitch = c->widePitch;
+	for (int k = 0; k < 2; ++k) rawBase[k] = c->wideBuf[k];
+	logLine("raw picture: made (2 x %u KiB of linear memory, rows %u words apart)", (unsigned) (bytes >> 10), c->widePitch);
+	return true;
+}
 #endif
+
+/* (the copy engine may still be reading a raw picture: the GPU is waited for before it goes) */
+static void wide_free(ArmCore* c) {
+#ifdef __3DS__
+	if (c->wideLinear) {
+		host_picture_raw(NULL); /* (a later game's picture may sit at the freed picture's address) */
+		host_gpu_settle();
+		if (rawFrames) {
+			char line[120];
+			snprintf(line, sizeof(line), "raw picture: per frame the render worker spent %.3f ms flushing it (%u frames)", rawFlushTicks / HOST_TICKS_PER_MS / rawFrames, rawFrames);
+			logLine("%s", line);
+			if (bench_active()) bench_note(line);
+		}
+		rawFlushTicks = 0, rawFrames = 0;
+		rawDirty = NULL;
+		rawBase[0] = rawBase[1] = NULL;
+		host_linear_free(c->wideBuf[0]);
+		host_linear_free(c->wideBuf[1]);
+		c->wideBuf[0] = c->wideBuf[1] = NULL;
+		c->wideLinear = false;
+		rawPitch = 0;
+		return;
+	}
+#endif
+	free(c->wideBuf[0]);
+	free(c->wideBuf[1]);
+	c->wideBuf[0] = c->wideBuf[1] = NULL;
+}
 
 /* One row, from a render worker (its source is word aligned: the log's frame). */
 static void widen_row(uint32_t* dst, const uint16_t* src) {
@@ -1275,6 +1378,9 @@ static void widen_row(uint32_t* dst, const uint16_t* src) {
 		twin_row_done(y, twin);
 		return;
 	}
+	const uint32_t* rawBuf = NULL;
+	int rawY = 0;
+	if (rawBase[0]) dst = raw_row_at(dst, &rawY, &rawBuf); /* (raw_picture's rows may be further apart than armGBA counts) */
 #endif
 	for (int i = 0; i < GBA_W / 2; i += 2) {
 		uint32_t const a = words[i], b = words[i + 1];
@@ -1283,6 +1389,9 @@ static void widen_row(uint32_t* dst, const uint16_t* src) {
 		dst[2 * i + 2] = widenLow[b & 0xFF] | widenHigh[(b >> 8) & 0xFF];
 		dst[2 * i + 3] = widenLow[(b >> 16) & 0xFF] | widenHigh[b >> 24];
 	}
+#ifdef __3DS__
+	if (rawBuf) raw_row_done(rawBuf, rawY);
+#endif
 }
 
 /* A whole picture; two colors a word where they are word aligned (the ARM11 can't load a half-word pair otherwise). */
@@ -1303,9 +1412,22 @@ static void take_picture(Emu* e) {
 	const uint32_t* wide = c->wideBuf[0] ? renderThreadWide(c->gba) : NULL;
 	e->fbGpu = NULL;
 	e->fbGpuDirty = 0;
-	if (wide) {
+	e->fbPitch = GBA_W;
+	e->fbCompactOk = false;
+	if (wide && c->wideLinear && c->widePitch != GBA_W && c->markFrame) {
+		/* (the marks are put on rows of GBA_W: on a copy) */
+		for (int y = 0; y < GBA_H; ++y) memcpy(&c->fbOwn[y * GBA_W], &wide[y * c->widePitch], GBA_W * sizeof(uint32_t));
+		e->fb = c->fbOwn;
+	} else if (wide) {
 		e->fb = (uint32_t*) wide;
-		if (c->twin[0] && !c->markFrame) e->fbGpu = c->twin[wide == c->wideBuf[1]]; /* (a marked picture's fourth bytes are not the twin's) */
+		if (c->twin[0] && !c->markFrame) { /* (a marked picture's fourth bytes are not the twin's) */
+			e->fbGpu = c->twin[wide == c->wideBuf[1]];
+			e->fbGpuStride = EMU_TWIN_STRIDE;
+		} else if (c->wideLinear && !c->markFrame) {
+			e->fbGpu = wide;
+			e->fbGpuStride = c->widePitch;
+			e->fbPitch = c->widePitch;
+		}
 	} else {
 		e->fb = c->fbOwn;
 		widen_picture(e->fb, (const uint16_t*) c->gba->renderer.frame);
@@ -1333,8 +1455,11 @@ static void run_frame(Emu* e, uint32_t keys, bool draw) {
 #endif
 	if (!draw && e->fb != c->fbOwn) {
 		/* (the picture kept is a worker's buffer, which it writes again when this frame ends: copied before) */
-		memcpy(c->fbOwn, e->fb, GBA_W * GBA_H * sizeof(uint32_t));
+		const int pitch = emu_pitch(e);
+		for (int y = 0; y < GBA_H; ++y) memcpy(&c->fbOwn[y * GBA_W], &e->fb[y * pitch], GBA_W * sizeof(uint32_t));
 		e->fb = c->fbOwn;
+		e->fbPitch = GBA_W;
+		e->fbCompactOk = false;
 		e->fbGpu = NULL;
 	}
 	++e->frames;

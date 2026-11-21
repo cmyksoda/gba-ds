@@ -67,6 +67,16 @@ void host_set_twin_check(bool on); /* gba-ds.cfg's twin_check (a test): each twi
 void host_set_tex_check(bool on);  /* gba-ds.cfg's tex_check (a test): each picture texture is read back after the GPU's copy and compared */
 bool host_gpu_twin_ready(void);
 void host_picture_twin(const void* fb, const void* gpuOrder);
+/* gba-ds.cfg's raw_picture: the render worker's picture buffers are linear memory it flushes itself, so the copy engine tiles them as they are and the
+ * GPU's combiner puts the channels right. host_raw_picture_ready: on, and the self-test passed; host_picture_raw(fb): fb is such a buffer (NULL: none). */
+#define HOST_RAW_SLACK_WORDS 64 /* (room after a picture buffer, in case the copy engine reads a little past its last row) */
+void host_set_raw_picture(int mode); /* 0 off; 1 the picture buffers' rows 256 words apart, one transfer; 2 rows 240 apart, two passes (a linear copy with gaps, then the transfer) */
+int host_raw_picture_pitch(void);    /* the words a row of the picture buffers has in this mode */
+void host_set_raw_check(bool on); /* gba-ds.cfg's raw_check (a test): each raw picture is also drawn the old way, offscreen, and compared */
+bool host_raw_picture_ready(void);
+void host_picture_raw(const void* fb);
+/* At a game's end: what tex_check and raw_check found, in the log and in the bench's results (a long job's log can be cut). */
+void host_checks_report(void);
 void host_flush_data(const void* p, size_t n);
 /* The system tick (svcGetSystemTick) and its ticks a millisecond. */
 uint64_t host_ticks(void);

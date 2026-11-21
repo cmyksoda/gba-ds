@@ -210,7 +210,7 @@ static bool aw_back(Emu* s) {
 
 /* pixel (x, y) of the screen is about this colour (0xRRGGBB) */
 static bool aw_px(Emu* s, int x, int y, uint32_t rgb) {
-	uint32_t c = emu_fb(s)[y * GBA_W + x];
+	uint32_t c = emu_pixel(s, x, y);
 	int d[3] = { (int) (c & 0xFF) - (int) (rgb >> 16), (int) ((c >> 8) & 0xFF) - (int) ((rgb >> 8) & 0xFF),
 	             (int) ((c >> 16) & 0xFF) - (int) (rgb & 0xFF) };
 	for (int i = 0; i < 3; ++i) {
@@ -2011,7 +2011,7 @@ static const SomRegion* som_r(Emu* e) {
 static bool som_probes(Emu* e, const Probe* p, int n, int need, int tol) {
 	int hit = 0;
 	for (int i = 0; i < n; ++i) {
-		uint32_t c = emu_fb(e)[p[i].y * GBA_W + p[i].x];
+		uint32_t c = emu_pixel(e, p[i].x, p[i].y);
 		int d[3] = { (int) (c & 0xFF) - (int) (p[i].rgb >> 16), (int) ((c >> 8) & 0xFF) - (int) ((p[i].rgb >> 8) & 0xFF),
 		             (int) ((c >> 16) & 0xFF) - (int) (p[i].rgb & 0xFF) };
 		hit += abs(d[0]) <= tol && abs(d[1]) <= tol && abs(d[2]) <= tol;
@@ -2532,12 +2532,12 @@ static bool eds_named(const EdsRelease* r, Emu* e) {
 	int white = 0, green = 0;
 	if (!r->jp) {
 		for (int y = 151; y < 159; ++y)
-			for (int x = 2; x < 120; ++x) white += (emu_fb(e)[y * GBA_W + x] & 0xFFFFFF) == 0xFFFFFF;
+			for (int x = 2; x < 120; ++x) white += (emu_pixel(e, x, y) & 0xFFFFFF) == 0xFFFFFF;
 		return white >= 12;
 	}
 	for (int y = 152; y < 160; ++y)
 		for (int x = 0; x < GBA_W; ++x) {
-			uint32_t c = emu_fb(e)[y * GBA_W + x] & 0xFFFFFF;
+			uint32_t c = emu_pixel(e, x, y) & 0xFFFFFF;
 			white += c == 0xFFFFFF;
 			green += c == 0x00FF00;
 		}

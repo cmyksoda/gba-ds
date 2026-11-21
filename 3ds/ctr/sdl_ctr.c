@@ -9,6 +9,7 @@
 #include "sdl/SDL.h"
 
 #include "host.h"
+#include "bench.h"
 
 #include <3ds.h>
 #include <stdatomic.h>
@@ -290,6 +291,7 @@ struct SDL_Texture {
 	bool linear; /* the filter the GPU texture is set to */
 	Uint8 r, g, b, a;
 	bool streaming; /* updated again and again: tiled by the GPU */
+	bool raw;       /* raw_picture: its words are the picture's own (bytes R, G, B, A), so it is drawn through a combiner swizzle */
 	/* its picture in linear memory for the GPU's tiling: its own, and rows a frame's queued transfer is still to read are
 	 * not written again in that frame (transfers queued in a frame run at its end) */
 	u32* stage[STAGE_SLOTS];
@@ -465,6 +467,7 @@ uint32_t host_gpu_wait_ticks(void) {
 }
 
 static void tex_verify(void);
+static void rawcheck_verify(void);
 
 static void frame_begin(void) {
 	if (inFrame) return;
@@ -476,6 +479,7 @@ static void frame_begin(void) {
 	doomed_targets_free(); /* (citro3d stops the app if a render target goes inside a frame) */
 	GPU_WAIT_IN(waitBegin, C3D_FrameBegin(sync ? C3D_FRAME_SYNCDRAW : 0));
 	tex_verify();
+	rawcheck_verify();
 	doomed_free();
 	inFrame = true;
 	++frameSerial;
@@ -617,6 +621,35 @@ int SDL_RenderFillRect(SDL_Renderer* r, const SDL_Rect* rect) {
 	return SDL_RenderFillRects(r, rect, 1);
 }
 
+/* The GPU reads a raw texture's words as RGBA8: red is the picture's alpha, green its blue, blue its green. Three combiner stages put them
+ * right (each channel times an all-or-nothing mask, added up; a mix of two channels came out off by one on the console, this is exact there)
+ * and citro2d's own first stage reads their result instead of the texture; the quad is drawn at once. */
+static void raw_draw_flush(void) {
+	C3D_TexEnv keep[4];
+	C3D_TexEnv* env[4];
+	for (int i = 0; i < 4; ++i) {
+		env[i] = C3D_GetTexEnv(i);
+		keep[i] = *env[i];
+	}
+	*env[3] = keep[0];
+	for (int shift = 0; shift < 12; shift += 4) {
+		if (((env[3]->srcRgb >> shift) & 0xF) == GPU_TEXTURE0) env[3]->srcRgb = (u16) ((env[3]->srcRgb & ~(0xF << shift)) | (GPU_PREVIOUS << shift));
+		if (((env[3]->srcAlpha >> shift) & 0xF) == GPU_TEXTURE0) env[3]->srcAlpha = (u16) ((env[3]->srcAlpha & ~(0xF << shift)) | (GPU_PREVIOUS << shift));
+	}
+	static const GPU_TEVOP_RGB from[3] = { GPU_TEVOP_RGB_SRC_ALPHA, GPU_TEVOP_RGB_SRC_B, GPU_TEVOP_RGB_SRC_G };
+	for (int c = 0; c < 3; ++c) {
+		C3D_TexEnvInit(env[c]);
+		C3D_TexEnvSrc(env[c], C3D_RGB, GPU_TEXTURE0, GPU_CONSTANT, GPU_PREVIOUS);
+		C3D_TexEnvOpRgb(env[c], from[c], GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
+		C3D_TexEnvFunc(env[c], C3D_RGB, c ? GPU_MULTIPLY_ADD : GPU_MODULATE);
+		C3D_TexEnvColor(env[c], 0xFFu << (8 * c));
+	}
+	C3D_TexEnvSrc(env[0], C3D_Alpha, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR); /* (the alpha from the texel's red) */
+	C3D_TexEnvOpAlpha(env[0], GPU_TEVOP_A_SRC_R, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA);
+	C2D_Flush();
+	for (int i = 0; i < 4; ++i) C3D_SetTexEnv(i, &keep[i]);
+}
+
 int SDL_RenderCopy(SDL_Renderer* r, SDL_Texture* t, const SDL_Rect* src, const SDL_Rect* dst) {
 	if (!t) return -1;
 	scene(r);
@@ -655,7 +688,8 @@ int SDL_RenderCopy(SDL_Renderer* r, SDL_Texture* t, const SDL_Rect* src, const S
 		bool coloured = t->r != 255 || t->g != 255 || t->b != 255;
 		C2D_PlainImageTint(&tint, C2D_Color32(t->r, t->g, t->b, t->a), coloured ? 1.0f : 0.0f);
 	}
-	C2D_DrawImageAt(img, dst->x, dst->y, 0.5f, tinted ? &tint : NULL, (float) dst->w / src->w, (float) dst->h / src->h);
+	const bool queued = C2D_DrawImageAt(img, dst->x, dst->y, 0.5f, tinted ? &tint : NULL, (float) dst->w / src->w, (float) dst->h / src->h);
+	if (t->raw && queued) raw_draw_flush();
 	return 0;
 }
 
@@ -1137,7 +1171,7 @@ static void tex_verify(void) {
 
 /* (pixels as they were given: the words the texture should hold are the same swap as the stage's) */
 static void tex_note(const SDL_Texture* t, const void* pixels, int pitch) {
-	if (!texCheck || !pixels || pitch != 240 * 4 || t->w != 240 || t->h != 160 || !t->streaming || t->tex.width < 240) return;
+	if (!texCheck || !pixels || (pitch != 240 * 4 && !(t->raw && pitch == HOST_TWIN_STRIDE * 4)) || t->w != 240 || t->h != 160 || !t->streaming || t->tex.width < 240) return;
 	if (t->format != SDL_PIXELFORMAT_ABGR8888 && t->format != SDL_PIXELFORMAT_XBGR8888) return;
 	int k = -1;
 	for (int i = 0; i < TEX_CHECKED && k < 0; ++i) k = texSeen[i].t == t ? i : -1;
@@ -1146,7 +1180,11 @@ static void tex_note(const SDL_Texture* t, const void* pixels, int pitch) {
 	if (!texSeen[k].want && !(texSeen[k].want = malloc(240 * 160 * sizeof(u32)))) return;
 	const u32 alpha = t->format == SDL_PIXELFORMAT_XBGR8888 ? 0xFF000000u : 0;
 	const u32* src = pixels;
-	for (int i = 0; i < 240 * 160; ++i) texSeen[k].want[i] = __builtin_bswap32(src[i] | alpha);
+	const int pw = pitch / 4;
+	for (int i = 0; i < 240 * 160; ++i) {
+		const u32 w = src[i / 240 * pw + i % 240];
+		texSeen[k].want[i] = t->raw ? w : __builtin_bswap32(w | alpha);
+	}
 	texSeen[k].t = t;
 	texSeen[k].have = true;
 }
@@ -1232,6 +1270,407 @@ static void twin_selftest(void) {
 	logLine("textures: GPU twin self-test: %s", made < 4 ? "no thread" : bad ? "differs from what the other core wrote" : "all words match (4 pictures, written on another core)");
 }
 
+/* gba-ds.cfg's raw_picture: the render worker's picture (linear memory it writes back itself) is copied to the texture as it is, and the GPU
+ * puts the channels right when it draws (raw_draw_flush). host_picture_raw is told, each frame, which pixels are such a picture. */
+static bool rawOn, rawOk, rawCheckOn;
+static int rawMode; /* 1: the picture's rows 256 words apart, one transfer tiles it; 2: rows 240 apart, a copy that leaves gaps, then the transfer */
+static signed char rawVerdict[3]; /* the self-test of each mode: 1 passed, -1 failed, 0 not run */
+static const void* rawKey;
+static u64 upRawTicks;
+
+void host_set_raw_picture(int mode) {
+	rawMode = mode >= 2 ? 2 : mode ? 1 : 0;
+	rawOn = rawMode != 0;
+	rawOk = rawVerdict[rawMode] > 0;
+}
+
+/* The words a row of the picture buffers has in this mode. */
+int host_raw_picture_pitch(void) {
+	return rawMode == 2 ? 240 : HOST_TWIN_STRIDE;
+}
+
+void host_set_raw_check(bool on) {
+	rawCheckOn = on;
+}
+
+static void raw_selftest(void);
+static void frame_end_now(void);
+
+/* The self-test runs once for each mode, the first time a game asks with the option on: the copy's two dimensions are not what the GPU's
+ * documentation covers, so a build or job that doesn't use raw_picture never sends it. */
+bool host_raw_picture_ready(void) {
+	if (!rawOn || !gpu_tiling()) return false;
+	if (!rawVerdict[rawMode]) {
+		frame_end_now(); /* (the first job of a run finds the start's last frame still open: the test begins frames of its own) */
+		raw_selftest();
+	}
+	return rawOk;
+}
+
+void host_picture_raw(const void* fb) {
+	rawKey = fb;
+}
+
+/* One transfer tiles a picture whose rows are 256 words apart, as the texture's are. With rows of 240 (raw_picture = 2) it takes two passes: a linear
+ * copy that leaves a gap after each row, then the usual transfer. (One transfer from rows of 240 into the 256 wide texture is not something the
+ * console's copy engine does: the rows came out wrong.) */
+#define RAW_ROW_UNITS (240 * 4 / 16) /* (the copy engine counts a row and its gap in 16-byte units) */
+#define RAW_GAP_UNITS ((HOST_TWIN_STRIDE - 240) * 4 / 16)
+#define RAW_TILE_ROWS ((1ull << (160 / 8)) - 1)
+static bool raw_transfer(SDL_Texture* t, const void* pixels) {
+	const u32 flags = GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_TILED(1);
+	if (rawMode == 2) {
+		int slot = 0;
+		u32* stage = stage_take(t, (size_t) HOST_TWIN_STRIDE * 160, inFrame, RAW_TILE_ROWS, &slot);
+		if (!stage) return false;
+		if (inFrame) t->stageFrame[slot] = frameSerial;
+		GPU_WAIT(C3D_SyncTextureCopy((u32*) pixels, GX_BUFFER_DIM(RAW_ROW_UNITS, 0), stage, GX_BUFFER_DIM(RAW_ROW_UNITS, RAW_GAP_UNITS),
+		                             240 * 160 * 4, 8 | 4));
+		pixels = stage;
+	}
+	GPU_WAIT(C3D_SyncDisplayTransfer((u32*) pixels, GX_BUFFER_DIM(HOST_TWIN_STRIDE, 160), (u32*) t->tex.data, GX_BUFFER_DIM(HOST_TWIN_STRIDE, 160), flags));
+	t->raw = true;
+	return true;
+}
+
+/* A picture drawn both ways into targets of their own, to be compared once the GPU is done: swapped (the old way) and raw, each 1:1 and
+ * 400x240 smooth. */
+typedef struct {
+	SDL_Texture* swapped;
+	SDL_Texture* target[2][2]; /* [draw][0 swapped, 1 raw] */
+	u32* read[2][2];           /* each target's words copied to linear memory by the copy engine, for the CPU to compare */
+} RawRig;
+static SDL_Renderer rawFake;
+static const SDL_Rect rawRigDst[2] = { { 0, 0, 240, 160 }, { 0, 0, 400, 240 } };
+
+static void rig_free(RawRig* g) {
+	if (g->swapped) texture_free(g->swapped);
+	for (int c = 0; c < 2; ++c) {
+		for (int k = 0; k < 2; ++k) {
+			if (g->target[c][k]) texture_free(g->target[c][k]);
+			if (g->read[c][k]) linearFree(g->read[c][k]);
+		}
+	}
+	memset(g, 0, sizeof(*g));
+}
+
+static bool rig_make(RawRig* g) {
+	memset(g, 0, sizeof(*g));
+	g->swapped = SDL_CreateTexture(NULL, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, 240, 160);
+	bool ok = g->swapped != NULL;
+	for (int c = 0; c < 2; ++c) {
+		for (int k = 0; k < 2; ++k) {
+			g->target[c][k] = SDL_CreateTexture(NULL, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_TARGET, rawRigDst[c].w, rawRigDst[c].h);
+			ok = ok && g->target[c][k] != NULL;
+			if (g->target[c][k]) ok = ok && (g->read[c][k] = linearMemAlign(g->target[c][k]->tex.size, 0x80)) != NULL;
+		}
+	}
+	if (!ok) rig_free(g);
+	return ok;
+}
+
+/* The targets' words to linear memory: the CPU reads VRAM through its cache, which may hold words from before the GPU drew, so the copy
+ * engine reads them (queued in the frame under way; they are there once the GPU is done with it). */
+static void rig_fetch(RawRig* g) {
+	for (int c = 0; c < 2; ++c) {
+		for (int k = 0; k < 2; ++k) {
+			C3D_SyncTextureCopy((u32*) g->target[c][k]->tex.data, 0, g->read[c][k], 0, g->target[c][k]->tex.size, GX_TRANSFER_RAW_COPY(1));
+		}
+	}
+}
+
+/* In a frame, after t (a raw texture) has been updated from `picture` (its words in the bytes R, G, B, A, `pitch` bytes to a row). */
+static void rig_draw(RawRig* g, SDL_Texture* t, const void* picture, int pitch) {
+	update_by_gpu(g->swapped, picture, pitch, 0, 160);
+	g->swapped->raw = false;
+	C2D_Flush();
+	if (scissorOn) C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0); /* (scene() puts the game's clip back) */
+	const SDL_ScaleMode scale = t->scale;
+	SDL_Renderer* r = &rawFake;
+	SDL_SetRenderDrawColor(r, 0, 0, 0, 0);
+	for (int c = 0; c < 2; ++c) {
+		for (int k = 0; k < 2; ++k) {
+			SDL_Texture* from = k ? t : g->swapped;
+			from->scale = c ? SDL_ScaleModeLinear : SDL_ScaleModeNearest;
+			SDL_SetRenderTarget(r, g->target[c][k]);
+			SDL_RenderClear(r);
+			SDL_RenderCopy(r, from, NULL, &rawRigDst[c]);
+		}
+	}
+	SDL_SetRenderTarget(r, NULL);
+	g->swapped->scale = t->scale = scale;
+	bound = NULL;
+}
+
+/* The words that differ between each draw's two targets, in the tile rows the draw covers (per draw, and the first of each: the word's place
+ * in the target, the swapped draw's and the raw one's); the total. */
+typedef struct {
+	int bad[2];
+	u32 at[2], swapped[2], raw[2];
+} RawDiff;
+
+static int rig_compare(RawRig* g, RawDiff* d) {
+	RawDiff local;
+	if (!d) d = &local;
+	memset(d, 0, sizeof(*d));
+	for (int c = 0; c < 2; ++c) {
+		SDL_Texture* a = g->target[c][0];
+		const size_t words = (size_t) (a->tex.width / 8) * 64 * (size_t) ((rawRigDst[c].h + 7) / 8);
+		svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32) g->read[c][0], a->tex.size);
+		svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32) g->read[c][1], a->tex.size);
+		const u32 *ga = g->read[c][0], *gb = g->read[c][1];
+		for (size_t i = 0; i < words; ++i) {
+			if (ga[i] == gb[i]) continue;
+			if (!d->bad[c]++) d->at[c] = (u32) i, d->swapped[c] = ga[i], d->raw[c] = gb[i];
+		}
+	}
+	return d->bad[0] + d->bad[1];
+}
+
+/* raw_check: one picture a frame is drawn both ways and compared when the next frame begins. */
+static RawRig checkRig;
+static bool checkRigMade;
+static int checkState; /* 0 nothing to compare; 1 drawn; 2 copied to linear memory (compared when the GPU is done with that frame) */
+static unsigned rawChecked, rawDiffers;
+
+static void raw_check_picture(SDL_Texture* t, const void* pixels, int pitch) {
+	if (checkState) return;
+	if (!checkRigMade && !(checkRigMade = rig_make(&checkRig))) {
+		rawCheckOn = false;
+		logLine("textures: raw check: no memory for the targets, off");
+		return;
+	}
+	rig_draw(&checkRig, t, pixels, pitch);
+	checkState = 1;
+}
+
+static bool gpu_settle_within(unsigned ms);
+
+/* The test keys' verdicts so far (the last pictures' too), then counted again; the keys and the targets are let go, so the next job's lines
+ * are its own. */
+void host_checks_report(void) {
+	char line[160];
+	if (texCheck || rawCheckOn) frame_end_now(); /* (the last pictures' copies run when their frame ends) */
+	host_gpu_settle();
+	tex_verify();
+	if (checkState == 1) {
+		frame_begin();
+		rig_fetch(&checkRig);
+		frame_end_now();
+		checkState = 2;
+	}
+	if (checkState == 2) {
+		gpu_settle_within(3000);
+		rawcheck_verify();
+	}
+	if (texChecked) {
+		snprintf(line, sizeof(line), "tex check: %u pictures read back, %u differed", texChecked, texDiffers);
+		logLine("textures: %s", line);
+		if (bench_active()) bench_note(line);
+	}
+	if (rawChecked) {
+		snprintf(line, sizeof(line), "raw check: %u pictures drawn both ways, %u differed", rawChecked, rawDiffers);
+		logLine("textures: %s", line);
+		if (bench_active()) bench_note(line);
+	}
+	texChecked = texDiffers = rawChecked = rawDiffers = 0;
+	texCheck = rawCheckOn = false;
+	if (checkRigMade && !inFrame) {
+		rig_free(&checkRig);
+		checkRigMade = false;
+	}
+}
+
+static void raw_said(const char* line);
+
+/* A picture drawn differently is told in detail (the first few): the draws' word counts, the first word of each, and the same read again (a
+ * difference that is gone on the second read was the CPU's view of the targets, not the GPU's drawing). */
+static void rawcheck_verify(void) {
+	if (!checkState) return;
+	if (checkState == 1) { /* (the GPU is done with the draws: the targets are copied now, and compared a frame on) */
+		rig_fetch(&checkRig);
+		checkState = 2;
+		return;
+	}
+	checkState = 0;
+	RawDiff d;
+	++rawChecked;
+	if (!rig_compare(&checkRig, &d)) {
+		if (rawChecked % 600 == 0) logLine("textures: raw check: %u pictures drawn both ways, %u differed", rawChecked, rawDiffers);
+		return;
+	}
+	if (rawDiffers++ < 8) {
+		RawDiff again;
+		rig_compare(&checkRig, &again);
+		char line[300];
+		snprintf(line, sizeof(line), "raw check: picture %u (frame %u) differs: %d words in the 1:1 draw, %d in the smooth one; first 1:1 word %lu swapped %08lx raw %08lx, first smooth word %lu swapped %08lx raw %08lx; read again: %d and %d",
+		         rawChecked, frameSerial, d.bad[0], d.bad[1], (unsigned long) d.at[0], (unsigned long) d.swapped[0], (unsigned long) d.raw[0], (unsigned long) d.at[1],
+		         (unsigned long) d.swapped[1], (unsigned long) d.raw[1], again.bad[0], again.bad[1]);
+		raw_said(line);
+	}
+}
+
+static bool update_from_raw(SDL_Texture* t, const void* pixels, int pitch) {
+	if (!pixels || pixels != rawKey || !rawOn || !rawOk || pitch != host_raw_picture_pitch() * 4 || t->blend != SDL_BLENDMODE_NONE) return false;
+	if (t->format != SDL_PIXELFORMAT_ABGR8888 || !t->streaming || t->w != 240 || t->h != 160 || t->tw != 240 || t->th != 160 ||
+	    t->tex.width != HOST_TWIN_STRIDE || !gpu_tiling()) {
+		return false;
+	}
+	if (asyncUpload && !uploadSync) frame_begin();
+	if (inFrame) C2D_Flush(); /* (a draw of the texture still waiting would use the old stages on the raw words) */
+	u64 t0 = svcGetSystemTick();
+	if (!raw_transfer(t, pixels)) return false;
+	upRawTicks += svcGetSystemTick() - t0;
+	if (rawCheckOn && inFrame) raw_check_picture(t, pixels, pitch);
+	return true;
+}
+
+/* (TEST: another core writes a picture and writes it back, as the render worker does; it is copied raw and drawn next to the same picture
+ * swapped, and every word must be the same. Off if not.) */
+typedef struct {
+	u32* buf;
+	u32* copy;
+	int pitch;
+	u32 seed;
+} RawWriter;
+
+static void raw_writer(void* arg) {
+	RawWriter* w = arg;
+	u32 seed = w->seed;
+	for (int i = 0; i < 240 * 160; ++i) {
+		const int x = i % 240, y = i / 240;
+		/* (the first 256 hold every byte value in each channel, each in another order) */
+		const u32 word = i < 256 ? (u32) i | (u32) ((i + 37) & 255) << 8 | (u32) ((i * 5 + 11) & 255) << 16 | (u32) (255 - i) << 24 : (seed = seed * 1664525u + 1013904223u);
+		w->buf[y * w->pitch + x] = word;
+		w->copy[i] = word;
+	}
+	cache_flush(w->buf, (size_t) (w->pitch * 160 + HOST_RAW_SLACK_WORDS) * 4);
+}
+
+static void frame_end_now(void) {
+	if (!inFrame) return;
+	C2D_Flush();
+	if (boundBlend != SDL_BLENDMODE_BLEND) set_blend(SDL_BLENDMODE_BLEND);
+	if (scissorOn) {
+		C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+		scissorOn = false;
+	}
+	C3D_FrameEnd(0);
+	inFrame = false;
+	bound = NULL;
+}
+
+/* host_gpu_settle with a limit: a copy the GPU can't finish must not hang the app before it says so. */
+static bool gpu_settle_within(unsigned ms) {
+	for (unsigned i = 0; i < ms; ++i) {
+		if (C3D_FrameBegin(C3D_FRAME_NONBLOCK)) {
+			C3D_FrameEnd(0);
+			return true;
+		}
+		svcSleepThread(1000000);
+	}
+	return false;
+}
+
+/* The self-test's verdict, in the log and (a long job's log can be cut) in the bench's results, under the job that ran it. */
+static void raw_said(const char* line) {
+	logLine("textures: %s", line);
+	if (bench_active()) bench_note(line);
+}
+
+static void raw_selftest(void) {
+	const int mode = rawMode;
+	const int pitch = host_raw_picture_pitch();
+	const char* how = mode == 2 ? "two passes" : "rows 256 apart";
+	char line[300];
+	rawOk = false;
+	if (!gpu_tiling()) return;
+	const size_t bytes = (size_t) (pitch * 160 + HOST_RAW_SLACK_WORDS) * 4;
+	u32* buf = linearMemAlign(bytes, 0x80);
+	u32* copy = malloc(240 * 160 * 4);
+	SDL_Texture* t = SDL_CreateTexture(NULL, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, 240, 160);
+	RawRig g;
+	if (!buf || !copy || !t || t->tex.width != HOST_TWIN_STRIDE || !rig_make(&g)) {
+		if (buf) linearFree(buf);
+		free(copy);
+		if (t) texture_free(t);
+		rawVerdict[mode] = -1;
+		raw_said("raw picture self-test: not made");
+		return;
+	}
+	memset(buf, 0, bytes);
+	cache_flush(buf, bytes);
+	const bool wasOn = rawOn, wasCheck = rawCheckOn;
+	const void* wasKey = rawKey;
+	rawOn = rawOk = true;
+	rawCheckOn = false; /* (the test's own pictures are not the game's: raw_check would count a failing setup's as the game's) */
+	int made = 0, badCopy = 0, badDraw = 0, whichDraw = 0;
+	for (int k = 0; k < 2; ++k) {
+		RawWriter w = { buf, copy, pitch, 9001u + (u32) k * 313u };
+		s32 prio = 0x30;
+		svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+		Thread th = threadCreate(raw_writer, &w, 32 * 1024, prio, host_side_core(), false);
+		if (!th) continue;
+		threadJoin(th, U64_MAX);
+		threadFree(th);
+		++made;
+		frame_begin();
+		rawKey = buf;
+		const int rc = SDL_UpdateTexture(t, NULL, buf, pitch * 4);
+		rawKey = NULL;
+		if (rc || !t->raw) {
+			frame_end_now();
+			++badCopy;
+			break;
+		}
+		rig_draw(&g, t, buf, pitch * 4);
+		frame_end_now();
+		if (!gpu_settle_within(3000)) {
+			snprintf(line, sizeof(line), "raw picture self-test (%s): the GPU did not finish the pictures in 3 s, the copy or the drawing hangs it", how);
+			raw_said(line);
+			rawOn = wasOn, rawCheckOn = wasCheck;
+			rawOk = false;
+			rawVerdict[mode] = -1;
+			rawKey = wasKey;
+			return; /* (the targets are not freed: the GPU may still hold them) */
+		}
+		frame_begin();
+		rig_fetch(&g);
+		frame_end_now();
+		if (!gpu_settle_within(3000)) {
+			snprintf(line, sizeof(line), "raw picture self-test (%s): the GPU did not finish copying the drawings in 3 s", how);
+			raw_said(line);
+			rawOn = wasOn, rawCheckOn = wasCheck;
+			rawOk = false;
+			rawVerdict[mode] = -1;
+			rawKey = wasKey;
+			return;
+		}
+		svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32) t->tex.data, t->tex.size);
+		const u32* got = t->tex.data;
+		for (int y = 0; y < 160; ++y) {
+			for (int x = 0; x < 240; ++x) badCopy += got[tiled((u32) x, (u32) y, t->tex.width)] != copy[y * 240 + x];
+		}
+		RawDiff d;
+		const int bad = rig_compare(&g, &d);
+		if (bad && !badDraw) whichDraw = d.bad[0] ? 0 : 1;
+		badDraw += bad;
+	}
+	rawOn = wasOn, rawCheckOn = wasCheck;
+	rawKey = wasKey;
+	rig_free(&g);
+	texture_free(t);
+	linearFree(buf);
+	free(copy);
+	rawOk = made == 2 && !badCopy && !badDraw;
+	rawVerdict[mode] = rawOk ? 1 : -1;
+	if (rawOk) snprintf(line, sizeof(line), "raw picture self-test (%s): all words match (2 pictures, written on another core: copied as they are, drawn 1:1 and smooth, the same as swapped)", how);
+	else if (made < 2) snprintf(line, sizeof(line), "raw picture self-test (%s): no thread", how);
+	else snprintf(line, sizeof(line), "raw picture self-test (%s): %s (%d words of the copy, %d of the drawing, the first in the %s draw)", how,
+	              badCopy ? "the copy differs" : "the drawing differs", badCopy, badDraw, whichDraw ? "smooth" : "1:1");
+	raw_said(line);
+}
+
 /* (TEST: the average time of a whole picture's upload, logged now and then) */
 static u64 upTicks, upFlushTicks, upXferTicks;
 static unsigned upCount;
@@ -1305,6 +1744,7 @@ static void cpu_tile_selftest(void) {
 
 int SDL_UpdateTexture(SDL_Texture* t, const SDL_Rect* rect, const void* pixels, int pitch) {
 	if (!t || t->target || !pixels) return -1;
+	t->raw = false;
 	SDL_Rect whole = { 0, 0, t->w, t->h };
 	if (!rect) rect = &whole;
 	if (t->format == SDL_PIXELFORMAT_RGB565) {
@@ -1326,6 +1766,7 @@ int SDL_UpdateTexture(SDL_Texture* t, const SDL_Rect* rect, const void* pixels, 
 		u64 t0 = svcGetSystemTick();
 		bool done = t->w == 240 && t->h == 160 && update_by_cpu_tiled(t, pixels, pitch);
 		if (!done && t->w == 240 && t->h == 160) done = update_from_twin(t, pixels);
+		if (!done && t->w == 240 && t->h == 160) done = update_from_raw(t, pixels, pitch);
 		if (!done) done = update_by_gpu(t, pixels, pitch, 0, t->h);
 		if (!done) done = update_by_cpu(t, rect, pixels, pitch) == 0;
 		if (done) tex_note(t, pixels, pitch);
@@ -1349,8 +1790,9 @@ int SDL_UpdateTexture(SDL_Texture* t, const SDL_Rect* rect, const void* pixels, 
 					        (double) waitEnd / CPU_TICKS_PER_MSEC / (frames ? frames : 1), (double) waitCopy / CPU_TICKS_PER_MSEC / (frames ? frames : 1));
 					waitBegin = waitEnd = waitCopy = 0;
 					if (upTwinTicks) logLine("textures: the picture copied from the render worker's twin instead (no swap, no flush): call %.3f ms", (double) upTwinTicks / per);
+					if (upRawTicks) logLine("textures: the picture copied as it is instead (raw_picture: no swap, no flush): call %.3f ms", (double) upRawTicks / per);
 				}
-				upTicks = upTileTicks = upSwapTicks = upFlushTicks8 = upXferTicks8 = upTwinTicks = 0, upCount = 0;
+				upTicks = upTileTicks = upSwapTicks = upFlushTicks8 = upXferTicks8 = upTwinTicks = upRawTicks = 0, upCount = 0;
 			}
 		}
 		return done ? 0 : -1;
