@@ -1012,12 +1012,15 @@ static void log_upload(const char* path, const char* name) {
 		snprintf(url, sizeof(url), "%s?name=%s", GBADS_LOG_URL, name);
 		httpcContext context;
 		u32 status = 0;
+		/* the body is sent while this waits, and closing the context cuts it off (the server saves it short): allow 4 KiB/s */
+		u64 wait = 3000000000ull + (u64) size * 250000ull;
+		if (wait > 120000000000ull) wait = 120000000000ull;
 		Result rc = httpcOpenContext(&context, HTTPC_METHOD_POST, url, 0);
 		if (R_SUCCEEDED(rc)) {
 			httpcAddRequestHeaderField(&context, "Content-Type", "text/plain");
 			httpcAddPostDataRaw(&context, (const u32*) data, size);
 			rc = httpcBeginRequest(&context);
-			if (R_SUCCEEDED(rc)) rc = httpcGetResponseStatusCodeTimeout(&context, &status, 3000000000ull);
+			if (R_SUCCEEDED(rc)) rc = httpcGetResponseStatusCodeTimeout(&context, &status, wait);
 			httpcCloseContext(&context);
 		}
 		logLine("log upload: %s: %08lX, HTTP %lu", name, (unsigned long) rc, (unsigned long) status);
