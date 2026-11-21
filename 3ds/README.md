@@ -86,7 +86,7 @@ The CIA takes armGBA-3DS's `.rsf` (the 80 MB mode, among others), so `make cia` 
   thread the picture thread widens each picture straight into linear memory with its rows 256 words apart, as the
   texture's are, writes it back itself, and one transfer of the copy engine tiles it as it is, so the game thread does
   no byte swap and no cache flush (what reads the picture as rows of 240 words, `emu_fb()`, gets a copy of it made
-  once a picture, the pixel readers and the HUD's puts use the real rows). The picture's channels then come out in the
+  once a picture; the pixel readers, whole-picture copies and compares (`emu_fb_copy`, `emu_fb_same`) and the HUD's puts use the real rows). The picture's channels then come out in the
   wrong order, and the GPU puts them right when it draws (three texture combiner stages: each channel times an
   all-or-nothing mask, added up; a mix of two channels was off by one on the console, this is exact there). The first game
   opened with the option on runs a self-test that draws pictures both ways, compared word for word, and falls back to

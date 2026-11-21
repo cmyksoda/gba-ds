@@ -89,6 +89,13 @@ static inline uint32_t* emu_fb(Emu* e) {
 	if (e->fbStale) emu_fb_sync(e);
 	return e->fb;
 }
+/* The picture in rows of GBA_W copied to dst (GBA_W * GBA_H words), and whether it is the same as px. */
+static inline void emu_fb_copy(Emu* e, uint32_t* dst) {
+	memcpy(dst, emu_fb(e), GBA_W * GBA_H * sizeof(uint32_t));
+}
+static inline bool emu_fb_same(Emu* e, const uint32_t* px) {
+	return !memcmp(px, emu_fb(e), GBA_W * GBA_H * sizeof(uint32_t));
+}
 /* Painting over the picture goes to fb16 too (mGBA redraws only changed lines, so it starts the next frame from this one). */
 static inline void emu_fb_put(Emu* e, int x, int y, uint32_t c) {
 	e->fb16[y * EMU_FB16_STRIDE + x] = (c & 0xF8) << 8 | (c >> 5 & 0x7C0) | (c >> 19 & 0x1F);
@@ -122,6 +129,20 @@ static inline uint32_t* emu_fb(Emu* e) {
 		++e->fbCompactCopies;
 	}
 	return e->fbCompact;
+}
+/* The same without the copy emu_fb() makes where the rows are further apart (the picture's one reader per picture that only copies or compares it). */
+static inline void emu_fb_copy(Emu* e, uint32_t* dst) {
+	const int pitch = emu_pitch(e);
+	if (pitch == GBA_W || e->fbCompactOk) memcpy(dst, emu_fb(e), GBA_W * GBA_H * sizeof(uint32_t));
+	else for (int y = 0; y < GBA_H; ++y) memcpy(&dst[y * GBA_W], &e->fb[y * pitch], GBA_W * sizeof(uint32_t));
+}
+static inline bool emu_fb_same(Emu* e, const uint32_t* px) {
+	const int pitch = emu_pitch(e);
+	if (pitch == GBA_W || e->fbCompactOk) return !memcmp(px, emu_fb(e), GBA_W * GBA_H * sizeof(uint32_t));
+	for (int y = 0; y < GBA_H; ++y) {
+		if (memcmp(&px[y * GBA_W], &e->fb[y * pitch], GBA_W * sizeof(uint32_t))) return false;
+	}
+	return true;
 }
 static inline uint32_t emu_pixel(Emu* e, int x, int y) {
 	return e->fb[y * emu_pitch(e) + x];
