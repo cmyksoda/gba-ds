@@ -273,6 +273,40 @@ frame in armGBA itself. What cut it, with the same pictures, RAM and sound
   processing without a register shift, not into r15), where the DMA the event
   starts takes the bus at the next instruction's fetch as before
   (`armgba_defer = 0` for the old way, to compare on a console).
+- A flag-setting multiply is followed by a check (its time depends on its
+  operands), so its carry was worked out even where the next instruction sets C
+  again, as almost every one in Crash Nitro Kart's races does (about 800 a
+  frame, each a call through the multiplier's stages). With
+  `armgba_lazy_carry = 1` (off as built, to compare on a console) only that
+  check's way out to the exact CPU works it out.
+- A return into the middle of a block (an interrupt's return, or where the
+  exact CPU stopped after stepping up to an event) can carry on in the block's
+  careful copy, which has a way in before every instruction, instead of the
+  exact CPU stepping the rest of the block: GT Advance 3 stepped about 260
+  instructions a frame that way (`armgba_mid_careful = 1` where a copy is
+  there, `2` also making one as an event inside the block would, `3` as 2 except
+  that a place returned to again and again still gets a block of its own, which
+  runs it faster than the copy; 0 as built, to compare on a console).
+- With the picture drawn on threads, the machine's own renderer is read only for
+  DISPCNT, its latch and what a register reads back: the copies that draw take
+  their state from the log and from `renderThreadClone`. `armgba_cside` is a bit
+  mask of ways the emulation thread does less for that (0 as built, to compare
+  on a console): 1 keeps only those in the machine's renderer (a register write
+  no longer updates the renderer's backgrounds, windows, blends and per-line
+  caches, and a line start no longer runs its affine step); 2 makes a 32-bit
+  write to two video registers one log entry, and with 1 writes the render log's
+  register entries straight into the ring while it has room and takes a DMA run's
+  writes to video registers without `ioWrite` and `ioWrite32`; 4 (with 1 and 2) keeps the register writes of one
+  DMA run to video registers in a batch and logs them as one entry (GT Advance 3
+  moves them 16 bits at a time); 8 makes the exact CPU's decode clear an
+  instruction with stores rather than a call to `memset`. Crash Nitro Kart and
+  GT Advance 3 write about 1300 video registers a frame from their H-blank DMA.
+  16 is for interrupts: the changes of the interrupt controller that only clear
+  a flag (what acknowledging an interrupt does to IE & IF and then to the CPU's
+  IRQ line, a cycle or two after the write) wait in the event list as before,
+  but compiled code no longer stops for them, and whatever looks at what they
+  change (a write to IE, IF or IME, the IRQ line, a saved state) runs the ones
+  due first; GT Advance 3 acknowledges about 220 a frame.
 - `armgba_compile_budget` (ms of compiling a frame of the game may take before code met for the first times is put off,
   1.5 as built; 1000 never puts any off) is a knob for comparing on a console: careful copies no longer wait for it.
 - The interrupt pipeline's events and a halfword store to an I/O register
