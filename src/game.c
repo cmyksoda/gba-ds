@@ -7750,8 +7750,14 @@ static void hud_logo_surface_drop(void) {
 	hudLogoSurf = NULL;
 }
 
+/* A game with a HUD or a fight picture draws its logo in a frame, so the decoded logo is kept (a fight's first frame read and
+ * decoded the file: 68-70 ms in Zoids: Legacy and Advance Wars 2) */
+static bool logo_kept(void) {
+	return hudProf || combatProf || tallProf;
+}
+
 static SDL_Surface* hud_logo_surface(bool* pixelArt, int* sub) {
-	if (!hudProf) return ui_logo_surface(cfg, romPath, emu.gameCode, pixelArt, sub);
+	if (!logo_kept()) return ui_logo_surface(cfg, romPath, emu.gameCode, pixelArt, sub);
 	if (!hudLogoSurf) hudLogoSurf = ui_logo_surface(cfg, romPath, emu.gameCode, &hudLogoPixel, &hudLogoSub);
 	*pixelArt = hudLogoPixel, *sub = hudLogoSub;
 	return hudLogoSurf;
@@ -7760,10 +7766,48 @@ static SDL_Surface* hud_logo_surface(bool* pixelArt, int* sub) {
 /* (the logo's file read now, at the start or when the logo changes, where the frame has no hurry) */
 static void hud_logo_prime(void) {
 	hud_logo_surface_drop();
-	if (!hudProf) return;
+	if (!logo_kept()) return;
 	bool pixelArt;
 	int sub;
 	hud_logo_surface(&pixelArt, &sub);
+}
+
+/* The logo (nearest-neighbour to w x h) blended over the canvas at x0, y0. Each column's source is worked out once (a division a
+ * pixel was most of the 11 ms of a 372x142 logo), and a wholly opaque pixel is stored as the blend comes to, not worked out. */
+static void logo_blit(uint32_t* px, int cw, const SDL_Surface* lg, int w, int h, int x0, int y0, int alpha) {
+	int* col = malloc(sizeof(int) * (size_t) w);
+	if (col) {
+		for (int x = 0; x < w; ++x) col[x] = x * lg->w / w;
+	}
+	for (int y = 0; y < h; ++y) {
+		const uint8_t* row = (const uint8_t*) lg->pixels + (size_t) (y * lg->h / h) * lg->pitch;
+		for (int x = 0; x < w; ++x) {
+			const uint8_t* p = row + (size_t) (col ? col[x] : x * lg->w / w) * 4; /* RGBA32: bytes R, G, B, A */
+			int a = p[3] * alpha / 255;
+			if (!a) continue;
+			uint32_t* o = &px[(y0 + y) * cw + x0 + x];
+			if (a == 255) {
+				*o = 0xFF000000 | p[0] | (uint32_t) p[1] << 8 | (uint32_t) p[2] << 16;
+				continue;
+			}
+			uint32_t out = 0xFF000000;
+			for (int c = 0; c < 3; ++c) {
+				int bg = (*o >> (c * 8)) & 0xFF;
+				out |= (uint32_t) (bg + (p[c] - bg) * a / 255) << (c * 8); /* ABGR8888 */
+			}
+			*o = out;
+		}
+	}
+	free(col);
+}
+
+/* The HUD's logo pictures that depend on the logo alone, drawn where the frame has no hurry (a held picture or the level's
+ * name decides the one under the HUD: that one waits for its use) */
+static void hud_logo_pictures(void) {
+	if (!hudProf) return;
+	const typeof(hudProf->hud)* h = &hudProf->hud;
+	if (h->card.tile) card_logo();
+	if ((h->logoBelow || h->logoBehind) && !h->held.y1 && !h->mapTitleRows && !hudLogoBelowDone) hud_make_logo_below();
 }
 
 static bool logo_draw(uint32_t* px, int cw, int ch, int k, int top, int alpha) {
@@ -7771,7 +7815,7 @@ static bool logo_draw(uint32_t* px, int cw, int ch, int k, int top, int alpha) {
 	int sub = 1;
 	SDL_Surface* lg = hud_logo_surface(&pixelArt, &sub);
 	if (!lg) return false;
-	SDL_Surface* const kept = hudProf ? lg : NULL; /* (the cache's own: not freed here) */
+	SDL_Surface* const kept = logo_kept() ? lg : NULL; /* (the cache's own: not freed here) */
 	int room = ch - top;
 	if (room <= 0) {
 		/* (no room below a HUD that fills the screen: Mega Man Battle
@@ -7796,21 +7840,7 @@ static bool logo_draw(uint32_t* px, int cw, int ch, int k, int top, int alpha) {
 	/* centred on the canvas, or with a HUD above it in the room below */
 	int x0 = (cw - w) / 2, y0 = top ? top + (room - h) / 2 : (ch - h) / 2;
 	SDL_LockSurface(lg);
-	for (int y = 0; y < h; ++y) {
-		const uint8_t* row = (const uint8_t*) lg->pixels + (size_t) (y * lg->h / h) * lg->pitch;
-		for (int x = 0; x < w; ++x) {
-			const uint8_t* p = row + (size_t) (x * lg->w / w) * 4; /* RGBA32: bytes R, G, B, A */
-			int a = p[3] * alpha / 255;
-			if (!a) continue;
-			uint32_t* o = &px[(y0 + y) * cw + x0 + x];
-			uint32_t out = 0xFF000000;
-			for (int c = 0; c < 3; ++c) {
-				int bg = (*o >> (c * 8)) & 0xFF;
-				out |= (uint32_t) (bg + (p[c] - bg) * a / 255) << (c * 8); /* ABGR8888 */
-			}
-			*o = out;
-		}
-	}
+	logo_blit(px, cw, lg, w, h, x0, y0, alpha);
 	SDL_UnlockSurface(lg);
 	if (lg != kept) SDL_FreeSurface(lg);
 	return true;
@@ -8302,6 +8332,7 @@ static void ss_setup(const char* rom, const char* code) {
 	logoOnly = false;
 	snapProf = NULL;
 	tallProf = NULL;
+	combatProf = NULL;
 	tallOn = false;
 	tallLive = false;
 	hudProf = NULL;
@@ -8532,6 +8563,7 @@ static void logo_refresh(void) {
 	make_logo_canvas();
 	hudLogoBelowDone = hudLogoDone = false; /* the HUD's pictures with it */
 	cardLogoMade = false;
+	hud_logo_pictures();
 	if (combatMade) {
 		/* and the fight picture (and the map picture's logo behind) */
 		make_combat_canvas();
@@ -8680,6 +8712,7 @@ static enum GameExit game_run_inner(Config* c, const char* rom, bool fromLibrary
 	if (ui_load_logo(cfg, rom, emu.gameCode, logoTex, &logoW, &logoH, &logoPixel)) make_logo_canvas();
 	logoProvisional = ui_logo_provisional();
 	hud_logo_prime();
+	hud_logo_pictures();
 
 	memset(pageLen, 0, sizeof(pageLen));
 	memset(rowN, 0, sizeof(rowN));
