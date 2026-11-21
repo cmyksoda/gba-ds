@@ -293,10 +293,10 @@ frame in armGBA itself. What cut it, with the same pictures, RAM and sound
   mask of ways the emulation thread does less for that (0 as built, to compare
   on a console): 1 keeps only those in the machine's renderer (a register write
   no longer updates the renderer's backgrounds, windows, blends and per-line
-  caches, and a line start no longer runs its affine step); 2 writes the render
-  log's entries straight into the ring while it has room, as one entry for the
-  two registers of a 32-bit write, and takes video registers first in
-  `ioWrite` and `ioWrite32`; 4 (with 1 and 2) keeps the register writes of one
+  caches, and a line start no longer runs its affine step); 2 makes a 32-bit
+  write to two video registers one log entry, and with 1 writes the render log's
+  register entries straight into the ring while it has room and takes a DMA run's
+  writes to video registers without `ioWrite` and `ioWrite32`; 4 (with 1 and 2) keeps the register writes of one
   DMA run to video registers in a batch and logs them as one entry (GT Advance 3
   moves them 16 bits at a time); 8 makes the exact CPU's decode clear an
   instruction with stores rather than a call to `memset`. Crash Nitro Kart and
