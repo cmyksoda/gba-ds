@@ -2811,7 +2811,7 @@ static bool wct_view(Emu* s) {
 static bool wct_named(Emu* e) {
 	int white = 0;
 	for (int y = 151; y < 159; ++y)
-		for (int x = 2; x < 120; ++x) white += (e->fb[y * GBA_W + x] & 0xFFFFFF) == 0xFFFFFF;
+		for (int x = 2; x < 120; ++x) white += (emu_pixel(e, x, y) & 0xFFFFFF) == 0xFFFFFF;
 	return white >= 12;
 }
 /* in a duel: both players' life points (0 out of a duel for the one that
@@ -2990,7 +2990,7 @@ static bool um6_named(Emu* e) {
 	int n = 0;
 	for (int y = 146; y < 160; ++y)
 		for (int x = 0; x < GBA_W; ++x) {
-			uint32_t c = e->fb[y * GBA_W + x] & 0xFFFFFF;
+			uint32_t c = emu_pixel(e, x, y) & 0xFFFFFF;
 			n += c == 0xFF0000 || c == 0x0000FF; /* (the fb is ABGR: red and blue swap, both are counted) */
 		}
 	return n >= 20;
@@ -3162,7 +3162,7 @@ static uint32_t dmk_virt(Emu* e, uint32_t addr) {
 			/* the cursor's slot and the name bar's pixels (the card under it) */
 			uint32_t h = 2166136261u;
 			for (int y = 128; y < 140; ++y)
-				for (int x = 8; x < 232; x += 2) h = (h ^ (e->fb[y * GBA_W + x] & 0xFFFFFF)) * 16777619u;
+				for (int x = 8; x < 232; x += 2) h = (h ^ (emu_pixel(e, x, y) & 0xFFFFFF)) * 16777619u;
 			k |= (emu_read8(e, 0x0300145A) << 16) | (h & 0xFFFF);
 		}
 		return k;
@@ -3250,7 +3250,7 @@ static bool yw_view(Emu* s) {
 static bool yw_named(Emu* e) {
 	int white = 0;
 	for (int y = 151; y < 159; ++y)
-		for (int x = 2; x < 120; ++x) white += (e->fb[y * GBA_W + x] & 0xFFFFFF) == 0xFFFFFF;
+		for (int x = 2; x < 120; ++x) white += (emu_pixel(e, x, y) & 0xFFFFFF) == 0xFFFFFF;
 	return white >= 12;
 }
 /* the duel's state byte: 8 through the opponent's whole turn (YWC-8) */
@@ -3278,7 +3278,7 @@ static uint32_t yw_virt_for(const YwRelease* r, Emu* e, uint32_t addr) {
 		if (sc == YW_FIELD) {
 			uint32_t h = 2166136261u;
 			for (int y = 151; y < 159; ++y)
-				for (int x = 2; x < 120; ++x) h = (h ^ (e->fb[y * GBA_W + x] & 0xFFFFFF)) * 16777619u;
+				for (int x = 2; x < 120; ++x) h = (h ^ (emu_pixel(e, x, y) & 0xFFFFFF)) * 16777619u;
 			h = (h ^ emu_read8(e, r->state)) * 16777619u; /* a capture again once the state settles */
 			k |= (h & 0x0FFFFFFF);
 		} else if (sc == YW_LIST) k |= emu_read8(e, r->list);
