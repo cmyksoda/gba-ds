@@ -110,11 +110,13 @@ The CIA takes armGBA-3DS's `.rsf` (the 80 MB mode, among others), so `make cia` 
   Save states are mGBA's, as on every other system: states made with the desktop build load on the 3DS
   (the other way hasn't been tried).
 
-Buttons: A, B, L, R, START, SELECT and the D-pad (or the Circle Pad) are the GBA's. **ZL** is GBA DS's
-menu button (its HOME: the pause menu, and held with another button, the hotkeys: ZL + R saves a
-state, ZL + L loads it, ZL + X the quick menu, ZL + Y swaps the screens, ZL + B changes the shader,
-ZL + START closes the game). **ZR** is fast-forward, without sound (`ff_mute = 0` in `gba-ds.cfg`
-plays it sped up). The menus also work by touch.
+Buttons: A, B, L, R, START, SELECT and the D-pad (or the Circle Pad) are the
+GBA's. **ZL** is GBA DS's menu button (its HOME: the pause menu, and held
+with another button, the hotkeys: ZL + R saves a state, ZL + L loads it, ZL +
+X the quick menu, ZL + Up swaps the screens, ZL + B closes the game, ZL +
+START closes GBA DS; as GBA DS 1.6 has them).
+**ZR** is fast-forward, without sound (`ff_mute = 0` in `gba-ds.cfg` plays
+it sped up). The menus also work by touch.
 
 The first time a folder of games is read, each file is opened once for its game code ("Loading
 games..." on the bottom screen: a few seconds per hundred files); the codes are kept in
@@ -193,6 +195,18 @@ Castlevania: Circle of the Moon at 60 frames a second with its map on the
 bottom screen, save states and fast-forward. Pokémon Pinball froze on its table
 with 0.0.1-alpha; 0.0.2-alpha's fix (see "What isn't there") has been checked in
 Azahar, not yet on a console.
+
+0.0.7-alpha (2026-11-24: GBA DS 1.6.2-dev and armGBA-3DS 1.0, which is
+upstream armGBA 2.0's core) has not been on a console yet. On the desktop:
+all 57 play scripts ran to the end on libmgba and on armGBA drawn as the 3DS
+draws (`3ds/test/dualrun.py --runs mgba,armgba-3ds`), with the two emulators'
+screens as close as before the merge, shot for shot (the scripts swap the
+screens with HOME + Up now, as GBA DS 1.6 has it). In Azahar:
+the game list, Mario Kart: Super Circuit into its menus at 59.8 frames a
+second with no sound underrun, and the pause menu; the interface in
+Traditional Chinese (`ctr/fonts_ctr.c` leaves out the two Chinese faces
+that hold whole character sets for file names, 7 MiB of program: the
+interface's own text is whole, a Chinese file name may show boxes).
 
 Every supported game, on the desktop build of the app on armGBA
 (`3ds/sim/app.mk`) against the same app on libmgba, with
@@ -363,9 +377,10 @@ the console; Azahar's copies finish at once).
 
 ## armGBA
 
-`third_party/armgba` is armGBA-3DS: armGBA's main with the 3DS port on top
-(ratherDashing/armGBA). Every build that compiles it copies its `src/` into the build folder and applies
-`emu/armgba-patches/*.patch` there (`emu/armgba.mk`), so the submodule stays at its public commit and clean.
+`third_party/armgba` is armGBA-3DS 1.0: upstream armGBA 2.0's core, file for
+file, with the 3DS port's `platform/3ds` on top (ratherDashing/armGBA). Everything
+below that GBA DS needs of the core is in upstream armGBA now.
+
 What GBA DS uses of it that other frontends don't:
 
 - `struct RenderHooks` (`src/video/render.h`): layers and sprites left out
@@ -373,11 +388,14 @@ What GBA DS uses of it that other frontends don't:
   a renderer of its own beside the first (the HUD split). Kept beside the
   machine, not in it: states are unchanged. The second picture can be drawn
   one frame in `secondEvery` (`secondCount` says when there's a new one).
-- `videoDrawSkipped` per thread (the hidden copy runs frames it doesn't draw
+- `videoSetDrawSkipped` per thread (the hidden copy runs frames it doesn't draw
   on a thread of its own).
 
 `ctr/jitmem.c` is armGBA's `platform/3ds/source/jitmem.c` with code memory
 for several machines at once (the game: up to 16 MiB; each copy: up to 4).
+
+Every build that compiles it copies its `src/` into the build folder and applies `emu/armgba-patches/*.patch` there
+(`emu/armgba.mk`), so the submodule stays at its public commit and clean.
 
 ## Files
 
