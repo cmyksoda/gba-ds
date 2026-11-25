@@ -290,10 +290,12 @@ frame in armGBA itself. What cut it, with the same pictures, RAM and sound
   return, line after line) gets a block of its own after 16 returns, in place
   of the rest of the block being stepped on the exact CPU
   (`armgba_mid_after`; 0 steps as before; at most one such block for each
-  16 KiB of code memory between flushes).
-- The render log's entries reach its workers once a line, and the sound log
-  takes one barrier an entry instead of three: the ARM11's barriers are slow
-  (`armgba_lean_logs = 0` for the old way, to compare on a console).
+  16 KiB of code memory between flushes). Where the block has a careful copy,
+  armGBA 2.0 carries on in it instead.
+- The sound log takes one barrier an entry instead of three, as armGBA 2.0's
+  render log reaches its workers once a line: the ARM11's barriers are slow
+  (`armgba_lean_logs = 0` puts a barrier at every entry of the sound log, to
+  compare on a console).
 - A careful copy lets more events run after the instruction they fall in, not
   inside it on the exact CPU: a sound timer's overflow that asks its FIFO's DMA
   for nothing, and any event at all when the instruction only fetches (data
@@ -310,10 +312,10 @@ frame in armGBA itself. What cut it, with the same pictures, RAM and sound
   exact CPU stopped after stepping up to an event) can carry on in the block's
   careful copy, which has a way in before every instruction, instead of the
   exact CPU stepping the rest of the block: GT Advance 3 stepped about 260
-  instructions a frame that way (`armgba_mid_careful = 1` where a copy is
-  there, `2` also making one as an event inside the block would, `3` as 2 except
+  instructions a frame that way (armGBA 2.0 does it where a copy is there, as
+  `armgba_mid_careful = 1` did; `2` also makes one as an event inside the block would, `3` as 2 except
   that a place returned to again and again still gets a block of its own, which
-  runs it faster than the copy; the 3DS default is 3, 0 to compare). On a New 2DS XL
+  runs it faster than the copy; the 3DS default is 3, 0 or 1 to compare). On a New 2DS XL
   these two (at level 2; 3 timed the same) took 0.05 to 0.3 ms a frame off Crash Nitro Kart, Tactics Ogre and Super Mario Advance 2.
 - With the picture drawn on threads, the machine's own renderer is read only for
   DISPCNT, its latch and what a register reads back: the copies that draw take
@@ -327,8 +329,8 @@ frame in armGBA itself. What cut it, with the same pictures, RAM and sound
   register entries straight into the ring while it has room and takes a DMA run's
   writes to video registers without `ioWrite` and `ioWrite32`; 4 (with 1 and 2) keeps the register writes of one
   DMA run to video registers in a batch and logs them as one entry (GT Advance 3
-  moves them 16 bits at a time); 8 makes the exact CPU's decode clear an
-  instruction with stores rather than a call to `memset`. Crash Nitro Kart and
+  moves them 16 bits at a time); 8 did nothing more once the exact CPU stepped on armGBA 2.0's
+  table-driven interpreter, which doesn't decode, and is gone. Crash Nitro Kart and
   GT Advance 3 write about 1300 video registers a frame from their H-blank DMA.
   16 is for interrupts: the changes of the interrupt controller that only clear
   a flag (what acknowledging an interrupt does to IE & IF and then to the CPU's
@@ -338,16 +340,17 @@ frame in armGBA itself. What cut it, with the same pictures, RAM and sound
   due first; GT Advance 3 acknowledges about 220 a frame.
 - `armgba_compile_budget` (ms of compiling a frame of the game may take before code met for the first times is put off,
   1.5 as built; 1000 never puts any off) is a knob for comparing on a console: careful copies no longer wait for it.
-- The interrupt pipeline's events and a halfword store to an I/O register
-  take shorter ways through the core.
+- A timer's test of whether an event can run after its instruction leaves other
+  events alone at once.
 - A compile no longer clears the 21 KB of state it kept for the worst case, only
   what it uses: Golden Sun 2's second of Sol Sanctum compiles about a thousand
   blocks at once. `armgba_compile_after` (2 as built) is how many visits to a
   new block are stepped on the exact CPU before it compiles; a console can try
   4 to 16 where bursts like that are the slow part.
-- A flush hands back every block's records in one go (they are kept in an arena)
-  instead of freeing 4 to 8 pieces a block: Golden Sun 2's flush of 8,700 blocks
-  took 28.6 ms in Azahar and takes 4.7. The game's code memory is 24 MiB, not 16, when
+- A full code memory reclaims its least used slot instead of flushing (armGBA 2.0),
+  so the arena that let a flush hand back every block's records in one go (Golden
+  Sun 2's flush of 8,700 blocks: 28.6 ms in Azahar, then 4.7) is gone. The game's
+  code memory is 24 MiB, not 16, when
   the heap has the room: Golden Sun 2 and Sword of Mana filled 16 MiB in their long
   routes, and each flush was a long frame and a few seconds of recompiling. In a bench
   job the `armgba_stats = N` lines (what compiled, why and when it flushed, the code
