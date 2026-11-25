@@ -985,7 +985,7 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 		goto fail;
 	}
 	struct GBA* gba = c->gba;
-	threadLogsLean = !getenv("GBADS_ARMGBA_LEAN_LOGS") || atoi(getenv("GBADS_ARMGBA_LEAN_LOGS")); /* (armgba_lean_logs = 0: a barrier at every entry of the render and sound logs) */
+	threadLogsLean = !getenv("GBADS_ARMGBA_LEAN_LOGS") || atoi(getenv("GBADS_ARMGBA_LEAN_LOGS")); /* (armgba_lean_logs = 0: a barrier at every entry of the sound log) */
 	c->compileBudget = getenv("GBADS_ARMGBA_COMPILE_BUDGET") ? (uint64_t) (atof(getenv("GBADS_ARMGBA_COMPILE_BUDGET")) * 268111.856) : 268111 * 3 / 2; /* (armgba_compile_budget, in ms: 1.5 when unset) */
 	jitSetCompileAfter(getenv("GBADS_ARMGBA_COMPILE_AFTER") ? atoi(getenv("GBADS_ARMGBA_COMPILE_AFTER")) : 0); /* (armgba_compile_after: 0 when unset, so a bench job after another gets the built 2 back) */
 	if (getenv("GBADS_ARMGBA_MID_AFTER")) jitSetMidAfter(gba, atoi(getenv("GBADS_ARMGBA_MID_AFTER"))); /* (armgba_mid_after: 0 steps every return into a block) */
@@ -993,7 +993,6 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 	if (getenv("GBADS_ARMGBA_LAZY_CARRY")) jitSetLazyCarry(gba, atoi(getenv("GBADS_ARMGBA_LAZY_CARRY")) != 0); /* (armgba_lazy_carry = 1: a console A/B) */
 	if (getenv("GBADS_ARMGBA_MID_CAREFUL")) jitSetMidCareful(gba, atoi(getenv("GBADS_ARMGBA_MID_CAREFUL"))); /* (armgba_mid_careful = 1, 2 or 3: a console A/B) */
 	gbaCside = getenv("GBADS_ARMGBA_CSIDE") ? (uint32_t) atoi(getenv("GBADS_ARMGBA_CSIDE")) : 0; /* (armgba_cside: a bit mask of exact C-side savings, 0 when unset; a console A/B) */
-	if (!threadLogsLean) gbaCside &= ~(uint32_t) CSIDE_FAST_LOG; /* (that one writes the logs' entries without publishing each) */
 	c->hooks.context = c;
 	renderSetHooks(gba, &c->hooks);
 	gbaLoadBios(gba, armgbaBios, SIZE_BIOS);
