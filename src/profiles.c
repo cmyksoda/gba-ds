@@ -5388,6 +5388,8 @@ static const uint32_t* mmbn_live_view(Emu* live, const char* rom) {
 	return out;
 }
 
+static void bgd_live_end(void);
+
 /* The game's over: the map's worker stopped, and its copy of the game (a whole machine and a share of the ROM) and
  * its state closed, which kept about 20 MiB of the heap for the rest of the run. */
 void profile_live_end(void) {
@@ -5402,6 +5404,7 @@ void profile_live_end(void) {
 	mmbnBusy = false;
 	for (int i = 0; i < SCRATCH_N; ++i) free(scratch[i].p);
 	memset(scratch, 0, sizeof(scratch));
+	bgd_live_end();
 }
 
 /* A state of the hidden copy's for a composer that takes the picture apart and
@@ -7933,6 +7936,20 @@ out:
 	}
 	bgdBusy = false;
 	return NULL;
+}
+
+/* The game's over: as MMBN's (profile_live_end). Kept, the copy held about 19 MiB of the heap and the ROM, and no
+ * 32 MiB game could start after Baldur's Gate in the same run (2026-11-25). */
+static void bgd_live_end(void) {
+	bgdStop = true;
+	if (bgdThread) pthread_join(bgdThread, NULL), bgdThread = 0;
+	if (bgdEmuOpen) emu_close(&bgdEmu), bgdEmuOpen = false;
+	free(bgdJob);
+	bgdJob = NULL;
+	bgdJobSize = 0;
+	free(bgdMap.px);
+	memset(&bgdMap, 0, sizeof(bgdMap));
+	bgdBusy = false;
 }
 
 /* the map dropped (called off first if it's still being made: false until it's stopped) */
