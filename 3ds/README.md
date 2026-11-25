@@ -152,17 +152,24 @@ the game list comes up, and this run's when the app closes. Build without `LOG_U
 
 ## Memory
 
-A New 3DS gives homebrew 64 MiB: about 46 MiB of heap here, after 12 MiB of
-linear memory for the GPU and the sound. The game's ROM, the recompiler's
-code (what is left after the ROM and 15 MiB kept for the rest, up to 16 MiB:
-about 13 MiB with Mario Kart; 22 MiB kept for a game with a hidden copy:
-about 8 MiB with Yoshi's Island; up to 24 MiB when the heap has 8 MiB to
-spare beyond that, as a console with 84 MiB free has for a game of up to 20 MiB), the
-hidden copy and its code (up to 4 MiB) share it. When the heap runs low, each machine's recompiler empties its own
-code memory (`jitHostMemoryLow`, counted per thread). The emulator tests run
-with the same heap, not the 124 MiB an emulator would give
-(`make EMU_HEAP_KIB=86700` gives Azahar the 84 MiB free a New 3DS console has at a job's start, for
-code memory tests).
+The `.3dsx` started from the Homebrew Launcher gets the 64 MB mode: a heap of 41,568 KiB (2026-11-12). The bench's
+programs on a New 2DS XL had 87,480 KiB with 0.0.6-alpha. GBA DS 1.6's program is 12 MiB larger (pictures and buffers
+its profiles keep for the whole run, Harvest Moon's 4 MiB canvas among them, and the interface's fonts), so
+0.0.7-alpha's heap is about 75 MiB there, and so about 29 MiB in the 64 MB mode, after 12 MiB of linear memory for the
+GPU and the sound. The game's ROM, the recompiler's code (what is left after the ROM and 15 MiB kept for the rest, up
+to 16 MiB: about 13 MiB with Mario Kart; 22 MiB kept for a game with a hidden copy: about 8 MiB with Yoshi's Island,
+12 MiB with MOTHER 3; up to 24 MiB when the heap has 8 MiB to spare beyond that), the hidden copy and its code share
+it. When the heap runs low, each machine's recompiler empties its own code memory (`jitHostMemoryLow`, counted per
+thread).
+
+The hidden copy's code memory, and that of the other copies a profile runs, is `armgba_copy_code_mib`: `auto` by
+default, which is 8 MiB (with 4 the hidden copy kept filling it and starting over), but 4 MiB while a game whose ROM
+is over 16 MiB plays. With 8 there, MOTHER 3's heap fell under the 4 MiB the recompiler keeps free and the game
+emptied its own code 13 times in its five-minute route in Azahar, with frames of up to 276 ms; with 4, not once, and
+the hidden copy's captures took no longer (Yu-Gi-Oh! Ultimate Masters 2006: 17 times, then none; Kingdom Hearts: Chain
+of Memories: 6, then once). A number from 1 to 16 sets it for every game; above 4 only on a heap of 64 MiB or more.
+The emulator tests run with the console's heap, not the 124 MiB an emulator gives (`make EMU_HEAP_KIB=87700` gives
+Azahar the bench's console heap of 0.0.6-alpha, for code memory tests; without it, the 64 MB mode's).
 
 A game's ROM is read once and shared by every copy of the game (the game, the hidden copy, a logo's),
 and kept at the top of the heap's address range with the heap's end brought down below it, so even a
@@ -170,10 +177,13 @@ and kept at the top of the heap's address range with the heap's end brought down
 are made, and the game's code memory goes to the top as well, under the ROM, when the break leaves it room: the
 heap's peak then holds no 16-24 MiB of code, so a small block a game leaves behind (it is made at the peak) can't hold the
 break above the room the next 32 MiB ROM needs (a bench session of 54 games left MOTHER 3 no room on a 62 MiB heap before
-this). The hidden copy's scratch states go back with the game for the same reason. mGBA's own large blocks (a ROM copy for a copy of the game
-that writes to it) come from there too (`mgba/memory-map-hook.patch`). MOTHER 3 starts in the 64 MB mode
-with about 9 MiB of the heap free; the CIA asks for the 80 MB mode. The Azahar emulator gives 124 MiB;
-`host.c` keeps the heap to the console's size there, so that what is tested is what the console has.
+this). The hidden copy's scratch states go back with the game for the same reason, and so do the scaling pipeline's
+textures (made again when next needed) and Baldur's Gate: Dark Alliance's copy of the game for its live map: kept,
+they held the break up after the game, and no 32 MiB game could start after Baldur's Gate in the same run. mGBA's own
+large blocks (a ROM copy for a copy of the game that writes to it) come from there too (`mgba/memory-map-hook.patch`).
+The 32 MiB games need more than the 64 MB mode's heap (tried in Azahar with it, before GBA DS 1.6 and since); the CIA
+asks for the 80 MB mode. The Azahar emulator gives 124 MiB; `host.c` keeps the heap to the console's size there, so
+that what is tested is what the console has.
 
 ## What has and hasn't been tested
 
@@ -227,8 +237,10 @@ Not tested on a console: most games' speed. Where a profile depends on exactly
 how mGBA times something, armGBA may differ: the two emulators drift a few
 frames apart within a minute of play (a game's timing, not its picture), so a
 second screen that changes on a particular frame may change a frame or two
-later. A 32 MiB game with a hidden copy hasn't been tried (there may not be the
-memory for both: the game runs, the second screen may not).
+later. The 32 MiB games with a hidden copy (MOTHER 3, Kingdom Hearts: Chain of
+Memories, Yu-Gi-Oh! Ultimate Masters 2006) play their bench routes in Azahar with the
+console's heap, and one after another in one run (Kingdom Hearts and Ultimate Masters whole, then
+MOTHER 3; 2026-11-25); not yet on a console.
 
 In the Azahar emulator with the 3DS app on the mGBA core (2126.2, a New 3DS whose CPU it runs at 268 MHz, a third of
 the console's 804), with the heap kept to the console's size:
@@ -267,8 +279,8 @@ gets its races to 60 frames a second on a New 3DS:
 - The recompiler: a warm list per game (`sdmc:/3ds/gba-ds/warm/`, the code
   the game ran, compiled in the frames' spare time next time, up to 20% of the
   code memory); at most 1.5 ms of compiling in a frame; the code memory
-  emptied between races once it's 75% full (when it's full the recompiler
-  empties it itself, a 100-300 ms frame). armGBA's side: no blocks compiled
+  emptied between races once it's 75% full (when it's full, armGBA 2.0
+  reclaims its least used slot). armGBA's side: no blocks compiled
   from where an interrupt returns or an event falls (but for a place returned
   to 16 times, `armgba_mid_after`), careful copies only
   for blocks events fall in often and in at most a third of the code
@@ -290,7 +302,8 @@ frame in armGBA itself. What cut it, with the same pictures, RAM and sound
   return, line after line) gets a block of its own after 16 returns, in place
   of the rest of the block being stepped on the exact CPU
   (`armgba_mid_after`; 0 steps as before; at most one such block for each
-  16 KiB of code memory between flushes). Where the block has a careful copy,
+  16 KiB of code memory, counted while the blocks are in it, so a code slot
+  armGBA 2.0 reclaims makes room for more). Where the block has a careful copy,
   armGBA 2.0 carries on in it instead.
 - The sound log takes one barrier an entry instead of three, as armGBA 2.0's
   render log reaches its workers once a line: the ARM11's barriers are slow
@@ -359,7 +372,8 @@ frame in armGBA itself. What cut it, with the same pictures, RAM and sound
 - `make PGO=use` builds armGBA's files from a profile (`3ds/emu/pgo/`, made
   with `PGO=gen` and `3ds/emu/pgo-train.py`; both builds need `BUILD=build/gen`,
   emptied first: GCC names a static function's profile by its object's path):
-  about 6% less to emulate in Azahar. A function whose code or line number
+  about 7% less to emulate in Azahar (4.8 to 8.5% in nine stretches, 2026-11-25, with the profile made on armGBA 2.0
+  and patches 0001-0020). A function whose code or line number
   changed since the profile was made loses its profile (`PGO_QUIET=` lists
   them): redo it after armGBA changes. `HOTCOLD=1` also keeps the profile's
   hot code together.
@@ -395,7 +409,13 @@ What GBA DS uses of it that other frontends don't:
   on a thread of its own).
 
 `ctr/jitmem.c` is armGBA's `platform/3ds/source/jitmem.c` with code memory
-for several machines at once (the game: up to 16 MiB; each copy: up to 4).
+for several machines at once (the game: up to 16 MiB, 24 with room to spare; each copy: up to 8, 4 beside a 32 MiB
+game; see Memory).
+
+Of the patches in `emu/armgba-patches/`, two are not speedups: 0019 fixes a crash in armGBA 2.0 itself (a flush asked
+for while the exact CPU steps an instruction for a careful copy freed the blocks the copy went on in; found on the IRQ
+torture ROMs; none of the 82 bench games did it in its first minute), and 0018 keeps a timer write's event time as
+armGBA 2.0 leaves it, so a saved state is the same bytes as 2.0's and the exactness checks compare states as they are.
 
 Every build that compiles it copies its `src/` into the build folder and applies `emu/armgba-patches/*.patch` there
 (`emu/armgba.mk`), so the submodule stays at its public commit and clean.
