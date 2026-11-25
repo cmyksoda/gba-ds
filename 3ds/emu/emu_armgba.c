@@ -941,6 +941,13 @@ static const uint8_t* own_bios(void) {
 	return file;
 }
 
+/* (testing, as emu.c's: GBADS_RTC_FIXED=<unix seconds> holds the cartridge clock still; the bench sets it) */
+static int64_t rtcFixed;
+static int64_t rtc_fixed_now(void* context) {
+	(void) context;
+	return rtcFixed;
+}
+
 bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 	memset(e, 0, sizeof(*e));
 	e->fbPitch = GBA_W;
@@ -1142,6 +1149,10 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 #ifdef __3DS__
 	c->codeCore = host_core_now();
 #endif
+	if (getenv("GBADS_RTC_FIXED")) {
+		rtcFixed = atoll(getenv("GBADS_RTC_FIXED"));
+		gba->gpio.clock = rtc_fixed_now;
+	}
 	gbaReset(gba, true);
 	gba->savedata.dirty = false;
 #ifdef __3DS__

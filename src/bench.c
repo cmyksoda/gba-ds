@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 enum { WINDOW = 60 };
@@ -310,6 +311,10 @@ bool bench_run(Config* cfg) {
 	cfg->vsync = false;
 	cfg->matchDisplay = false;
 	setenv("GBADS_NOPACE", "1", 1);
+	/* the cartridge clock held still (Boktai, Ruby, Sapphire, Emerald read it), the same instant and zone in every program and run */
+	setenv("GBADS_RTC_FIXED", "1795521600", 0); /* (2026-11-24 12:00 UTC) */
+	setenv("TZ", "UTC0", 1);
+	tzset();
 	active = true;
 	char line[1024], msg[1200];
 	int done = 0;
