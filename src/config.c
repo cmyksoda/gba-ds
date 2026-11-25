@@ -72,7 +72,7 @@ void config_defaults(Config* c) {
 	c->ffSpeed = 3;
 #ifdef __3DS__
 	strcpy(c->idleLoops, "known"); /* (skips the known waiting loops; "remove" is the cycle-exact setting) */
-	strcpy(c->armgba[6], "8"); /* (armgba_copy_code_mib: at 4 MiB the hidden copy keeps filling its code memory and starting over) */
+	strcpy(c->armgba[6], "auto"); /* (armgba_copy_code_mib: 8, as at 4 the hidden copy keeps filling its code memory and starting over; 4 beside a 32 MiB ROM: jitmem.c) */
 	c->overlayMode = OVM_OFF; /* (black beside the picture, as most emulators show it) */
 	c->ffMute = 1;
 	c->tallLive = false; /* (Pinball's live view runs two more copies of the game, two frames each, every frame) */

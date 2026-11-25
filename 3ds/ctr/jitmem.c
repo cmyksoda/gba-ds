@@ -70,6 +70,12 @@ void host_jit_main(bool main, size_t romToLoad, bool hiddenCopy) {
 	hiddenPending = hiddenCopy;
 }
 
+// The ROM of the game being played, in bytes (0: none).
+static size_t gameRom;
+void host_jit_game_rom(size_t bytes) {
+	gameRom = bytes;
+}
+
 static bool makeExecutable(uint8_t* code, size_t size, bool* protected) {
 	if (!self && R_FAILED(svcDuplicateHandle(&self, CUR_PROCESS_HANDLE))) {
 		self = 0;
@@ -186,7 +192,9 @@ void* jitHostAllocCode(size_t* size) {
 		/* (armgba_copy_code_mib: the same for the hidden copy and the other machines, 1 to 16; above 4 only on a heap
 		 * of 64 MiB or more, since HEAP_LATER_HIDDEN was tuned with 4 on the 64 MiB mode's smaller heap) */
 		const char* copyWanted = getenv("GBADS_ARMGBA_COPY_CODE_MIB");
-		int const copyMib = copyWanted ? atoi(copyWanted) : 0;
+		/* (auto, the default: 8, but 4 beside a ROM over 16 MiB, where with 8 the game's heap fell under HEAP_LOW and it
+		 * flushed its own code again and again: MOTHER 3, 2026-11-25) */
+		int const copyMib = !copyWanted ? 0 : strcmp(copyWanted, "auto") ? atoi(copyWanted) : gameRom > (16u << 20) ? 4 : 8;
 		if (!main && copyMib >= 1 && copyMib <= 16 && (copyMib <= 4 || __ctru_heap_size >= 64u << 20)) most = (size_t) copyMib << 20;
 		size_t const least = main ? MAIN_MIN : OTHER_MIN;
 		if (spare > *size) {

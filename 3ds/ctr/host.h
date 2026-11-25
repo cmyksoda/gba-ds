@@ -109,6 +109,8 @@ void host_ui_busy(void);
 void host_fs_yield(void);
 void host_mem_note(const char* what);
 void host_jit_main(bool main, size_t romToLoad, bool hiddenCopy);
+/* The game's ROM size while it plays (0 once it's closed): armgba_copy_code_mib's default depends on it. */
+void host_jit_game_rom(size_t bytes);
 /* A folder on the SD card listed in one go: its entries (malloc'd, the
  * caller frees them), each with whether it's a folder and a file's size.
  * Returns how many, or -1 if the folder can't be read. */

@@ -819,6 +819,7 @@ static void close_core(ArmCore* c) {
 	if (!c) return;
 #ifdef __3DS__
 	if (c->gba && c->seen) jit_stats(c, c->game ? c->gba->video.frameCounter : c->ran, c->game, true);
+	if (c->game) host_jit_game_rom(0);
 #endif
 	if (c->gba) {
 		warm_save(c);
@@ -1197,6 +1198,7 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 	}
 #ifdef __3DS__
 	c->game = audio;
+	if (audio) host_jit_game_rom(gba->romSize);
 	jit_stats_open(c, audio);
 #endif
 	if (audio) {
