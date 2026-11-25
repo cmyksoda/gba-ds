@@ -11343,5 +11343,11 @@ static enum GameExit game_run_inner(Config* c, const char* rom, bool fromLibrary
 	ui_free_image(bezelTex[0]);
 	ui_free_image(bezelTex[1]);
 	bezelKey[0][0] = bezelKey[1][0] = 0;
+#ifdef __3DS__
+	/* (the scaling pipeline's targets first made mid-game sat at the heap's peak, and let-go textures waited for the next
+	 * frame: they held malloc's break up, and no 32 MiB game could start after Baldur's Gate's live map, 2026-11-25) */
+	ui_textures_reset();
+	host_textures_free_now();
+#endif
 	return exitTo;
 }

@@ -858,6 +858,10 @@ static int doomed_flush(void) {
 	return n;
 }
 
+void host_textures_free_now(void) {
+	doomed_flush();
+}
+
 void SDL_DestroyTexture(SDL_Texture* t) {
 	if (!t) return;
 	for (int i = 0; i < 2; ++i) {
