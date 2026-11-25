@@ -49,7 +49,7 @@ MGBA_BUILD ?= $(REPO)/deps/mgba-3ds/build
 ARMGBA_CORE_SRC :=
 # libmgba's own defines, as the other builds take them: its structs' layout depends on them.
 CORE_DEFS := $(shell sed -n 's/^C_DEFINES = //p' $(MGBA_BUILD)/CMakeFiles/mgba.dir/flags.make)
-CORE_INC  := -I$(MGBA_BUILD)/../include -I$(MGBA_BUILD)/include
+CORE_INC  := -I$(MGBA_BUILD)/../include -I$(MGBA_BUILD)/include -I$(REPO)/third_party/rzstd/include
 endif
 
 ARCH     := -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
@@ -91,6 +91,8 @@ APP_SRC  += $(D3)/emu/emu_armgba.c
 HOST_SRC += $(D3)/ctr/jitmem.c $(ARMGBA_SRC)/platform/3ds/source/svc.s
 else
 APP_SRC  += $(S)/emu.c $(D3)/ctr/emu_ctr.c
+# (emu.c reads RetroArch's zstd save states with it, as the other builds do)
+RZSTD_SRC := $(wildcard $(REPO)/third_party/rzstd/src/*.c)
 endif
 
 obj = $(patsubst $(REPO)/%,$(BUILD)/%.o,$(1))
@@ -98,7 +100,8 @@ APP_OBJ  := $(call obj,$(APP_SRC))
 HOST_OBJ := $(call obj,$(HOST_SRC))
 CORE_OBJ := $(call ARMGBA_OBJ,$(BUILD))
 WEBP_OBJ := $(call obj,$(WEBP_SRC))
-OBJ := $(APP_OBJ) $(HOST_OBJ) $(CORE_OBJ) $(WEBP_OBJ)
+RZSTD_OBJ := $(call obj,$(RZSTD_SRC))
+OBJ := $(APP_OBJ) $(HOST_OBJ) $(CORE_OBJ) $(WEBP_OBJ) $(RZSTD_OBJ)
 
 # sdl/ stands where SDL2's headers do. The core's headers before src/: armGBA's cheats.h is the one
 # emu_armgba.c means. The app's threads are made by host.c (the core they run on), and its main is called from
@@ -113,6 +116,7 @@ endif
 $(HOST_OBJ): EXTRA := -O2 -Wall -Wextra $(APP_INC) $(CORE_DEFS) $(BENCH_DEF) $(if $(SLOWSD),-DGBADS_SLOW_SD) -DGBADS_VERSION='"$(VERSION)"' -DGBADS_UPSTREAM='"$(UPSTREAM)"' $(if $(LOG_URL),-DGBADS_LOG_URL='"$(LOG_URL)"') $(if $(EMU_HEAP_KIB),-DGBADS_EMU_HEAP_KIB=$(EMU_HEAP_KIB))
 $(CORE_OBJ): EXTRA := $(ARMGBA_CORE_FLAGS) $(XCORE)
 $(WEBP_OBJ): EXTRA := -O2 -I$(REPO)/third_party/libwebp
+$(RZSTD_OBJ): EXTRA := -O2 -I$(REPO)/third_party/rzstd/include
 
 .PHONY: all cia-parts clean
 all: $(TARGET).3dsx
