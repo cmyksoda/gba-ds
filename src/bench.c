@@ -19,6 +19,7 @@
 #endif
 
 #include <SDL.h>
+#include <dirent.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -243,6 +244,21 @@ static bool apply_options(Config* cfg, char* words, char* bad, size_t badSize) {
 void __gcov_dump(void);
 #endif
 
+#ifdef __3DS__
+/* (all of them: a list is named by its ROM's CRC, which only a loaded ROM gives) */
+static void forget_warm_lists(void) {
+	DIR* d = opendir("/3ds/gba-ds/warm");
+	for (struct dirent* e; d && (e = readdir(d));) {
+		size_t n = strlen(e->d_name);
+		char path[300];
+		if (n > 5 && !strcmp(e->d_name + n - 5, ".warm") && snprintf(path, sizeof(path), "/3ds/gba-ds/warm/%s", e->d_name) < (int) sizeof(path)) remove(path);
+	}
+	if (d) closedir(d);
+}
+#else
+static void forget_warm_lists(void) {} /* (only the 3DS has them) */
+#endif
+
 bool bench_run(Config* cfg) {
 	FILE* jobs = fopen(cfg->bench, "r");
 	if (!jobs) {
@@ -297,8 +313,13 @@ bool bench_run(Config* cfg) {
 	active = true;
 	char line[1024], msg[1200];
 	int done = 0;
+	bool warmCold = false; /* (a "warm cold" line in the jobs file: every job starts with no warm lists) */
 	while (!uiQuit && fgets(line, sizeof(line), jobs)) {
 		char* s = trim(line);
+		if (!strncmp(s, "warm ", 5)) {
+			warmCold = !strcmp(trim(s + 5), "cold");
+			continue;
+		}
 		if (strncmp(s, "job ", 4)) continue;
 		char* f[5] = { 0 };
 		char* p = s + 4;
@@ -328,6 +349,7 @@ bool bench_run(Config* cfg) {
 			snprintf(sav, sizeof(sav), "%s/%s.srm", saves, base);
 			remove(sav);
 		}
+		if (warmCold) forget_warm_lists();
 		static Config before; /* (the config as the job found it: back when it has had options) */
 		char options[256] = "", bad[64];
 		if (f[4]) snprintf(options, sizeof(options), "%s", f[4]);
