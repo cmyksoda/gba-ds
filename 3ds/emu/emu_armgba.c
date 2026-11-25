@@ -2512,6 +2512,9 @@ static void split_release(ArmCore* c) {
 	c->hooks.second = false;
 	c->hooks.line = NULL;
 	memset(&split, 0, sizeof(split));
+	/* (as src/emu.c's: Pokemon Pinball's tall view leaves these set, and the next game kept its HUD on both screens) */
+	splitCopying = false;
+	copyAbove = 0;
 }
 
 /* a video register written again as it stands, so both pictures take it
@@ -2527,6 +2530,7 @@ bool emu_hud_split(Emu* e, bool on, unsigned bgMask, const SpriteRule* objs, int
 	if (!split.core) {
 		if (!on) return true;
 		memset(&split, 0, sizeof(split));
+		splitCopying = false;
 		split.core = c;
 		split.hudBuf = hud;
 		for (int i = 0; i < GBA_W * GBA_H; ++i) split.frame[i] = HUD_CLEAR_555;
