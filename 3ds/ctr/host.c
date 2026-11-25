@@ -1060,9 +1060,10 @@ static void bench_fetch(const char* dir) {
 	snprintf(base, sizeof(base), "%s", GBADS_LOG_URL);
 	char* slash = strrchr(base, '/');
 	if (slash) *slash = 0; /* (http://host:port/log -> http://host:port) */
+	snprintf(path, sizeof(path), "%s/jobs.txt", dir);
+	remove(path); /* (a run of one job per program: a failed download must not play the last run's job again) */
 	if (R_FAILED(httpcInit(1 << 20))) return;
 	snprintf(url, sizeof(url), "%s/bench/jobs.txt", base);
-	snprintf(path, sizeof(path), "%s/jobs.txt", dir);
 	if (http_get(url, path)) {
 		FILE* f = fopen(path, "r");
 		while (f && fgets(line, sizeof(line), f)) {
