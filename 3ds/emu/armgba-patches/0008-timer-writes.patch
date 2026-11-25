@@ -1,14 +1,15 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: armGBA speedups <none@example.invalid>
 Date: Wed, 18 Nov 2026 01:00:00 -0500
-Subject: armGBA: a timer's reload or control write takes effect at once, and the timers' replan and quiet-overflow planning do less
+Subject: armGBA: a timer's reload or control write takes effect at once, and
+ the timers' replan and quiet-overflow planning do less
 
 
 diff --git a/src/io/timer.c b/src/io/timer.c
-index d020194..2cc1e8c 100644
+index 3c2c79a..5277bcb 100644
 --- a/src/io/timer.c
 +++ b/src/io/timer.c
-@@ -90,34 +90,20 @@ static int quietOverflows(struct GBA* gba, int id) {
+@@ -100,34 +100,20 @@ static int quietOverflows(struct GBA* gba, int id) {
  			limit = ticks;
  		}
  	}
@@ -52,7 +53,7 @@ index d020194..2cc1e8c 100644
  			}
  		}
  	}
-@@ -188,6 +174,9 @@ void timerCatchUp(struct GBA* gba, uint32_t time, bool inclusive) {
+@@ -195,6 +181,9 @@ void timerCatchUp(struct GBA* gba, uint32_t time, bool inclusive) {
  void timerReplan(struct GBA* gba, uint32_t time) {
  	for (int id = 0; id < 4; ++id) {
  		struct Timer* timer = &gba->timers[id];
@@ -62,7 +63,7 @@ index d020194..2cc1e8c 100644
  		catchUp(gba, id, time, true);
  		if (timer->quiet) {
  			timer->quiet = 0;
-@@ -295,11 +284,34 @@ uint16_t timerReadCounter(struct GBA* gba, int id) {
+@@ -302,11 +291,34 @@ uint16_t timerReadCounter(struct GBA* gba, int id) {
  	return counter;
  }
  
@@ -99,7 +100,7 @@ index d020194..2cc1e8c 100644
  		timingSchedule(gba, &timer->reloadWrite, 1);
  	}
  }
-@@ -307,7 +319,9 @@ void timerWriteReload(struct GBA* gba, int id, uint16_t reload) {
+@@ -314,7 +326,9 @@ void timerWriteReload(struct GBA* gba, int id, uint16_t reload) {
  void timerWriteControl(struct GBA* gba, int id, uint16_t control) {
  	struct Timer* timer = &gba->timers[id];
  	timer->pendingControl = control & 0x00C7;

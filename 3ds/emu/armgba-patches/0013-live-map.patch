@@ -1,13 +1,16 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: armGBA speedups <none@example.invalid>
 Date: Thu, 19 Nov 2026 03:00:00 -0500
-Subject: armGBA: a state load drops only the compiled blocks over the work RAM words it changes, when there are few (the hidden copy no longer recompiles everything for every capture)
+Subject: armGBA: a state load drops only the compiled blocks over the work RAM
+ words it changes, when there are few (the hidden copy no longer recompiles
+ everything for every capture)
+
 
 diff --git a/src/state.c b/src/state.c
-index 19c96ff..58de921 100644
+index add7c29..40ce553 100644
 --- a/src/state.c
 +++ b/src/state.c
-@@ -227,22 +227,36 @@ static uint8_t* moved(struct GBA* gba, uint64_t offset) {
+@@ -315,22 +315,36 @@ static uint8_t* moved(struct GBA* gba, uint64_t offset) {
  	return offset ? (uint8_t*) gba + offset : NULL;
  }
  
@@ -49,7 +52,7 @@ index 19c96ff..58de921 100644
  		}
  	}
  	return false;
-@@ -264,7 +278,8 @@ bool gbaLoadState(struct GBA* gba, const void* state, size_t size) {
+@@ -352,7 +366,8 @@ bool gbaLoadState(struct GBA* gba, const void* state, size_t size) {
  	if ((saved->romSize != gba->romSize && !gba->cart.multi) || saved->multibootSize != gba->multibootSize) {
  		return false;
  	}
@@ -59,7 +62,7 @@ index 19c96ff..58de921 100644
  	struct GBA* host = malloc(sizeof(*host));
  	if (!host) {
  		return false;
-@@ -345,6 +360,9 @@ bool gbaLoadState(struct GBA* gba, const void* state, size_t size) {
+@@ -433,6 +448,9 @@ bool gbaLoadState(struct GBA* gba, const void* state, size_t size) {
  		memcpy(&gba->rom[GPIO_REGISTERS], header.gpioRegisters, sizeof(header.gpioRegisters));
  	}
  	jitStateLoaded(gba, flush);
@@ -67,5 +70,5 @@ index 19c96ff..58de921 100644
 +		jitInvalidate(gba, changed.address[i], 4);
 +	}
  	cartRestore(gba);
- 	if (gba->renderThread) {
- 		renderThreadClone(gba);
+ 	if (!stateKeepsRenderer) {
+ 		restorePicture(gba);

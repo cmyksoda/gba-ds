@@ -1,14 +1,15 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: armGBA speedups <none@example.invalid>
-Date: Wed, 18 Nov 2026 17:00:00 -0500
-Subject: armGBA: a compile clears only the compiler state it uses, and the first visits stepped before a block compiles can be set
+Date: Tue, 24 Nov 2026 16:04:28 -0500
+Subject: armGBA: a compile clears only the compiler state it uses, and the
+ first visits stepped before a block compiles can be set
 
 
 diff --git a/src/cpu/a32/backend.c b/src/cpu/a32/backend.c
-index ef362d7..11f8362 100644
+index f1874f4..0bfb879 100644
 --- a/src/cpu/a32/backend.c
 +++ b/src/cpu/a32/backend.c
-@@ -1468,11 +1468,8 @@ static void emitCheck(struct Compiler* c, int index, int ahead) {
+@@ -1477,11 +1477,8 @@ static void emitCheck(struct Compiler* c, int index, int ahead) {
  	}
  	cmnCycles(e, c->pending + ahead);
  	struct Stub* stub = &c->stubs[c->stubCount++];
@@ -21,7 +22,7 @@ index ef362d7..11f8362 100644
  }
  
  // Calls a runtime helper with the guest state in memory, its arguments after the first in r1 and
-@@ -1501,6 +1498,7 @@ static void spill(struct Compiler* c) {
+@@ -1510,6 +1507,7 @@ static void spill(struct Compiler* c) {
  static void emitLinkTo(struct Compiler* c, uint32_t pc, bool thumb) {
  	struct Link* link = &c->links[c->linkCount];
  	c->linkSites[c->linkCount++] = aB(&c->e, C_AL, NULL);
@@ -29,7 +30,7 @@ index ef362d7..11f8362 100644
  	link->targetKey = blockKey(pc, thumb);
  	link->from = c->block;
  }
-@@ -1886,9 +1884,7 @@ static void emitMulLong(struct Compiler* c, const struct Inst* in) {
+@@ -1895,9 +1893,7 @@ static void emitMulLong(struct Compiler* c, const struct Inst* in) {
  static void emitStackAccess(struct Compiler* c, const struct Inst* in) {
  	struct Emitter* e = &c->e;
  	struct SlowAccess* slow = &c->slow[c->slowCount++];
@@ -40,7 +41,7 @@ index ef362d7..11f8362 100644
  	aDpR(e, C_AL, D_MOV, false, R0, 0, R1, S_LSR, 24);
  	aDpI(e, C_AL, D_CMP, true, 0, R0, REGION_IWRAM);
  	aDpI(e, C_EQ, D_TST, true, 0, R1, 3);
-@@ -2029,6 +2025,7 @@ static void emitMem(struct Compiler* c, const struct Inst* in) {
+@@ -2038,6 +2034,7 @@ static void emitMem(struct Compiler* c, const struct Inst* in) {
  		// the cycles changes the flags.
  		flushPending(c);
  		struct Miss* miss = &c->misses[c->missCount++];
@@ -48,7 +49,7 @@ index ef362d7..11f8362 100644
  		miss->site = aB(e, missIsMinus(memKind(in)) ? C_MI : C_PL, NULL);
  		c->missOpen = miss;
  		return;
-@@ -2314,12 +2311,7 @@ static void emitBlockTransfer(struct Compiler* c, const struct Inst* in) {
+@@ -2323,12 +2320,7 @@ static void emitBlockTransfer(struct Compiler* c, const struct Inst* in) {
  			// The inline path stays here; the rest is emitted with the cold code by
  			// emitSlowTransfer, from the state it would have had here and to the state this leaves.
  			struct SlowTransfer* t = &c->transfers[c->transferCount++];
@@ -62,7 +63,7 @@ index ef362d7..11f8362 100644
  			c->transfer = t;
  			emitFastTransfer(c, in, t->sites, &t->siteCount);
  			c->transfer = NULL;
-@@ -2676,6 +2668,7 @@ static void emitOne(struct Compiler* c, const struct Inst* in, int index) {
+@@ -2675,6 +2667,7 @@ static void emitOne(struct Compiler* c, const struct Inst* in, int index) {
  			// next block.
  			struct Link* link = &c->links[c->linkCount];
  			c->linkSites[c->linkCount++] = skip;
@@ -70,7 +71,7 @@ index ef362d7..11f8362 100644
  			link->targetKey = blockKey(in->address + c->width, c->thumb);
  			link->from = c->block;
  			return;
-@@ -2890,17 +2883,23 @@ static void emitIdleHead(struct Compiler* c) {
+@@ -2889,17 +2882,23 @@ static void emitIdleHead(struct Compiler* c) {
  // nothing outside the free space there, if its code didn't fit.
  static bool compileInStretch(struct Jit* jit, struct Block* block, struct Inst* insts, int count, const uint32_t* nextOps) {
  	struct GBA* gba = jit->gba;
@@ -105,7 +106,7 @@ index ef362d7..11f8362 100644
  	if (block->careful) {
  		c.e = (struct Emitter) { .start = jit->coldNext, .p = jit->coldNext, .end = jit->coldEnd };
  	} else {
-@@ -2990,6 +2989,7 @@ static bool compileInStretch(struct Jit* jit, struct Block* block, struct Inst*
+@@ -2991,6 +2990,7 @@ static bool compileInStretch(struct Jit* jit, struct Block* block, struct Inst*
  			// Continues in the careful copy from the same instruction, once there is one.
  			struct Link* link = &c.links[c.linkCount];
  			c.linkSites[c.linkCount++] = aB(e, C_AL, NULL);
@@ -114,10 +115,10 @@ index ef362d7..11f8362 100644
  			link->careful = true;
  			link->index = stub->index;
 diff --git a/src/cpu/jit.c b/src/cpu/jit.c
-index 317d8e4..06a0bf8 100644
+index 515ac56..76d80f8 100644
 --- a/src/cpu/jit.c
 +++ b/src/cpu/jit.c
-@@ -1389,6 +1389,9 @@ void jitNameCode(const void* start, const void* end, const char* name) {
+@@ -1721,6 +1721,9 @@ void jitNameCode(const void* start, const void* end, const char* name) {
  
  // A block's two pieces: its body and its cold part.
  void jitNameBlock(const struct Block* block, const void* bodyEnd, const void* cold, const void* end) {
@@ -127,7 +128,7 @@ index 317d8e4..06a0bf8 100644
  	char name[32];
  	snprintf(name, sizeof(name), "b%08X%s%s%s", block->pc, block->thumb ? "t" : "a", block->careful ? "c" : "", block->polymorphic ? "p" : "");
  	jitNameCode(block->entry, bodyEnd, name);
-@@ -1424,9 +1427,17 @@ static bool compileBusy(void) {
+@@ -1756,9 +1759,17 @@ static bool compileBusy(void) {
  #endif
  }
  
@@ -146,7 +147,7 @@ index 317d8e4..06a0bf8 100644
  }
  
  // Returns the block for a PC: an existing one, one brought back unchanged from before a rewrite, or
-@@ -1451,7 +1462,7 @@ static struct Block* getBlock(struct GBA* gba, uint32_t pc, bool thumb) {
+@@ -1783,7 +1794,7 @@ static struct Block* getBlock(struct GBA* gba, uint32_t pc, bool thumb) {
  	uint8_t* seen = &jit->seenCount[lookupHash(key)];
  	if (*seen < compileAfter() && !gba->traceFile) {
  #if defined(__3DS__)
@@ -156,10 +157,10 @@ index 317d8e4..06a0bf8 100644
  		++*seen;
  		++jit->deferred;
 diff --git a/src/cpu/jit.h b/src/cpu/jit.h
-index f324821..016407b 100644
+index 88cd9b4..dda3dd5 100644
 --- a/src/cpu/jit.h
 +++ b/src/cpu/jit.h
-@@ -32,6 +32,8 @@ void jitFlush(struct GBA*);
+@@ -34,6 +34,8 @@ void jitFlush(struct GBA*);
  // How many times the CPU returns to the same place inside a block (from an interrupt, or an event
  // stepped up to) before a block is compiled there, instead of stepping the rest of this block; 0: never.
  void jitSetMidAfter(struct GBA*, int times);
@@ -169,10 +170,10 @@ index f324821..016407b 100644
  // (jitFlush) at a moment of its choosing, before it fills at one of the game's.
  size_t jitCodeUsed(struct GBA*, size_t* size);
 diff --git a/src/cpu/x64/backend.c b/src/cpu/x64/backend.c
-index 0411f37..4d5b24f 100644
+index 3cf7fb3..04aeccf 100644
 --- a/src/cpu/x64/backend.c
 +++ b/src/cpu/x64/backend.c
-@@ -1393,10 +1393,8 @@ static void emitCheck(struct Compiler* c, int index, int ahead) {
+@@ -1406,10 +1406,8 @@ static void emitCheck(struct Compiler* c, int index, int ahead) {
  	}
  	xAluI(e, X_CMP, 4, R(R14), -(c->pending + ahead));
  	struct Stub* stub = &c->stubs[c->stubCount++];
@@ -184,7 +185,7 @@ index 0411f37..4d5b24f 100644
  }
  
  // Calls a runtime helper with the guest state in memory; the helper's result stays in eax.
-@@ -1423,6 +1421,7 @@ static void spill(struct Compiler* c) {
+@@ -1436,6 +1434,7 @@ static void spill(struct Compiler* c) {
  static void emitLinkTo(struct Compiler* c, uint32_t pc, bool thumb) {
  	struct Link* link = &c->links[c->linkCount];
  	c->linkSites[c->linkCount++] = xJmp(&c->e, NULL);
@@ -192,7 +193,7 @@ index 0411f37..4d5b24f 100644
  	link->targetKey = blockKey(pc, thumb);
  	link->from = c->block;
  }
-@@ -1822,9 +1821,7 @@ static void emitMulLong(struct Compiler* c, const struct Inst* in) {
+@@ -1835,9 +1834,7 @@ static void emitMulLong(struct Compiler* c, const struct Inst* in) {
  static void emitStackAccess(struct Compiler* c, const struct Inst* in) {
  	struct Emitter* e = &c->e;
  	struct SlowAccess* slow = &c->slow[c->slowCount++];
@@ -203,7 +204,7 @@ index 0411f37..4d5b24f 100644
  	xMovRR(e, 4, RAX, RCX);
  	xAluI(e, X_AND, 4, R(RAX), 0xFF000003);
  	xAluI(e, X_CMP, 4, R(RAX), REGION_IWRAM << 24);
-@@ -2090,11 +2087,7 @@ static void emitBlockTransfer(struct Compiler* c, const struct Inst* in) {
+@@ -2103,11 +2100,7 @@ static void emitBlockTransfer(struct Compiler* c, const struct Inst* in) {
  			// The inline path stays here; the rest is emitted with the cold code by
  			// emitSlowTransfer, from the state it would have had here and to the state this leaves.
  			struct SlowTransfer* t = &c->transfers[c->transferCount++];
@@ -216,7 +217,7 @@ index 0411f37..4d5b24f 100644
  			c->transfer = t;
  			emitFastTransfer(c, in, t->sites, &t->siteCount);
  			c->transfer = NULL;
-@@ -2683,17 +2676,20 @@ static void emitIdleHead(struct Compiler* c) {
+@@ -2689,17 +2682,20 @@ static void emitIdleHead(struct Compiler* c) {
  // with the cold code. Fails if the block doesn't fit, writing nothing past either part.
  static bool compileInStretch(struct Jit* jit, struct Block* block, struct Inst* insts, int count, const uint32_t* nextOps) {
  	struct GBA* gba = jit->gba;
@@ -248,7 +249,7 @@ index 0411f37..4d5b24f 100644
  	if (block->careful) {
  		c.e = (struct Emitter) { .start = jit->coldNext, .p = jit->coldNext, .end = jit->coldEnd };
  	} else {
-@@ -2780,6 +2776,7 @@ static bool compileInStretch(struct Jit* jit, struct Block* block, struct Inst*
+@@ -2791,6 +2787,7 @@ static bool compileInStretch(struct Jit* jit, struct Block* block, struct Inst*
  			// Continues in the careful copy from the same instruction, once there is one.
  			struct Link* link = &c.links[c.linkCount];
  			c.linkSites[c.linkCount++] = xJmp(e, NULL);

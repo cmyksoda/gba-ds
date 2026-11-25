@@ -1,14 +1,16 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: armGBA speedups <none@example.invalid>
 Date: Wed, 18 Nov 2026 10:00:00 -0500
-Subject: armGBA: events run after more of the instructions they fall in: a sound timer's overflow that asks its FIFO for nothing, and any event after an instruction that only fetches
+Subject: armGBA: events run after more of the instructions they fall in: a
+ sound timer's overflow that asks its FIFO for nothing, and any event after an
+ instruction that only fetches
 
 
 diff --git a/src/cpu/a32/backend.c b/src/cpu/a32/backend.c
-index 11f8362..1b6558a 100644
+index 0bfb879..46c8b8b 100644
 --- a/src/cpu/a32/backend.c
 +++ b/src/cpu/a32/backend.c
-@@ -1061,7 +1061,7 @@ struct Stub {
+@@ -1070,7 +1070,7 @@ struct Stub {
  	// check, and whether events inside it can run after it.
  	int cost;
  	uint8_t* resume;
@@ -18,10 +20,10 @@ index 11f8362..1b6558a 100644
  	int checked;
  	uint8_t* code;
 diff --git a/src/cpu/a64/backend.c b/src/cpu/a64/backend.c
-index 0b09226..481d0b4 100644
+index 581c37c..f72a8cb 100644
 --- a/src/cpu/a64/backend.c
 +++ b/src/cpu/a64/backend.c
-@@ -913,7 +913,7 @@ struct Stub {
+@@ -922,7 +922,7 @@ struct Stub {
  	// check, and whether events inside it can run after it.
  	int cost;
  	uint8_t* resume;
@@ -59,10 +61,10 @@ index 0630cb0..ff45a9d 100644
  
  // Whether a deferral is taken up straight after the instruction, in the copy.
 diff --git a/src/cpu/jit-internal.h b/src/cpu/jit-internal.h
-index 8390631..679bd4b 100644
+index 4c9ec4d..2986997 100644
 --- a/src/cpu/jit-internal.h
 +++ b/src/cpu/jit-internal.h
-@@ -454,6 +454,8 @@ struct Jit {
+@@ -542,6 +542,8 @@ struct Jit {
  	// Returns to the same place inside a block (by lookup slot, in seenCount) before a block is compiled there
  	// instead of stepping the rest of this one (0: never), and how many such blocks since the last flush.
  	uint8_t midAfter;
@@ -72,10 +74,10 @@ index 8390631..679bd4b 100644
  	bool coldThumb;
  	int coldLeft;
 diff --git a/src/cpu/jit.c b/src/cpu/jit.c
-index 06a0bf8..a665665 100644
+index 76d80f8..2b56c5e 100644
 --- a/src/cpu/jit.c
 +++ b/src/cpu/jit.c
-@@ -599,6 +599,12 @@ void jitSetMidAfter(struct GBA* gba, int times) {
+@@ -910,6 +910,12 @@ void jitSetMidAfter(struct GBA* gba, int times) {
  	}
  }
  
@@ -88,7 +90,7 @@ index 06a0bf8..a665665 100644
  size_t jitCodeUsed(struct GBA* gba, size_t* size) {
  	struct Jit* jit = gba->jit;
  	if (size) {
-@@ -2573,7 +2579,10 @@ int jitHelperCareful(struct GBA* gba, int32_t cost, int deferrable, const struct
+@@ -2946,7 +2952,10 @@ int jitHelperCareful(struct GBA* gba, int32_t cost, int deferrable, const struct
  	if (cpu->cycles + cost < cpu->nextEvent) {
  		return CAREFUL_RUN;
  	}
@@ -101,10 +103,10 @@ index 06a0bf8..a665665 100644
  		return CAREFUL_RUN;
  	}
 diff --git a/src/cpu/jit.h b/src/cpu/jit.h
-index 016407b..6286202 100644
+index dda3dd5..47de2a3 100644
 --- a/src/cpu/jit.h
 +++ b/src/cpu/jit.h
-@@ -34,6 +34,8 @@ void jitFlush(struct GBA*);
+@@ -36,6 +36,8 @@ void jitFlush(struct GBA*);
  void jitSetMidAfter(struct GBA*, int times);
  // How many visits to a new block are stepped through before it is compiled (1 to 250, for every machine; 0 or less: 2, as built).
  void jitSetCompileAfter(int times);
@@ -114,10 +116,10 @@ index 016407b..6286202 100644
  // (jitFlush) at a moment of its choosing, before it fills at one of the game's.
  size_t jitCodeUsed(struct GBA*, size_t* size);
 diff --git a/src/cpu/x64/backend.c b/src/cpu/x64/backend.c
-index 4d5b24f..5401282 100644
+index 04aeccf..e121622 100644
 --- a/src/cpu/x64/backend.c
 +++ b/src/cpu/x64/backend.c
-@@ -910,7 +910,7 @@ struct Stub {
+@@ -923,7 +923,7 @@ struct Stub {
  	// check, and whether events inside it can run after it.
  	int cost;
  	uint8_t* resume;
@@ -127,10 +129,10 @@ index 4d5b24f..5401282 100644
  
  struct Compiler {
 diff --git a/src/gba.h b/src/gba.h
-index de19d97..cd3714b 100644
+index ab3344e..20bc020 100644
 --- a/src/gba.h
 +++ b/src/gba.h
-@@ -983,9 +983,17 @@ uint32_t timingCpuAt(struct GBA*, uint32_t time);
+@@ -1000,9 +1000,17 @@ uint32_t timingCpuAt(struct GBA*, uint32_t time);
  int32_t timingUntil(struct GBA*, struct Event*);
  void timingInterrupt(struct GBA*);
  void timingResetNextEvent(struct GBA*);
@@ -148,11 +150,11 @@ index de19d97..cd3714b 100644
 +};
 +// Whether the events due by time can run late, at the next instruction boundary: for the kinds above.
 +bool timingDeferrable(struct GBA*, int32_t time, int kind);
- bool gbaIrqEvent(const struct Event*);
  void processEvents(struct GBA*);
  
-@@ -1047,7 +1055,7 @@ void timerCatchUp(struct GBA*, uint32_t time, bool inclusive);
- void timerReplan(struct GBA*, uint32_t time);
+ // step.c: the exact CPU, used for the instructions around events.
+@@ -1073,7 +1081,7 @@ void timerReplan(struct GBA*, uint32_t time);
+ bool timerIrqSettled(struct GBA*, int id);
  // Whether a timer event can run at the end of the instruction it falls in, because it starts no
  // DMA.
 -bool timerDeferrable(struct GBA*, const struct Event*);
@@ -161,13 +163,15 @@ index de19d97..cd3714b 100644
  // dma.c
  void dmaInit(struct GBA*);
 diff --git a/src/io/timer.c b/src/io/timer.c
-index 2cc1e8c..3c38b31 100644
+index 5277bcb..9240df5 100644
 --- a/src/io/timer.c
 +++ b/src/io/timer.c
-@@ -132,32 +132,39 @@ static void overflowEvent(struct GBA* gba, void* context, uint32_t late);
- static void reloadWritten(struct GBA* gba, void* context, uint32_t late);
- static void controlWritten(struct GBA* gba, void* context, uint32_t late);
+@@ -138,33 +138,42 @@ static void catchUp(struct GBA* gba, int id, uint32_t time, bool inclusive) {
+ 	}
+ }
  
++static void overflowEvent(struct GBA* gba, void* context, uint32_t late);
++
 +// Whether a FIFO's channel is short enough of data that an overflow asks its DMA for more.
 +static bool fifoRoom(const struct Fifo* channel) {
 +	int size = channel->fifoWrite - channel->fifoRead;
@@ -182,8 +186,9 @@ index 2cc1e8c..3c38b31 100644
 +// event the instruction's check reaches, and oneStore says the instruction makes at most one store,
 +// the last of its accesses.
 +bool timerDeferrable(struct GBA* gba, const struct Event* event, int32_t window, bool oneStore) {
- 	// Only a timer's own events can ask for FIFO data; the list hands this every event in a window.
- 	if (event->callback != overflowEvent && event->callback != reloadWritten && event->callback != controlWritten) {
+ 	// Only a timer's own events, which lie in the timers, can ask for FIFO data; the list hands this
+ 	// every event in a window.
+ 	if ((uintptr_t) event - (uintptr_t) gba->timers >= sizeof(gba->timers)) {
  		return true;
  	}
 -	for (int id = 0; id < 4; ++id) {
@@ -224,10 +229,10 @@ index 2cc1e8c..3c38b31 100644
  	return true;
  }
 diff --git a/src/timing.c b/src/timing.c
-index 54061e2..1d58bc4 100644
+index 758cabc..b3ab650 100644
 --- a/src/timing.c
 +++ b/src/timing.c
-@@ -232,15 +232,16 @@ int32_t timingTick(struct GBA* gba, int32_t cycles) {
+@@ -232,12 +232,13 @@ int32_t timingTick(struct GBA* gba, int32_t cycles) {
  	return gba->cpu.nextEvent;
  }
  
@@ -238,9 +243,6 @@ index 54061e2..1d58bc4 100644
 +		int32_t until = untilEvent(gba, event);
 +		if (until > time) {
  			break;
- 		}
- 		if (gbaIrqEvent(event)) {
- 			continue;
  		}
 -		if (event->endsRun || dmaStartEvent(event) || !videoDeferrable(gba, event) || !timerDeferrable(gba, event)) {
 +		if (event->endsRun || (kind != DEFER_FETCH_ONLY && (dmaStartEvent(event) || !videoDeferrable(gba, event) || !timerDeferrable(gba, event, time - until, kind != DEFER_YES)))) {

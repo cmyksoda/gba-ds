@@ -1,11 +1,13 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: armGBA speedups <none@example.invalid>
 Date: Tue, 17 Nov 2026 15:00:00 -0500
-Subject: armGBA: events inside blocks spill only the cycle counter and prefetch base, r0-r4 move with one LDM or STM, the idle head test is a bitmask
+Subject: armGBA: events inside blocks spill only the cycle counter and
+ prefetch base, r0-r4 move with one LDM or STM, the idle head test is a
+ bitmask
 
 
 diff --git a/src/cpu/a32/backend.c b/src/cpu/a32/backend.c
-index 6138b1c..d1fdf04 100644
+index 6a9176a..584f57d 100644
 --- a/src/cpu/a32/backend.c
 +++ b/src/cpu/a32/backend.c
 @@ -30,9 +30,8 @@ enum {
@@ -19,7 +21,7 @@ index 6138b1c..d1fdf04 100644
  _Static_assert(sizeof(struct LookupEntry) == 12 && offsetof(struct LookupEntry, entry) == 8, "dispatchKey's table layout");
  
  // Tells the host about code that was written or changed; otherwise it may run what was there
-@@ -154,9 +153,7 @@ static void loadBase(struct Emitter* e, int ra, int rb) {
+@@ -162,9 +161,7 @@ static void loadBase(struct Emitter* e, int ra, int rb) {
  // The routine that stores the guest registers held in host registers, the cycle counter and the
  // flags in r9 to the CPU state. Preserves r0.
  static void emitSpill(struct Emitter* e) {
@@ -30,7 +32,7 @@ index 6138b1c..d1fdf04 100644
  	ldrF(e, R1, OFF(cpu.nextEvent));
  	aDpR(e, C_AL, D_ADD, false, R1, R1, R_CYC, S_LSL, 0);
  	strF(e, R1, OFF(cpu.cycles));
-@@ -171,9 +168,7 @@ static void emitSpill(struct Emitter* e) {
+@@ -179,9 +176,7 @@ static void emitSpill(struct Emitter* e) {
  
  // The reverse; also preserves r0.
  static void emitReload(struct Emitter* e) {
@@ -41,7 +43,7 @@ index 6138b1c..d1fdf04 100644
  	ldrF(e, R_CYC, OFF(cpu.cycles));
  	ldrF(e, R1, OFF(cpu.nextEvent));
  	aDpR(e, C_AL, D_SUB, false, R_CYC, R_CYC, R1, S_LSL, 0);
-@@ -182,6 +177,32 @@ static void emitReload(struct Emitter* e) {
+@@ -190,6 +185,32 @@ static void emitReload(struct Emitter* e) {
  	aBx(e, LR);
  }
  
@@ -74,7 +76,7 @@ index 6138b1c..d1fdf04 100644
  // The routine C calls to run compiled code: saves the host's registers, loads the guest's, and
  // jumps to the given block. Ten registers keep the stack 8-byte aligned.
  static void emitEnter(struct Jit* jit, struct Emitter* e) {
-@@ -847,6 +868,10 @@ bool backendInit(struct Jit* jit) {
+@@ -856,6 +877,10 @@ bool backendInit(struct Jit* jit) {
  	emitSpill(&e);
  	jit->reloadRoutine = e.p;
  	emitReload(&e);
@@ -85,7 +87,7 @@ index 6138b1c..d1fdf04 100644
  	jit->enter = (int (*)(struct GBA*, void*)) (void*) e.p;
  	emitEnter(jit, &e);
  	jit->exitRoutine = e.p;
-@@ -2798,13 +2823,13 @@ static bool compileInStretch(struct Jit* jit, struct Block* block, struct Inst*
+@@ -2836,13 +2861,13 @@ static bool compileInStretch(struct Jit* jit, struct Block* block, struct Inst*
  		storeHead(&c, stub->pc + 2 * c.width);
  		uint8_t* leaveHere = NULL;
  		if (!block->precharged) {
@@ -101,7 +103,7 @@ index 6138b1c..d1fdf04 100644
  			aDpI(e, C_AL, D_CMP, true, 0, R0, CAREFUL_RUN);
  			aB(e, C_EQ, stub->resume);
  			aDpI(e, C_AL, D_CMP, true, 0, R0, CAREFUL_LEAVE);
-@@ -2864,11 +2889,11 @@ static bool compileInStretch(struct Jit* jit, struct Block* block, struct Inst*
+@@ -2902,11 +2927,11 @@ static bool compileInStretch(struct Jit* jit, struct Block* block, struct Inst*
  		uint32_t next = c.insts[0].address + (index + 1) * c.width;
  		patchHere(e, c.deferred[i].site);
  		storeHead(&c, next + 2 * c.width);
@@ -116,10 +118,10 @@ index 6138b1c..d1fdf04 100644
  		aB(e, C_EQ, block->entries[index + 1]);
  		storeConst(&c, OFF(exitPc), next);
 diff --git a/src/cpu/jit-internal.h b/src/cpu/jit-internal.h
-index 8ab16da..3a9ce9b 100644
+index 2e7b71f..b47104f 100644
 --- a/src/cpu/jit-internal.h
 +++ b/src/cpu/jit-internal.h
-@@ -317,6 +317,8 @@ struct Jit {
+@@ -365,6 +365,8 @@ struct Jit {
  		uint32_t probes;
  		uint32_t skips;
  	} idleHeads[IDLE_HEADS];
@@ -128,7 +130,7 @@ index 8ab16da..3a9ce9b 100644
  	// Heads that never skipped, which aren't made heads again until a flush.
  	uint32_t idleRejected[IDLE_HEADS];
  	int idleRejectedNext;
-@@ -405,6 +407,10 @@ struct Jit {
+@@ -487,6 +489,10 @@ struct Jit {
  	uint8_t* exitRoutine;
  	uint8_t* spillRoutine;
  	uint8_t* reloadRoutine;
@@ -140,10 +142,10 @@ index 8ab16da..3a9ce9b 100644
  	uint8_t* dispatchThumb;
  	uint8_t* dispatchBx;
 diff --git a/src/cpu/jit.c b/src/cpu/jit.c
-index 308c894..13c74f8 100644
+index 61e1c7c..6acfe51 100644
 --- a/src/cpu/jit.c
 +++ b/src/cpu/jit.c
-@@ -140,6 +140,8 @@ static bool burstEdge(struct GBA* gba, uint32_t pc, bool thumb) {
+@@ -150,6 +150,8 @@ static bool fetchEdge(struct GBA* gba, uint32_t pc, bool thumb) {
  	return inRom(pc) && !gba->prefetchEnabled && (!((pc + 2 * width) & 0x1FFFF) || !((pc + 3 * width) & 0x1FFFF));
  }
  
@@ -152,7 +154,7 @@ index 308c894..13c74f8 100644
  // Blocks are found by key: the address, with the instruction set in its low bit.
  static uint32_t hashBlock(uint32_t key) {
  	return ((key ^ (key >> 16)) * 0x9E3779B1u >> 16) & (BLOCK_HASH_SIZE - 1);
-@@ -535,6 +537,7 @@ void jitFlush(struct GBA* gba) {
+@@ -620,6 +622,7 @@ void jitFlush(struct GBA* gba) {
  	memset(jit->idleLoops, 0, sizeof(jit->idleLoops));
  	memset(jit->idleSpans, 0, sizeof(jit->idleSpans));
  	memset(jit->idleHeads, 0, sizeof(jit->idleHeads));
@@ -160,7 +162,7 @@ index 308c894..13c74f8 100644
  	memset(jit->idleRejected, 0, sizeof(jit->idleRejected));
  	++jit->idleSpanGen;
  	jit->staleValid = false;
-@@ -1812,7 +1815,23 @@ static void idleProbe(struct GBA* gba, const struct IdleState* start) {
+@@ -2171,7 +2174,23 @@ static void idleProbe(struct GBA* gba, const struct IdleState* start) {
  	loop->period = period;
  }
  
@@ -184,7 +186,7 @@ index 308c894..13c74f8 100644
  	for (int i = 0; i < IDLE_HEADS; ++i) {
  		if (jit->idleHeads[i].key == key) {
  			return true;
-@@ -1842,6 +1861,7 @@ static void idleHeadCount(struct Jit* jit, uint32_t r15, bool probe) {
+@@ -2204,6 +2223,7 @@ static void idleHeadCount(struct Jit* jit, uint32_t r15, bool probe) {
  			++jit->idleHeads[i].skips;
  		} else if (++jit->idleHeads[i].probes >= IDLE_GIVE_UP && !jit->idleHeads[i].skips) {
  			jit->idleHeads[i].key = 0;
@@ -192,7 +194,7 @@ index 308c894..13c74f8 100644
  			jit->idleRejected[jit->idleRejectedNext] = key;
  			jit->idleRejectedNext = (jit->idleRejectedNext + 1) % IDLE_HEADS;
  			idleRecompile(jit, key);
-@@ -1907,6 +1927,7 @@ static void idleNote(struct Jit* jit, const struct Block* constBlock) {
+@@ -2269,6 +2289,7 @@ static void idleNote(struct Jit* jit, const struct Block* constBlock) {
  	}
  	uint32_t old = jit->idleHeads[slot].key;
  	jit->idleHeads[slot] = (typeof(jit->idleHeads[0])) { span->head, 0, 0 };
@@ -200,7 +202,7 @@ index 308c894..13c74f8 100644
  	if (old) {
  		idleRecompile(jit, old);
  	}
-@@ -2418,14 +2439,17 @@ static bool runDue(struct GBA* gba, const struct Block* block) {
+@@ -2829,14 +2850,17 @@ static bool runDue(struct GBA* gba, const struct Block* block) {
  // instruction an event falls in.
  int jitHelperCareful(struct GBA* gba, int32_t cost, int deferrable, const struct Block* block) {
  	struct CPU* cpu = &gba->cpu;
@@ -210,21 +212,21 @@ index 308c894..13c74f8 100644
 +	bool checked = false;
  	if (gba->jitDeferred) {
  		if (!runDue(gba, block)) {
- 			return CAREFUL_LEAVE;
+ 			return onlyIrq(gba, block) ? CAREFUL_STEP : CAREFUL_LEAVE;
  		}
  		gba->jitDeferred = false;
 +		checked = true;
  	}
 -	if (!boundaryOk(gba, block)) {
 +	if (!checked && !boundaryOk(gba, block)) {
- 		return CAREFUL_LEAVE;
+ 		return onlyIrq(gba, block) ? CAREFUL_STEP : CAREFUL_LEAVE;
  	}
  	if (cpu->cycles + cost < cpu->nextEvent) {
-@@ -2694,6 +2718,7 @@ bool jitInit(struct GBA* gba) {
- 		return false;
- 	}
+@@ -3168,6 +3192,7 @@ bool jitInit(struct GBA* gba) {
  	jit->codeEnd = jit->code + jit->codeSize;
+ 	jit->markCap = (int) (jit->codeSize >> 20) * MARKS_PER_MIB;
+ 	jit->marks = calloc((size_t) jit->markCap, sizeof(*jit->marks));
 +	idleHeadsChanged(jit);
  	jit->lookup = calloc(LOOKUP_SIZE, sizeof(*jit->lookup));
- 	if (!jit->lookup) {
+ 	if (!jit->marks || !jit->lookup) {
  		jitDeinit(gba);

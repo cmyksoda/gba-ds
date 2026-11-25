@@ -1,76 +1,32 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: armGBA speedups <none@example.invalid>
 Date: Fri, 20 Nov 2026 18:00:00 -0500
-Subject: armGBA: with a render thread the machine's own renderer keeps only what is read of it, the render log is written without the ring's checks, a DMA run's register writes to the video are one log entry, the exact CPU's decode clears without a call, and the interrupt controller's changes that only clear a flag don't stop compiled code (gbaCside)
+Subject: armGBA: with a render thread the machine's own renderer keeps only
+ what is read of it, the render log is written without the ring's checks, a
+ DMA run's register writes to the video are one log entry, and the interrupt
+ controller's changes that only clear a flag don't stop compiled code
+ (gbaCside bits 1, 2, 4 and 16; bit 8, the exact CPU's decode without a call,
+ is gone: armGBA 2.0's table-driven interpreter steps without decoding)
 
 
-diff --git a/src/cpu/decode.c b/src/cpu/decode.c
-index 0a805ab..cdcc4f7 100644
---- a/src/cpu/decode.c
-+++ b/src/cpu/decode.c
-@@ -4,6 +4,7 @@
-  * License, v. 2.0. If a copy of the MPL was not distributed with this
-  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
- #include "decode.h"
-+#include "../gba.h"
- 
- #include <string.h>
- 
-@@ -60,11 +61,30 @@ static void vcCall(struct Inst* in) {
- 	in->op2.amount = 0;
- }
- 
-+// Zeroes an instruction, in stores rather than the library's memset: the exact CPU decodes every step it makes.
-+static inline void clearInst(struct Inst* in) {
-+	if (!(gbaCside & CSIDE_FAST_STEP)) {
-+		memset(in, 0, sizeof(*in));
-+		return;
-+	}
-+	_Static_assert(sizeof(struct Inst) % 4 == 0 && sizeof(struct Inst) <= 96, "clearInst");
-+	typedef uint32_t __attribute__((may_alias)) Word;
-+	Word* w = (Word*) in;
-+#define CLEAR_WORD(k) \
-+	if ((k) < sizeof(struct Inst) / 4) { \
-+		w[(k)] = 0; \
-+	}
-+	CLEAR_WORD(0) CLEAR_WORD(1) CLEAR_WORD(2) CLEAR_WORD(3) CLEAR_WORD(4) CLEAR_WORD(5) CLEAR_WORD(6) CLEAR_WORD(7)
-+	CLEAR_WORD(8) CLEAR_WORD(9) CLEAR_WORD(10) CLEAR_WORD(11) CLEAR_WORD(12) CLEAR_WORD(13) CLEAR_WORD(14) CLEAR_WORD(15)
-+	CLEAR_WORD(16) CLEAR_WORD(17) CLEAR_WORD(18) CLEAR_WORD(19) CLEAR_WORD(20) CLEAR_WORD(21) CLEAR_WORD(22) CLEAR_WORD(23)
-+#undef CLEAR_WORD
-+}
-+
- // Decodes the ARM instruction opcode at address into in. Bits 27-25 pick the class; everything the
- // CPUs and the recompiler need afterwards is in the fields, so none of them looks at the opcode
- // again.
- void decodeArm(struct Inst* in, uint32_t address, uint32_t opcode) {
--	memset(in, 0, sizeof(*in));
-+	clearInst(in);
- 	in->address = address;
- 	in->opcode = opcode;
- 	in->cond = opcode >> 28;
-@@ -226,7 +246,7 @@ static void thumbAlu(struct Inst* in, int op, int rd, int rn, bool setFlags) {
- // Decodes the Thumb instruction opcode at address. Its top five bits pick the format; each becomes
- // the ARM instruction it stands for, so the rest of the emulator handles one instruction set.
- void decodeThumb(struct Inst* in, uint32_t address, uint16_t opcode) {
--	memset(in, 0, sizeof(*in));
-+	clearInst(in);
- 	in->address = address;
- 	in->opcode = opcode;
- 	in->thumb = true;
+diff --git a/src/cpu/arm.c b/src/cpu/arm.c
+index 0df5258..20ddbe7 100644
+--- a/src/cpu/arm.c
++++ b/src/cpu/arm.c
+@@ -209,7 +209,7 @@ uint32_t jitHelperMsrFast(struct GBA* gba, uint32_t value, uint32_t packed) {
+ 		if (cpu->mode != MODE_USER && (mask & PSR_PRIV_MASK)) {
+ 			after = (after & ~PSR_PRIV_MASK) | (value & PSR_PRIV_MASK);
+ 		}
+-		if (((before ^ after) & PSR_T) || ((before & PSR_I) && !(after & PSR_I) && gba->irq.line)) {
++		if (((before ^ after) & PSR_T) || ((before & PSR_I) && !(after & PSR_I) && gbaIrqLine(gba))) {
+ 			return 1;
+ 		}
+ 	}
 diff --git a/src/cpu/jit.c b/src/cpu/jit.c
-index a8af0bf..c1d9aab 100644
+index 06374cc..8efd414 100644
 --- a/src/cpu/jit.c
 +++ b/src/cpu/jit.c
-@@ -1693,7 +1693,7 @@ static bool romEntryOk(struct GBA* gba, uint32_t pc, bool thumb) {
- // Whether an IRQ is waiting to be taken at the next instruction, with nothing else asking the exact
- // CPU to step it first.
- static bool irqEntry(struct GBA* gba) {
--	return gba->irq.line && !gba->cpu.irqMasked && !gba->traceFile && !gba->cartTrapped;
-+	return gbaIrqLine(gba) && !gba->cpu.irqMasked && !gba->traceFile && !gba->cartTrapped;
- }
- 
- // Takes the IRQ that is waiting, and no more, so that compiled code runs the vector's branch. A frame
-@@ -1709,7 +1709,7 @@ static void enterIrq(struct GBA* gba) {
+@@ -1979,7 +1979,7 @@ static bool romEntryOk(struct GBA* gba, uint32_t pc, bool thumb) {
  // take, the prefetch holding what memory holds, and the prefetch buffer as compiled for.
  static bool compiledMayRun(struct GBA* gba, uint32_t pc, bool thumb) {
  	struct CPU* cpu = &gba->cpu;
@@ -79,7 +35,7 @@ index a8af0bf..c1d9aab 100644
  		return false;
  	}
  	if (!compilable(gba, pc, thumb) || (inRom(pc) && !romEntryOk(gba, pc, thumb))) {
-@@ -2556,14 +2556,14 @@ uint32_t jitHelperSystem(struct GBA* gba, uint32_t opcode, uint32_t address) {
+@@ -2882,14 +2882,14 @@ uint32_t jitHelperSystem(struct GBA* gba, uint32_t opcode, uint32_t address) {
  	if (!writesPc) {
  		// Once unmasked, an IRQ comes one instruction later: the mask from before still holds for
  		// the next instruction.
@@ -96,16 +52,7 @@ index a8af0bf..c1d9aab 100644
  		return JIT_EXACT;
  	}
  	bool thumb = cpu->cpsr & PSR_T;
-@@ -2584,7 +2584,7 @@ uint32_t jitHelperPsrWrite(struct GBA* gba, uint32_t value, uint32_t packed) {
- 	} else {
- 		uint32_t before = cpu->cpsr;
- 		uint32_t after = cpuMsrCpsr(cpu, value, packed);
--		if (((before & PSR_I) && !(after & PSR_I) && gba->irq.line) || ((before ^ after) & PSR_T)) {
-+		if (((before & PSR_I) && !(after & PSR_I) && gbaIrqLine(gba)) || ((before ^ after) & PSR_T)) {
- 			return 1;
- 		}
- 		cpuWriteCpsr(gba, after);
-@@ -2598,7 +2598,7 @@ uint32_t jitHelperPsrWrite(struct GBA* gba, uint32_t value, uint32_t packed) {
+@@ -2906,7 +2906,7 @@ uint32_t jitHelperSystem(struct GBA* gba, uint32_t opcode, uint32_t address) {
  uint32_t jitHelperReturn(struct GBA* gba) {
  	struct CPU* cpu = &gba->cpu;
  	uint32_t spsr = cpu->spsr;
@@ -114,7 +61,7 @@ index a8af0bf..c1d9aab 100644
  		return ~0u;
  	}
  	uint32_t target = cpu->r[15];
-@@ -2614,7 +2614,7 @@ uint32_t jitHelperReturn(struct GBA* gba) {
+@@ -2922,7 +2922,7 @@ uint32_t jitHelperReturn(struct GBA* gba) {
  static bool continuable(struct GBA* gba, uint32_t pc, bool thumb) {
  	struct CPU* cpu = &gba->cpu;
  	int width = thumb ? 2 : 4;
@@ -123,7 +70,12 @@ index a8af0bf..c1d9aab 100644
  		return false;
  	}
  	if (!compilable(gba, pc, thumb) || gba->activeRegion != (int32_t) (pc >> 24)) {
-@@ -2662,7 +2662,7 @@ static bool boundaryOk(struct GBA* gba, const struct Block* block) {
+@@ -2966,11 +2966,11 @@ static bool continuable(struct GBA* gba, uint32_t pc, bool thumb) {
+ }
+ 
+ // Whether compiled code can go on at an instruction boundary in block.
+-static bool boundaryOk(struct GBA* gba, const struct Block* block) {
++static inline __attribute__((always_inline)) bool boundaryOk(struct GBA* gba, const struct Block* block) {
  	struct CPU* cpu = &gba->cpu;
  	struct Jit* jit = gba->jit;
  	return block->valid && !gba->jitLeave && !cpu->halted && !jit->flushRequested && !jit->waitsChanged && !jit->staleValid && gba->video.frameCounter == jit->frame &&
@@ -131,12 +83,41 @@ index a8af0bf..c1d9aab 100644
 +	       !gba->returnRequested && !gba->dmaRunnable && !gba->lastAccessDma && !(gbaIrqLine(gba) && (!cpu->irqMasked || !(cpu->cpsr & PSR_I)));
  }
  
+ // Whether an IRQ to take is all that stops compiled code going on at a boundary in block. The exact
+@@ -2980,13 +2980,13 @@ static bool boundaryOk(struct GBA* gba, const struct Block* block) {
+ static bool onlyIrq(struct GBA* gba, const struct Block* block) {
+ 	struct CPU* cpu = &gba->cpu;
+ 	struct Jit* jit = gba->jit;
+-	return gba->irq.line && !(cpu->cpsr & PSR_I) && block->valid && !gba->jitLeave && !cpu->halted && !jit->flushRequested && !jit->waitsChanged && !jit->staleValid &&
++	return gbaIrqLine(gba) && !(cpu->cpsr & PSR_I) && block->valid && !gba->jitLeave && !cpu->halted && !jit->flushRequested && !jit->waitsChanged && !jit->staleValid &&
+ 	       gba->video.frameCounter == jit->frame && !gba->returnRequested && !gba->dmaRunnable && !gba->lastAccessDma;
+ }
+ 
  // Runs the events due by now at an instruction boundary. Returns false when compiled code has to
+ // leave.
+-static bool runDue(struct GBA* gba, const struct Block* block) {
++static inline __attribute__((always_inline)) bool runDue(struct GBA* gba, const struct Block* block) {
+ 	// At the end of a frame, or when asked to, the run loop returns before anything else runs.
+ 	if (gba->video.frameCounter != gba->jit->frame || gba->returnRequested) {
+ 		return false;
+diff --git a/src/cpu/lean.c b/src/cpu/lean.c
+index bd0c392..b320a43 100644
+--- a/src/cpu/lean.c
++++ b/src/cpu/lean.c
+@@ -1146,7 +1146,7 @@ static inline void leanOne(struct GBA* gba) {
+ 		stepInstruction(gba);
+ 		return;
+ 	}
+-	if (gba->irq.line && !cpu->irqMasked) {
++	if (gbaIrqLine(gba) && !cpu->irqMasked) {
+ 		stepTakeIrq(gba);
+ 	}
+ 	uint32_t const opcode = cpu->prefetch[0];
 diff --git a/src/cpu/step.c b/src/cpu/step.c
-index 1e085d1..92b2a34 100644
+index d6581c1..464888f 100644
 --- a/src/cpu/step.c
 +++ b/src/cpu/step.c
-@@ -647,7 +647,7 @@ void stepTrace(struct GBA* gba) {
+@@ -655,7 +655,7 @@ void stepTrace(struct GBA* gba) {
  // runs.
  static void step(struct GBA* gba) {
  	struct CPU* cpu = &gba->cpu;
@@ -146,7 +127,7 @@ index 1e085d1..92b2a34 100644
  	}
  	if (gba->traceFile) {
 diff --git a/src/gba.c b/src/gba.c
-index 2d3fc6e..0a8f091 100644
+index 8c66a14..330c553 100644
 --- a/src/gba.c
 +++ b/src/gba.c
 @@ -36,6 +36,11 @@ static void freeChange(void* context) {
@@ -161,7 +142,7 @@ index 2d3fc6e..0a8f091 100644
  static void scheduleChange(struct GBA* gba, struct IrqChange* slots, bool value, int32_t cycles, int32_t late) {
  	struct IrqChange* change = &slots[0];
  	while (change->busy && change < &slots[3]) {
-@@ -44,12 +49,85 @@ static void scheduleChange(struct GBA* gba, struct IrqChange* slots, bool value,
+@@ -44,12 +49,83 @@ static void scheduleChange(struct GBA* gba, struct IrqChange* slots, bool value,
  	// With every slot in flight, the newest change takes the last one's place.
  	if (change->busy) {
  		timingDeschedule(gba, &change->event);
@@ -176,10 +157,8 @@ index 2d3fc6e..0a8f091 100644
  	timingScheduleCpu(gba, &change->event, cycles, late);
  }
  
-+static void scheduleChange(struct GBA* gba, struct IrqChange* slots, bool value, int32_t cycles, int32_t late);
-+
 +// A change that clears its stage's flag as a lazy event (CSIDE_LAZY_IRQ): in the list as any event, but compiled code
-+// doesn't stop for it. Out of line, so applyStage stays as small as without it.
++// doesn't stop for it. Out of line, so applyRegisters stays as small as without it.
 +static __attribute__((noinline)) void scheduleLazy(struct GBA* gba, struct IrqChange* slots, int32_t cycles, int32_t late) {
 +	if (gba->cpu.overclock) {
 +		scheduleChange(gba, slots, false, cycles, late);
@@ -247,7 +226,7 @@ index 2d3fc6e..0a8f091 100644
  // The second stage: IE & IF as the halt logic sees it.
  static void availableChanged(struct GBA* gba, void* context, uint32_t late) {
  	(void) late;
-@@ -64,21 +142,46 @@ static void lineChanged(struct GBA* gba, void* context, uint32_t late) {
+@@ -64,9 +140,26 @@ static void lineChanged(struct GBA* gba, void* context, uint32_t late) {
  	gba->irq.line = ((struct IrqChange*) context)->value;
  }
  
@@ -269,52 +248,44 @@ index 2d3fc6e..0a8f091 100644
 +}
 +
  // The first stage: the registers take their new values, and the later stages are scheduled if they
- // change. delay is the cycles from now to the moment this stands for.
--static void applyStage(struct GBA* gba, int32_t delay, int32_t late) {
-+static inline __attribute__((always_inline)) void applyStage(struct GBA* gba, int32_t delay, int32_t late) {
+ // change. ahead is how many cycles from now the stage is meant to happen, late how many ago.
+-static void applyRegisters(struct GBA* gba, int32_t ahead, int32_t late) {
++static inline __attribute__((always_inline)) void applyRegisters(struct GBA* gba, int32_t ahead, int32_t late) {
  	struct Irq* irq = &gba->irq;
+ 	gbaIrqSync(gba);
  	gba->io[IO(REG_IE)] = irq->ie;
- 	gba->io[IO(REG_IF)] = irq->iflags;
+@@ -74,12 +167,20 @@ static void applyRegisters(struct GBA* gba, int32_t ahead, int32_t late) {
  	gba->io[IO(REG_IME)] = irq->ime;
  	bool available = irq->ie & irq->iflags;
  	if (available != irq->available) {
--		scheduleChange(gba, irq->availableChange, available, delay + 1, late);
+-		scheduleChange(gba, irq->availableChange, available, 1 + ahead, late);
 +		if (!available && (gbaCside & CSIDE_LAZY_IRQ)) {
-+			scheduleLazy(gba, irq->availableChange, delay + 1, late);
++			scheduleLazy(gba, irq->availableChange, 1 + ahead, late);
 +		} else {
-+			scheduleChange(gba, irq->availableChange, available, delay + 1, late);
++			scheduleChange(gba, irq->availableChange, available, 1 + ahead, late);
 +		}
  	}
  	bool line = irq->ime && available;
  	if (line != irq->lineDriven) {
  		irq->lineDriven = line;
--		scheduleChange(gba, irq->lineChange, line, delay + 2, late);
+-		scheduleChange(gba, irq->lineChange, line, 2 + ahead, late);
 +		if (!line && (gbaCside & CSIDE_LAZY_IRQ)) {
-+			scheduleLazy(gba, irq->lineChange, delay + 2, late);
++			scheduleLazy(gba, irq->lineChange, 2 + ahead, late);
 +		} else {
-+			scheduleChange(gba, irq->lineChange, line, delay + 2, late);
++			scheduleChange(gba, irq->lineChange, line, 2 + ahead, late);
 +		}
  	}
  }
  
-@@ -93,6 +196,7 @@ static void applyIrq(struct GBA* gba, void* context, uint32_t late) {
- // quietKnown is for a write whose quiet mode is accounted for already (see writeIe).
- static bool appliesAtOnce(struct GBA* gba, bool quietKnown) {
- 	struct Irq* irq = &gba->irq;
+@@ -95,6 +196,7 @@ static void applyIrq(struct GBA* gba, void* context, uint32_t late) {
+ // console's clock, outside events and DMA. An interrupt handler's few writes to these registers
+ // were most of a game's events, each stopping compiled code.
+ static void writeReaches(struct GBA* gba) {
 +	settle(gba);
- 	const struct Event* next = gba->timing.root;
- 	bool wait = gba->performingDma || gba->cpu.overclock || gba->inEvent || gba->timing.reroot || (!quietKnown && (irq->quietPending || gbaQuietHblank(gba)));
- 	return !wait && !(next && timingUntil(gba, (struct Event*) next) <= 1);
-@@ -109,7 +213,7 @@ static void applyWrite(struct GBA* gba) {
- // Whether an event is one of the pipeline's stages: none starts DMA, so each can run after the
- // instruction it falls in.
- bool gbaIrqEvent(const struct Event* event) {
--	return event->callback == applyIrq || event->callback == availableChanged || event->callback == lineChanged;
-+	return event->callback == applyIrq || event->callback == availableChanged || event->callback == lineChanged || event->lazy;
- }
- 
- // Sets up a pool's four events, all with the same callback.
-@@ -131,11 +235,28 @@ static void irqReset(struct GBA* gba) {
+ 	if (!gba->cpu.overclock && !gba->inEvent && !gba->performingDma) {
+ 		uint32_t const now = timingCurrentTime(gba);
+ 		struct Event* const next = gba->timing.reroot ? gba->timing.reroot : gba->timing.root;
+@@ -125,11 +227,28 @@ static void irqReset(struct GBA* gba) {
  	irq->line = false;
  	irq->lineDriven = false;
  	irq->quietPending = false;
@@ -343,32 +314,32 @@ index 2d3fc6e..0a8f091 100644
  	}
  }
  
-@@ -586,6 +707,7 @@ void gbaIrqQuietChanged(struct GBA* gba, bool wasQuiet) {
+@@ -574,6 +693,7 @@ void gbaIrqQuietChanged(struct GBA* gba, bool wasQuiet, uint32_t late) {
  // The three interrupt registers. Each write goes through the pipeline's first stage one cycle
  // later.
- static void writeIe(struct GBA* gba, uint16_t value, bool applyAtOnce) {
+ void gbaWriteIe(struct GBA* gba, uint16_t value) {
 +	settle(gba);
  	gbaIrqSync(gba);
  	bool wasQuiet = gbaQuietHblank(gba);
  	uint16_t old = gba->irq.ie;
-@@ -626,6 +748,7 @@ void gbaWriteIeIf(struct GBA* gba, uint16_t ie, uint16_t acknowledge) {
+@@ -601,6 +721,7 @@ void gbaWriteIe(struct GBA* gba, uint16_t value) {
  
  // Writing a 1 to an IF bit acknowledges that interrupt.
  void gbaWriteIf(struct GBA* gba, uint16_t value) {
 +	settle(gba);
  	gbaIrqSync(gba);
- 	gba->irq.iflags &= ~value;
- 	if ((value & (1 << IRQ_HBLANK)) && gbaQuietHblank(gba)) {
-@@ -638,6 +761,7 @@ void gbaWriteIf(struct GBA* gba, uint16_t value) {
+ 	if (value & gba->irq.iflags & TIMER_IRQS) {
+ 		// An acknowledged timer's next request sets its bit again, so its overflows are events again.
+@@ -615,6 +736,7 @@ void gbaWriteIf(struct GBA* gba, uint16_t value) {
  }
  
  void gbaWriteIme(struct GBA* gba, uint16_t value) {
 +	settle(gba);
  	gba->irq.ime = value & 1;
- 	applyWrite(gba);
+ 	writeReaches(gba);
  }
 diff --git a/src/gba.h b/src/gba.h
-index cd3714b..c87bb40 100644
+index 20bc020..2fd1543 100644
 --- a/src/gba.h
 +++ b/src/gba.h
 @@ -196,6 +196,9 @@ struct Event {
@@ -381,19 +352,19 @@ index cd3714b..c87bb40 100644
  	HOST_POINTER(struct Event* next, next);
  };
  
-@@ -268,6 +271,8 @@ struct Irq {
- 	// H-blank IRQ requests since quietFrom that aren't in IF yet, because IE leaves them out (see
- 	// gbaIrqSync).
- 	bool quietPending;
+@@ -272,6 +275,8 @@ struct Irq {
+ 	// H-blank, which stays an event until then (see gbaWriteIe). In what was padding, so states keep
+ 	// their layout.
+ 	bool quietLater;
 +	// How many events of the two later stages' pools are lazy and in the list (zero in a state).
 +	uint8_t lazy;
  	uint32_t quietFrom;
  	// The time until which IF in io stays valid without calling gbaIrqSync.
  	uint32_t ifStable;
-@@ -995,6 +1000,14 @@ enum {
+@@ -1011,6 +1016,14 @@ enum {
+ };
  // Whether the events due by time can run late, at the next instruction boundary: for the kinds above.
  bool timingDeferrable(struct GBA*, int32_t time, int kind);
- bool gbaIrqEvent(const struct Event*);
 +void gbaIrqSettle(struct GBA*);
 +void gbaIrqLoaded(struct GBA*);
 +// The CPU's IRQ line as of now. Lazy changes only clear it, so when it is clear there is nothing to settle.
@@ -405,7 +376,7 @@ index cd3714b..c87bb40 100644
  void processEvents(struct GBA*);
  
  // step.c: the exact CPU, used for the instructions around events.
-@@ -1030,6 +1043,39 @@ static inline void videoSync(struct GBA* gba) {
+@@ -1053,6 +1066,39 @@ static inline void videoSync(struct GBA* gba) {
  		videoSyncDue(gba);
  	}
  }
@@ -445,9 +416,9 @@ index cd3714b..c87bb40 100644
  int videoLine(struct GBA*);
  void videoHblankDmaArmed(struct GBA*);
  uint32_t videoNextHblank(struct GBA*, uint32_t from);
-@@ -1125,6 +1171,21 @@ enum {
- // Whether the render and sound logs are published and read with the fewest barriers (false: a barrier
- // at every entry, as they were).
+@@ -1175,6 +1221,19 @@ enum {
+ // Whether the sound log is published and read with the fewest barriers (false: a barrier at every
+ // entry, as it was).
  extern bool threadLogsLean;
 +// The ways the emulation thread's own work is made cheaper (gbaCside, a bit mask, each exact): with a
 +// render thread, the machine's renderer keeps only what it is read for.
@@ -455,12 +426,10 @@ index cd3714b..c87bb40 100644
 +enum {
 +	CSIDE_LEAN_VIDEO = 1,
 +	// With 1, the render log's register entries are written without the checks until the ring's end or the workers' progress
-+	// needs them, and a 32-bit write to two video registers is one entry. Needs threadLogsLean (no publishing at each entry).
++	// needs them, and a 32-bit write to two video registers is one entry.
 +	CSIDE_FAST_LOG = 2,
 +	// With 1 and 2: the register writes of a DMA run to video registers go in the log as one entry.
 +	CSIDE_BATCH = 4,
-+	// The exact CPU's steps: an instruction is decoded without a call to clear it.
-+	CSIDE_FAST_STEP = 8,
 +	// The interrupt controller's changes that only clear available or line don't stop compiled code (Event.lazy).
 +	CSIDE_LAZY_IRQ = 16,
 +};
@@ -468,7 +437,7 @@ index cd3714b..c87bb40 100644
  // logged whole.
  extern struct GBA* audioThreaded;
 diff --git a/src/io/io.c b/src/io/io.c
-index cd7f0c1..5a23b7d 100644
+index 3dfe632..071163e 100644
 --- a/src/io/io.c
 +++ b/src/io/io.c
 @@ -103,13 +103,46 @@ static inline bool isVideoRegister(uint32_t address) {
@@ -519,7 +488,7 @@ index cd7f0c1..5a23b7d 100644
  // Handles a 16-bit write to an I/O register at address (an offset into the I/O space). Each case
  // does what the write does and masks value down to the bits that read back; a case that returns has
  // stored its own.
-@@ -503,8 +536,12 @@ void ioWrite32(struct GBA* gba, uint32_t address, uint32_t value) {
+@@ -500,8 +533,12 @@ void ioWrite32(struct GBA* gba, uint32_t address, uint32_t value) {
  		if (isVideoRegister(address) && isVideoRegister(address | 2)) {
  			// No time passes between the halves, so the second sync would find nothing to do.
  			videoSync(gba);
@@ -535,10 +504,10 @@ index cd7f0c1..5a23b7d 100644
  		}
  		ioWrite(gba, address, value & 0xFFFF);
 diff --git a/src/io/timer.c b/src/io/timer.c
-index 3c38b31..eda4d68 100644
+index 9240df5..a3984ef 100644
 --- a/src/io/timer.c
 +++ b/src/io/timer.c
-@@ -298,6 +298,9 @@ static bool writeAtOnce(struct GBA* gba, const struct Timer* written, bool contr
+@@ -307,6 +307,9 @@ static bool writeAtOnce(struct GBA* gba, const struct Timer* written, bool contr
  	if (gba->performingDma || gba->cpu.overclock || gba->inEvent || timing->reroot) {
  		return false;
  	}
@@ -647,12 +616,12 @@ index 72f21cc..a64515a 100644
  	const uint8_t* waits = wide ? gba->waitS32 : gba->waitS16;
  	uint32_t s = dma->nextSource;
 diff --git a/src/state.c b/src/state.c
-index 58de921..6978586 100644
+index 40ce553..0a1b18e 100644
 --- a/src/state.c
 +++ b/src/state.c
-@@ -137,6 +137,12 @@ static void leaveOutHost(const struct GBA* gba, struct GBA* saved) {
- 	if (!saved->irq.quietPending) {
- 		saved->irq.ifStable = timingCpuTime(saved) + INT32_MAX;
+@@ -148,6 +148,12 @@ static void leaveOutHost(const struct GBA* gba, struct GBA* saved) {
+ 			}
+ 		}
  	}
 +	// Lazy changes wait as events in a state, with the flag a load doesn't need.
 +	saved->irq.lazy = 0;
@@ -663,7 +632,7 @@ index 58de921..6978586 100644
  	saved->idleMark = 0;
  	saved->idleCycles = 0;
  	saved->idleRuns = 0;
-@@ -192,6 +198,7 @@ static void leaveOutHost(const struct GBA* gba, struct GBA* saved) {
+@@ -251,6 +257,7 @@ void statePicturesForget(const struct GBA* gba) {
  void gbaSaveState(struct GBA* gba, void* state) {
  	// With a sound thread, the sound so far is in its copy.
  	audioThreadSync(gba);
@@ -671,7 +640,7 @@ index 58de921..6978586 100644
  	struct StateHeader header = { .magic = STATE_MAGIC, .size = sizeof(struct GBA), .base = 0 };
  	struct Event* all[EVENTS];
  	events(gba, all);
-@@ -345,6 +352,7 @@ bool gbaLoadState(struct GBA* gba, const void* state, size_t size) {
+@@ -433,6 +440,7 @@ bool gbaLoadState(struct GBA* gba, const void* state, size_t size) {
  		all[i]->context = was[i]->context;
  		all[i]->next = NULL;
  	}
@@ -680,7 +649,7 @@ index 58de921..6978586 100644
  	gba->timing.root = NULL;
  	gba->timing.reroot = NULL;
 diff --git a/src/timing.c b/src/timing.c
-index 1d58bc4..0c4ae4d 100644
+index b3ab650..ea0c354 100644
 --- a/src/timing.c
 +++ b/src/timing.c
 @@ -122,6 +122,24 @@ void timingSchedule(struct GBA* gba, struct Event* event, int32_t when) {
@@ -738,7 +707,7 @@ index 1d58bc4..0c4ae4d 100644
  			return nextWhen;
  		}
  		timing->root = next->next;
-@@ -250,7 +280,7 @@ bool timingDeferrable(struct GBA* gba, int32_t time, int kind) {
+@@ -247,7 +277,7 @@ bool timingDeferrable(struct GBA* gba, int32_t time, int kind) {
  
  // After compiled code moved nextEvent up to leave early.
  void timingResetNextEvent(struct GBA* gba) {
@@ -748,7 +717,7 @@ index 1d58bc4..0c4ae4d 100644
  }
  
 diff --git a/src/video/render-thread.c b/src/video/render-thread.c
-index 2b57d37..3b06a99 100644
+index 4360239..9ac96a1 100644
 --- a/src/video/render-thread.c
 +++ b/src/video/render-thread.c
 @@ -52,7 +52,7 @@ enum {
@@ -771,11 +740,12 @@ index 2b57d37..3b06a99 100644
  };
  
  struct RenderThread;
-@@ -82,16 +86,17 @@ struct Worker {
+@@ -82,18 +86,18 @@ struct Worker {
  };
  
  struct RenderThread {
-+	// First, so that render.c's writes can go straight into the log (CSIDE_FAST_LOG).
++	// First, so that render.c's writes can go straight into the log (CSIDE_FAST_LOG). The log is a ring:
++	// positions only grow, and an entry is at its position modulo LOG_SIZE.
 +	struct RenderLogEnd end;
  	pthread_mutex_t mutex;
  	pthread_cond_t idle;
@@ -783,26 +753,25 @@ index 2b57d37..3b06a99 100644
  	int count;
 -	// A ring: positions only grow, and an entry is at its position modulo LOG_SIZE.
 -	uint8_t* log;
--	// How much the workers can see of the log, and (the emulation thread's) how much is logged: the rest
--	// waits for the next line, since nothing draws before one.
-+	// How much the workers can see of the log, and (the emulation thread's) how much is logged (end.head): the rest
-+	// waits for the next line, since nothing draws before one. The log is a ring: positions only grow, and an
-+	// entry is at its position modulo LOG_SIZE.
+-	// How much is logged, as far as the workers know. The emulation thread's end of the log is head:
++	// How much is logged, as far as the workers know. The emulation thread's end of the log is end.head:
+ 	// entries that only set up a line (register writes, line starts, latches) wait there to be made
+ 	// visible with the next entry that is published, since a barrier for each of them cost more than
+ 	// the write itself on ARM.
  	atomic_ullong written;
--	uint64_t head, published;
-+	uint64_t published;
+-	uint64_t head;
  	// The emulation thread's: up to where the log is known to be clear of what the workers have yet
  	// to do.
  	uint64_t roomUntil;
-@@ -209,6 +214,7 @@ struct Sharer {
+@@ -210,6 +214,7 @@ struct Sharer {
+ // For the frontend's log and for tests: lines the emulation thread's copy drew, lines it took over
  // from a worker, lines taken as they were last frame, and times its copy was made anew.
  unsigned long renderShareCounts[4];
- bool threadLogsLean = true;
 +uint32_t gbaCside;
  #if !defined(__3DS__)
  // ARMGBA_RENDER_STALL=n: a worker stops for 2 ms holding about one line in n, to test taking over.
  static int stallEvery = -1;
-@@ -321,6 +327,21 @@ static uint32_t play(struct GBA* copy, const uint8_t* entry, uint32_t* size) {
+@@ -322,6 +327,21 @@ static uint32_t play(struct GBA* copy, const uint8_t* entry, uint32_t* size) {
  		copy->renderer.copyCycle = head[3];
  		renderWriteRegister(copy, head[1], head[2]);
  		break;
@@ -824,7 +793,7 @@ index 2b57d37..3b06a99 100644
  	case LOG_START_LINE:
  		renderStartLine(copy, head[1]);
  		break;
-@@ -436,7 +457,7 @@ static void* work(void* context) {
+@@ -437,7 +457,7 @@ static void* work(void* context) {
  #if defined(__3DS__)
  		uint64_t const began = HOST_TICKS();
  #endif
@@ -833,28 +802,31 @@ index 2b57d37..3b06a99 100644
  #if defined(__3DS__)
  		// One worker's time: with two, each draws half the lines.
  		if (!w->index) {
-@@ -489,16 +510,16 @@ static void publish(struct RenderThread* t);
- // Waits until the worker has done everything written so far.
- static void drain(struct RenderThread* t) {
- 	publish(t);
--	await(t, t->head);
-+	await(t, t->end.head);
- }
- 
- // Makes what is logged visible to the workers, and wakes one that sleeps.
- static void publish(struct RenderThread* t) {
--	if (t->published == t->head) {
-+	if (t->published == t->end.head) {
- 		return;
- 	}
--	t->published = t->head;
+@@ -488,8 +508,8 @@ static void await(struct RenderThread* t, uint64_t target) {
+ // Makes everything logged so far, with an entry of size bytes, visible to the worker, and wakes it
+ // if it sleeps.
+ static void publish(struct RenderThread* t, uint32_t size) {
+-	t->head += size;
 -	atomic_store(&t->written, t->head);
-+	t->published = t->end.head;
++	t->end.head += size;
 +	atomic_store(&t->written, t->end.head);
  	if (atomic_load(&t->asleep)) {
  		pthread_mutex_lock(&t->mutex);
  		pthread_cond_signal(&t->workers[0].wake);
-@@ -512,13 +533,13 @@ static void shareBegin(struct GBA* gba);
+@@ -500,10 +520,10 @@ static void publish(struct RenderThread* t, uint32_t size) {
+ 
+ // Waits until the worker has done everything logged so far.
+ static void drain(struct RenderThread* t) {
+-	if (atomic_load_explicit(&t->written, memory_order_relaxed) != t->head) {
++	if (atomic_load_explicit(&t->written, memory_order_relaxed) != t->end.head) {
+ 		publish(t, 0);
+ 	}
+-	await(t, t->head);
++	await(t, t->end.head);
+ }
+ 
+ static void finishShared(struct GBA* gba);
+@@ -511,11 +531,11 @@ static void shareBegin(struct GBA* gba);
  
  // Finds room for the biggest entry, in one piece and clear of what the worker has yet to do.
  static uint8_t* reserve(struct RenderThread* t) {
@@ -864,15 +836,11 @@ index 2b57d37..3b06a99 100644
  	if (at + LOG_MOST > LOG_SIZE) {
  		uint32_t head[4] = { LOG_SKIP, LOG_SIZE - at, 0, 0 };
 -		memcpy(&t->log[at], head, sizeof(head));
--		t->head += LOG_SIZE - at;
--		written = t->head;
 +		memcpy(&t->end.log[at], head, sizeof(head));
-+		t->end.head += LOG_SIZE - at;
-+		written = t->end.head;
+ 		publish(t, LOG_SIZE - at);
+ 		written += LOG_SIZE - at;
  		at = 0;
- 	}
- 	// The workers only get further, so room found once is still there: they are asked how far they
-@@ -532,7 +553,17 @@ static uint8_t* reserve(struct RenderThread* t) {
+@@ -531,7 +551,17 @@ static uint8_t* reserve(struct RenderThread* t) {
  		}
  		t->roomUntil = logNeededFrom(t) + LOG_SIZE;
  	}
@@ -890,17 +858,17 @@ index 2b57d37..3b06a99 100644
 +	quickRoom(gba->renderThread);
  }
  
- // Logs an entry that is a call with up to three arguments.
-@@ -540,7 +571,7 @@ static void entry(struct GBA* gba, uint32_t kind, uint32_t a, uint32_t b, uint32
- 	struct RenderThread* t = gba->renderThread;
- 	uint32_t head[4] = { kind, a, b, c };
- 	memcpy(reserve(t), head, sizeof(head));
--	t->head += sizeof(head);
-+	t->end.head += sizeof(head);
- 	if (kind == LOG_FINISH || !threadLogsLean) {
- 		publish(t);
+ // Logs an entry that is a call with up to three arguments. One that only sets up a line waits to be
+@@ -543,7 +573,7 @@ static void entry(struct GBA* gba, uint32_t kind, uint32_t a, uint32_t b, uint32
+ 	if (kind == LOG_FINISH) {
+ 		publish(t, sizeof(head));
+ 	} else {
+-		t->head += sizeof(head);
++		t->end.head += sizeof(head);
  	}
-@@ -552,8 +583,37 @@ void renderThreadRegister(struct GBA* gba, uint32_t address, uint16_t value) {
+ }
+ 
+@@ -553,8 +583,37 @@ void renderThreadRegister(struct GBA* gba, uint32_t address, uint16_t value) {
  	entry(gba, LOG_REGISTER, address, value, timingCurrentTime(gba) - gba->video.lineStart);
  }
  
@@ -938,7 +906,7 @@ index 2b57d37..3b06a99 100644
  }
  
  void renderThreadLatch(struct GBA* gba) {
-@@ -564,7 +624,8 @@ void renderThreadLatch(struct GBA* gba) {
+@@ -565,7 +624,8 @@ void renderThreadLatch(struct GBA* gba) {
  static void logLine(struct GBA* gba, uint32_t kind, int y) {
  	struct RenderThread* t = gba->renderThread;
  	struct Renderer* renderer = &gba->renderer;
@@ -948,19 +916,17 @@ index 2b57d37..3b06a99 100644
  	uint8_t* data = start + 16;
  	uint32_t changed = renderer->memoryChanged;
  	renderer->memoryChanged = 0;
-@@ -596,7 +657,10 @@ static void logLine(struct GBA* gba, uint32_t kind, int y) {
- 	}
+@@ -598,6 +658,9 @@ static void logLine(struct GBA* gba, uint32_t kind, int y) {
  	memcpy(start, head, sizeof(head));
  	// Entries start on word boundaries.
--	t->head += (data - start + 3) & ~3u;
-+	t->end.head += (data - start + 3) & ~3u;
+ 	publish(t, (data - start + 3) & ~3u);
 +	if (!quick && gbaCside & CSIDE_FAST_LOG) {
 +		quickRoom(t);
 +	}
- 	publish(t);
  }
  
-@@ -636,11 +700,12 @@ static void helperClone(struct RenderThread* t) {
+ void renderThreadScanline(struct GBA* gba, int y) {
+@@ -636,11 +699,12 @@ static void helperClone(struct RenderThread* t) {
  		}
  	}
  	sharerSet(t->helper, t, HELPER, t->frameSeq);
@@ -974,7 +940,7 @@ index 2b57d37..3b06a99 100644
  }
  
  // Lines are shared from here on, if they can be: two workers, each frame waited for, a copy for the
-@@ -714,10 +779,10 @@ static void finishShared(struct GBA* gba) {
+@@ -714,10 +778,10 @@ static void finishShared(struct GBA* gba) {
  		if (t->idleFrames > 30) {
  			t->helperActive = false;
  		} else {
@@ -987,7 +953,7 @@ index 2b57d37..3b06a99 100644
  				t->helperDone += size;
  			}
  		}
-@@ -795,7 +860,7 @@ void renderThreadFinishFrame(struct GBA* gba) {
+@@ -795,7 +859,7 @@ void renderThreadFinishFrame(struct GBA* gba) {
  		renderHooksPublish(gba);
  	}
  	entry(gba, LOG_FINISH, 0, 0, 0);
@@ -996,7 +962,7 @@ index 2b57d37..3b06a99 100644
  }
  
  void renderThreadSetWiden(struct GBA* gba, void (*widen)(uint32_t* dst, const uint16_t* src), uint32_t* first, uint32_t* second) {
-@@ -877,16 +942,17 @@ bool renderThreadStart(struct GBA* gba, bool late, bool second) {
+@@ -877,16 +941,17 @@ bool renderThreadStart(struct GBA* gba, bool late, bool second) {
  	struct RenderThread* t = calloc(1, sizeof(*t));
  	if (t) {
  		t->workers[0].copy = calloc(1, sizeof(struct GBA));
@@ -1017,7 +983,7 @@ index 2b57d37..3b06a99 100644
  	pthread_mutex_init(&t->mutex, NULL);
  	pthread_cond_init(&t->workers[0].wake, NULL);
  	pthread_cond_init(&t->workers[1].wake, NULL);
-@@ -905,7 +971,7 @@ bool renderThreadStart(struct GBA* gba, bool late, bool second) {
+@@ -905,7 +970,7 @@ bool renderThreadStart(struct GBA* gba, bool late, bool second) {
  	if (pthread_create(&t->workers[0].thread, NULL, work, &t->workers[0])) {
  #endif
  		free(t->workers[0].copy);
@@ -1026,7 +992,7 @@ index 2b57d37..3b06a99 100644
  		free(t);
  		return false;
  	}
-@@ -967,6 +1033,6 @@ void renderThreadStop(struct GBA* gba) {
+@@ -967,6 +1032,6 @@ void renderThreadStop(struct GBA* gba) {
  	free(t->workers[1].copy);
  	free(t->helper);
  	free(t->merged);
@@ -1035,10 +1001,10 @@ index 2b57d37..3b06a99 100644
  	free(t);
  }
 diff --git a/src/video/render.c b/src/video/render.c
-index 2044d15..6ee3a8d 100644
+index ab9ff7b..caff27f 100644
 --- a/src/video/render.c
 +++ b/src/video/render.c
-@@ -3242,6 +3242,9 @@ void renderSkipScanline(struct GBA* gba, int y) {
+@@ -3479,6 +3479,9 @@ void renderSkipScanline(struct GBA* gba, int y) {
  }
  
  void renderStartLine(struct GBA* gba, int y) {
@@ -1048,7 +1014,7 @@ index 2044d15..6ee3a8d 100644
  	struct HookSlot* slot = twinOf(gba);
  	if (slot) {
  		oneStartLine(slot->twin, y);
-@@ -3250,6 +3253,10 @@ void renderStartLine(struct GBA* gba, int y) {
+@@ -3487,6 +3490,10 @@ void renderStartLine(struct GBA* gba, int y) {
  }
  
  void renderLatchDispcnt(struct GBA* gba) {
@@ -1059,7 +1025,7 @@ index 2044d15..6ee3a8d 100644
  	struct HookSlot* slot = twinOf(gba);
  	if (slot) {
  		oneLatchDispcnt(slot->twin);
-@@ -3300,6 +3307,106 @@ uint16_t renderWriteRegister(struct GBA* gba, uint32_t address, uint16_t value)
+@@ -3537,6 +3544,106 @@ uint16_t renderWriteRegister(struct GBA* gba, uint32_t address, uint16_t value)
  	return oneWriteRegister(gba, address, value) | kept;
  }
  
@@ -1167,10 +1133,10 @@ index 2044d15..6ee3a8d 100644
  	struct HookSlot* slot = findHooks(gba);
  	if (slot) {
 diff --git a/src/video/render.h b/src/video/render.h
-index 5112fc2..f71551b 100644
+index 5debb4c..e46bb6e 100644
 --- a/src/video/render.h
 +++ b/src/video/render.h
-@@ -278,6 +278,45 @@ void renderForget(struct Renderer*);
+@@ -286,6 +286,45 @@ void renderForget(struct Renderer*);
  // Chooses the SIMD paths if the CPU has them; ARMGBA_RENDER=reference keeps to the scalar ones.
  void renderInit(void);
  uint16_t renderWriteRegister(struct GBA*, uint32_t address, uint16_t value);
@@ -1216,7 +1182,7 @@ index 5112fc2..f71551b 100644
  void renderScanline(struct GBA*, int y);
  void renderSkipScanline(struct GBA*, int y);
  // At the start of each line, the affine backgrounds finish the last line and take on new reference
-@@ -302,6 +341,8 @@ void renderThreadClone(struct GBA*);
+@@ -310,6 +349,8 @@ void renderThreadClone(struct GBA*);
  // Returns the copy's renderer, with everything logged so far drawn.
  const struct Renderer* renderThreadRenderer(struct GBA*);
  void renderThreadRegister(struct GBA*, uint32_t address, uint16_t value);

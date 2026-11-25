@@ -1,15 +1,15 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: armGBA speedups <none@example.invalid>
 Date: Tue, 17 Nov 2026 11:56:51 -0500
-Subject: armGBA: HBlank DMA units from RAM to video registers move in one loop,
- and a video sync that is already done is skipped
+Subject: armGBA: HBlank DMA units from RAM to video registers move in one
+ loop, and a video sync that is already done is skipped
 
 
 diff --git a/src/gba.c b/src/gba.c
-index 8929a84..cdc790d 100644
+index cd5ffb2..8c66a14 100644
 --- a/src/gba.c
 +++ b/src/gba.c
-@@ -613,6 +613,8 @@ void gbaSetOverclock(struct GBA* gba, int8_t overclock) {
+@@ -660,6 +660,8 @@ void gbaSetOverclock(struct GBA* gba, int8_t overclock) {
  	gba->irq.ifStable += moved;
  	timingResetNextEvent(gba);
  	gbaIrqSync(gba);
@@ -19,10 +19,10 @@ index 8929a84..cdc790d 100644
  	// As after a state load, the run loop starts afresh.
  	jitStateLoaded(gba, false);
 diff --git a/src/gba.h b/src/gba.h
-index c66ea35..c5022e5 100644
+index d4773fb..ab3344e 100644
 --- a/src/gba.h
 +++ b/src/gba.h
-@@ -946,6 +946,7 @@ void memoryStore32(struct GBA*, uint32_t address, uint32_t value, int* cycles);
+@@ -965,6 +965,7 @@ void memoryStore32(struct GBA*, uint32_t address, uint32_t value, int* cycles);
  void memoryStore16(struct GBA*, uint32_t address, uint16_t value, int* cycles);
  // Moves count DMA units between plain regions without leaving them; returns the last latch.
  int memoryDmaCopy(struct GBA*, struct Dma*, int count, bool wide, int32_t sourceStep, int32_t destStep);
@@ -30,7 +30,7 @@ index c66ea35..c5022e5 100644
  void memoryStore8(struct GBA*, uint32_t address, uint8_t value, int* cycles);
  uint32_t memoryLoadMultiple(struct GBA*, uint32_t address, int mask, int direction, int* cycles);
  uint32_t memoryStoreMultiple(struct GBA*, uint32_t address, int mask, int direction, int* cycles);
-@@ -1010,8 +1011,14 @@ void ioWrite32(struct GBA*, uint32_t address, uint32_t value);
+@@ -1036,8 +1037,14 @@ void ioWrite32(struct GBA*, uint32_t address, uint32_t value);
  void videoInit(struct GBA*);
  void videoReset(struct GBA*);
  void videoStartAt(struct GBA*, int vcount, int32_t untilHblank);
@@ -169,10 +169,10 @@ index a7a479d..72f21cc 100644
  // table) to *wait. Shared by single loads and block transfers, which differ in what they add.
  static uint32_t load32Raw(struct GBA* gba, uint32_t address, int* wait, const uint8_t* waits) {
 diff --git a/src/video/render.c b/src/video/render.c
-index c49ceb2..2044d15 100644
+index 288caca..ab9ff7b 100644
 --- a/src/video/render.c
 +++ b/src/video/render.c
-@@ -3172,11 +3172,14 @@ static bool twinDraws(const struct HookSlot* slot) {
+@@ -3409,11 +3409,14 @@ static bool twinDraws(const struct HookSlot* slot) {
  }
  
  // The slot whose second picture is being drawn, if it is.
@@ -189,7 +189,7 @@ index c49ceb2..2044d15 100644
  static void drawLine(struct GBA* gba, int y, bool skipped) {
  	struct HookSlot* slot = findHooks(gba);
  	if (!slot) {
-@@ -3288,7 +3291,7 @@ uint16_t renderWriteRegister(struct GBA* gba, uint32_t address, uint16_t value)
+@@ -3525,7 +3528,7 @@ uint16_t renderWriteRegister(struct GBA* gba, uint32_t address, uint16_t value)
  		kept = value & any->hooks->maskedBits;
  		value &= ~any->hooks->maskedBits;
  	}
@@ -199,10 +199,10 @@ index c49ceb2..2044d15 100644
  		struct Renderer* renderer = &slot->twin->renderer;
  		renderer->copyCycle = gba->renderer.copy ? gba->renderer.copyCycle : (int32_t) (timingCurrentTime(gba) - gba->video.lineStart);
 diff --git a/src/video/video.c b/src/video/video.c
-index 5593f3d..d03f1e5 100644
+index 2fe9bf8..cf8a08e 100644
 --- a/src/video/video.c
 +++ b/src/video/video.c
-@@ -135,9 +135,9 @@ static void startLine(struct GBA* gba, uint32_t late) {
+@@ -140,9 +140,9 @@ static void startLine(struct GBA* gba, uint32_t late) {
  	gba->io[IO(REG_DISPSTAT)] = dispstat;
  }
  

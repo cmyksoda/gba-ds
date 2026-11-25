@@ -1,14 +1,15 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: armGBA speedups <none@example.invalid>
 Date: Thu, 19 Nov 2026 18:00:00 -0500
-Subject: armGBA: careful copies and unlinked exits share their stub code, and a careful copy is made even in a frame that has used up its compile time
+Subject: armGBA: careful copies and unlinked exits share their stub code, and
+ a careful copy is made even in a frame that has used up its compile time
 
 
 diff --git a/src/cpu/a32/backend.c b/src/cpu/a32/backend.c
-index 92a4960..1f2ded8 100644
+index 46c8b8b..8b7b781 100644
 --- a/src/cpu/a32/backend.c
 +++ b/src/cpu/a32/backend.c
-@@ -222,8 +222,15 @@ static void emitExit(struct Jit* jit, struct Emitter* e) {
+@@ -230,8 +230,15 @@ static void emitExit(struct Jit* jit, struct Emitter* e) {
  	aPop(e, 0x9FF0);
  }
  
@@ -25,7 +26,7 @@ index 92a4960..1f2ded8 100644
  	aLdr(e, R1, R0, offsetof(struct Link, targetKey));
  	strF(e, R1, OFF(exitPc));
  	strF(e, R0, OFF(exitLink));
-@@ -974,6 +981,123 @@ static uint8_t* emitMemRoutine(struct Jit* jit, struct Emitter* e, int kind, boo
+@@ -983,6 +990,123 @@ static uint8_t* emitMemRoutine(struct Jit* jit, struct Emitter* e, int kind, boo
  	return start;
  }
  
@@ -149,7 +150,7 @@ index 92a4960..1f2ded8 100644
  // Emits everything shared: the entry and exit, the dispatchers, and the memory routines. They are
  // emitted once and sit before the first block. Shifts by a register need no routine here: the
  // host's follow ARM's rules.
-@@ -1009,6 +1133,10 @@ bool backendInit(struct Jit* jit) {
+@@ -1018,6 +1142,10 @@ bool backendInit(struct Jit* jit) {
  	jit->multiplyCarryRoutine = e.p;
  	emitPreserveCall(&e, jitMultiplyCarry);
  	aBx(&e, LR);
@@ -160,7 +161,7 @@ index 92a4960..1f2ded8 100644
  	// For ARMGBA_PERFMAP.
  	static const char* const kinds[8] = { "load32", "load16", "load8", "loadS8", "loadS16", "store32", "store16", "store8" };
  	jitNameCode(jit->spillRoutine, jit->reloadRoutine, "spill");
-@@ -2996,54 +3124,17 @@ static bool compileInStretch(struct Jit* jit, struct Block* block, struct Inst*
+@@ -2997,54 +3125,17 @@ static bool compileInStretch(struct Jit* jit, struct Block* block, struct Inst*
  			link->from = block;
  			continue;
  		}
@@ -226,7 +227,7 @@ index 92a4960..1f2ded8 100644
  	}
  	for (int i = 0; i < c.missCount; ++i) {
  		// What emitMissTerms does for an access that stopped the buffer, then the next
-@@ -3061,21 +3152,16 @@ static bool compileInStretch(struct Jit* jit, struct Block* block, struct Inst*
+@@ -3062,21 +3153,16 @@ static bool compileInStretch(struct Jit* jit, struct Block* block, struct Inst*
  		aB(e, C_AL, miss->resume);
  	}
  	for (int i = 0; i < c.deferredCount; ++i) {
@@ -253,9 +254,9 @@ index 92a4960..1f2ded8 100644
 +		emit32(e, c.prefetch ? STUB_HEAD : 0);
 +		emit32(e, next + 2 * c.width);
  	}
- 	block->outCount = c.linkCount;
- 	block->out = jitAlloc(c.jit, c.linkCount * sizeof(*block->out));
-@@ -3084,11 +3170,9 @@ static bool compileInStretch(struct Jit* jit, struct Block* block, struct Inst*
+ 	if (block->headSite) {
+ 		block->headStub = e->p;
+@@ -3090,11 +3176,9 @@ static bool compileInStretch(struct Jit* jit, struct Block* block, struct Inst*
  		struct Link* link = &block->out[i];
  		link->site = c.linkSites[i];
  		link->stub = e->p;
@@ -271,11 +272,11 @@ index 92a4960..1f2ded8 100644
  	if (e->p > e->end) {
  		forgetTiny(&c);
 diff --git a/src/cpu/jit-internal.h b/src/cpu/jit-internal.h
-index 8300077..df53d84 100644
+index 36e1141..b0fdead 100644
 --- a/src/cpu/jit-internal.h
 +++ b/src/cpu/jit-internal.h
-@@ -430,6 +430,9 @@ struct Jit {
- 	uint8_t* dispatchKey;
+@@ -503,6 +503,9 @@ struct Jit {
+ 	uint8_t* lookupMiss;
  	uint8_t* shiftRoutines[4];
  	uint8_t* multiplyCarryRoutine;
 +	// What the stubs of a careful copy share (backend.c), for backends that use them.
@@ -285,10 +286,10 @@ index 8300077..df53d84 100644
  	uint8_t* exitLinkRoutine;
  	// load32, load16, load8, loadS8, loadS16, store32, store16, store8
 diff --git a/src/cpu/jit.c b/src/cpu/jit.c
-index 2d8bfd6..0daa5af 100644
+index 22e7b13..9aa6bd8 100644
 --- a/src/cpu/jit.c
 +++ b/src/cpu/jit.c
-@@ -2337,9 +2337,8 @@ void jitRunLoop(struct GBA* gba) {
+@@ -2663,9 +2663,8 @@ void jitRunLoop(struct GBA* gba) {
  				// Mario Kart's code memory, and the recompiler threw everything away when that ran out
  				// (2026-11-09). Until an event has fallen in a block a few times, the exact CPU steps
  				// to the event instead, as when there's no room for one.
