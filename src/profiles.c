@@ -7825,7 +7825,8 @@ typedef struct {
 	bool done, failed;
 	int x0, y0, w, h;         /* the area's top left (camera coordinates) and size */
 	int ex0, ey0, ex1, ey1;   /* what's drawn on it: its edges (ex1 / ey1 past them) */
-	uint32_t* px;             /* 0: nothing there */
+	int vw;                   /* done: px's rows' length (bgd_means) */
+	uint32_t* px;             /* 0: nothing there; the picture while it's made, then bgd_means's pixels */
 } BgdMap;
 static BgdMap bgdMap;
 static pthread_t bgdThread;
@@ -7856,6 +7857,51 @@ static bool bgd_go(Emu* e, int x, int y, uint16_t hp) {
 		emu_frame_blind(e, 0);
 	}
 	return false;
+}
+
+/* where the view starts along one axis: around the hero (cam) within the area's edges, or an area no longer than it in its middle */
+static int bgd_view_start(int e0, int e1, int cam, int span) {
+	if (e1 - e0 <= span) return (e0 + e1) / 2 - span / 2;
+	int v = cam - span / 2;
+	return v < e0 ? e0 : v > e1 - span ? e1 - span : v;
+}
+
+/* The picture replaced by its 4x4 means as the view shows them, so a frame copies pixels instead of adding up 614,400 (22 ms on the
+ * 3DS). An axis the area doesn't fill has the view's own, as the view never moves along it; the rest is made in the picture's memory. */
+static bool bgd_means(BgdMap* m) {
+	enum { Z = BGD_Z, SX = GBA_W * BGD_Z, SY = GBA_H * BGD_Z };
+	bool fx = m->ex1 - m->ex0 <= SX, fy = m->ey1 - m->ey0 <= SY;
+	int nx = fx ? GBA_W : m->ex1 - m->ex0 - (Z - 1), ny = fy ? GBA_H : m->ey1 - m->ey0 - (Z - 1);
+	int x0 = fx ? bgd_view_start(m->ex0, m->ex1, 0, SX) : m->ex0, y0 = fy ? bgd_view_start(m->ey0, m->ey1, 0, SY) : m->ey0;
+	int dx = fx ? Z : 1, dy = fy ? Z : 1, cols = dx * (nx - 1) + Z;
+	/* (red and blue, then green, in 16 bits each so that 16 pixels' sums don't carry) */
+	uint32_t* rb = calloc((size_t) cols * 2, 4);
+	uint32_t* g = rb ? rb + cols : NULL;
+	uint32_t* to = fx || fy ? malloc((size_t) nx * ny * 4) : m->px;
+	if (!rb || !to) {
+		free(rb);
+		if (to != m->px) free(to);
+		return false;
+	}
+	int c0 = x0 < 0 ? -x0 : 0, c1 = m->w - x0 < cols ? m->w - x0 : cols;
+	for (int j = 0; j < ny; ++j) {
+		memset(rb, 0, (size_t) cols * 8);
+		for (int k = 0, y = y0 + dy * j; k < Z; ++k, ++y) {
+			if (y < 0 || y >= m->h) continue;
+			const uint32_t* row = m->px + (size_t) y * m->w + x0;
+			for (int c = c0; c < c1; ++c) rb[c] += row[c] & 0x00FF00FF, g[c] += row[c] >> 8 & 0xFF;
+		}
+		/* (made in the picture's memory, a row of means lies behind the rows still to be read) */
+		for (int i = 0; i < nx; ++i) {
+			const uint32_t *r = rb + dx * i, *q = g + dx * i;
+			uint32_t a = r[0] + r[1] + r[2] + r[3], b = q[0] + q[1] + q[2] + q[3];
+			to[(size_t) j * nx + i] = 0xFF000000 | (a >> 4 & 0x00FF00FF) | (b >> 4) << 8;
+		}
+	}
+	free(rb);
+	if (to != m->px) free(m->px), m->px = to;
+	m->vw = nx;
+	return true;
 }
 
 static void* bgd_worker(void* arg) {
@@ -7922,7 +7968,8 @@ static void* bgd_worker(void* arg) {
 					if (y >= m->ey1) m->ey1 = y + 1;
 				}
 		if (m->ex1 <= m->ex0 && (why = "nothing drawn")) goto out;
-		m->done = true;
+		if (!bgd_means(m) && (why = "out of memory")) goto out;
+		__atomic_store_n(&m->done, true, __ATOMIC_RELEASE); /* (the view reads px and vw once it sees this) */
 		struct timespec t1;
 		clock_gettime(CLOCK_MONOTONIC, &t1);
 		fprintf(stderr, "Baldur's Gate: Dark Alliance: area mapped (%dx%d, %d screens%s, %ld ms)\n", m->w, m->h, stops,
@@ -7931,7 +7978,8 @@ static void* bgd_worker(void* arg) {
 out:
 	free(st);
 	if (why) {
-		m->done = m->failed = true;
+		m->failed = true;
+		__atomic_store_n(&m->done, true, __ATOMIC_RELEASE);
 		fprintf(stderr, "Baldur's Gate: Dark Alliance: area not mapped: %s\n", why);
 	}
 	bgdBusy = false;
@@ -8007,6 +8055,34 @@ static const uint32_t* bgd_x(Emu* e) {
 	return x;
 }
 
+/* the view from left, top, out of bgd_means's pixels (every fourth along an axis the area fills) */
+static void bgd_view(const BgdMap* m, int left, int top, uint32_t* out) {
+	enum { Z = BGD_Z };
+	bool fx = m->ex1 - m->ex0 <= GBA_W * Z, fy = m->ey1 - m->ey0 <= GBA_H * Z;
+	for (int oy = 0; oy < GBA_H; ++oy) {
+		const uint32_t* row = m->px + (size_t) (fy ? oy : top - m->ey0 + oy * Z) * m->vw;
+		if (fx) {
+			memcpy(out + oy * GBA_W, row, GBA_W * 4);
+			continue;
+		}
+		row += left - m->ex0;
+		for (int ox = 0; ox < GBA_W; ++ox) out[oy * GBA_W + ox] = row[ox * Z];
+	}
+}
+
+/* the map around his feet (camx, camy) at a quarter of its size, a red X (x, BGD-11) at the game's size where he is */
+static void bgd_compose(const BgdMap* m, int camx, int camy, const uint32_t* x, uint32_t* out) {
+	enum { Z = BGD_Z };
+	int left = bgd_view_start(m->ex0, m->ex1, camx, GBA_W * Z), top = bgd_view_start(m->ey0, m->ey1, camy, GBA_H * Z);
+	bgd_view(m, left, top, out);
+	int hx = (camx - left) / Z - 8, hy = (camy - top) / Z - 8;
+	for (int r = 0; r < 16; ++r) {
+		if (hy + r < 0 || hy + r >= GBA_H) continue;
+		for (int c = 0; c < 16; ++c)
+			if (x[r * 16 + c] && hx + c >= 0 && hx + c < GBA_W) out[(hy + r) * GBA_W + hx + c] = x[r * 16 + c];
+	}
+}
+
 /* the area's map, at a quarter of its size around the hero, a red X where he
  * is (BGD-10, BGD-11); a new area's map made beside the game */
 static const uint32_t* bgd_live_view(Emu* live, const char* rom) {
@@ -8052,44 +8128,9 @@ static const uint32_t* bgd_live_view(Emu* live, const char* rom) {
 		/* in exact runs (the tests), and with no threads, made here */
 		if (getenv("GBADS_SYNC") || pthread_create(&bgdThread, NULL, bgd_worker, NULL)) bgdThread = 0, bgd_worker(NULL);
 	}
-	if (m->failed || !m->done) return NULL; /* (the logo meanwhile) */
-	/* a quarter of the size: each pixel the mean of 4x4 of the picture's,
-	 * centred on his feet, kept within the area's edges; an area smaller
-	 * than the screen in its middle */
-	enum { Z = BGD_Z };
+	if (!__atomic_load_n(&m->done, __ATOMIC_ACQUIRE) || m->failed) return NULL; /* (the logo meanwhile) */
 	int camx = (int32_t) emu_read32(live, BGD_HEROX) / 256 - m->x0, camy = (int32_t) emu_read32(live, BGD_HEROY) / 256 - m->y0;
-	int left = camx - GBA_W * Z / 2, top = camy - GBA_H * Z / 2;
-	if (m->ex1 - m->ex0 <= GBA_W * Z) left = (m->ex0 + m->ex1) / 2 - GBA_W * Z / 2;
-	else if (left < m->ex0) left = m->ex0;
-	else if (left > m->ex1 - GBA_W * Z) left = m->ex1 - GBA_W * Z;
-	if (m->ey1 - m->ey0 <= GBA_H * Z) top = (m->ey0 + m->ey1) / 2 - GBA_H * Z / 2;
-	else if (top < m->ey0) top = m->ey0;
-	else if (top > m->ey1 - GBA_H * Z) top = m->ey1 - GBA_H * Z;
-	for (int oy = 0; oy < GBA_H; ++oy) {
-		int py = top + oy * Z;
-		for (int ox = 0; ox < GBA_W; ++ox) {
-			int qx = left + ox * Z;
-			unsigned r = 0, g = 0, b = 0;
-			for (int dy = 0; dy < Z; ++dy) {
-				if (py + dy < 0 || py + dy >= m->h) continue;
-				for (int dx = 0; dx < Z; ++dx) {
-					if (qx + dx < 0 || qx + dx >= m->w) continue;
-					uint32_t px = m->px[(size_t) (py + dy) * m->w + qx + dx];
-					r += px & 0xFF, g += (px >> 8) & 0xFF, b += (px >> 16) & 0xFF;
-				}
-			}
-			out[oy * GBA_W + ox] = 0xFF000000 | (b / (Z * Z)) << 16 | (g / (Z * Z)) << 8 | r / (Z * Z);
-		}
-	}
-	/* X marks the spot: the red X of an unusable quick slot, at the game's
-	 * size, its middle where his feet are (BGD-11) */
-	const uint32_t* x = bgd_x(live);
-	int hx = (camx - left) / Z - 8, hy = (camy - top) / Z - 8;
-	for (int r = 0; r < 16; ++r) {
-		if (hy + r < 0 || hy + r >= GBA_H) continue;
-		for (int c = 0; c < 16; ++c)
-			if (x[r * 16 + c] && hx + c >= 0 && hx + c < GBA_W) out[(hy + r) * GBA_W + hx + c] = x[r * 16 + c];
-	}
+	bgd_compose(m, camx, camy, bgd_x(live), out);
 	return out;
 }
 
