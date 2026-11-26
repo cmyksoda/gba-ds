@@ -5076,6 +5076,10 @@ static const MmbnNet* mmbn_net(const Emu* e) {
 }
 static const MmbnNet* mmbnN = &mmbnNet[0]; /* the live game's, set as a map is asked for */
 #define MMBN_SETTLE 4           /* frames from setting him down to the screen drawn */
+#define MMBN_Z 3                /* the view's pixel: the mean of MMBN_Z x MMBN_Z of the map's */
+#define MMBN_PAD (MMBN_Z - 1)   /* the map has this many blank pixels before its first row and column: where the first windows start */
+/* the map's pixel (x, y), from -MMBN_PAD */
+#define MMBN_PX(m, x, y) ((m)->px[(size_t) ((y) + MMBN_PAD) * ((m)->w + MMBN_PAD) + (x) + MMBN_PAD])
 typedef struct {
 	uint16_t area;
 	bool done, failed, early; /* early: the camera wasn't following him yet */
@@ -5175,6 +5179,76 @@ static void mmbn_head(Emu* e, uint16_t area, uint32_t pos, MmbnMap* m, uint32_t 
 	m->headW = 24, m->headH = h, m->headDown = fy - top;
 }
 
+static int mmbn_floor_z(int v) {
+	return v >= 0 ? v / MMBN_Z : -((MMBN_Z - 1 - v) / MMBN_Z);
+}
+
+/* A finished row holds its windows grouped by the start's x modulo Z, each group in order of x: the group's first start (0, then
+ * -2, -1: the first from -MMBN_PAD up) and where it begins. */
+static int mmbn_group(int w, int a, int* first) {
+	int begin = 0;
+	for (int g = 0; g < a; ++g) begin += (w - 1 - (g ? g - MMBN_Z : 0)) / MMBN_Z + 1;
+	*first = a ? a - MMBN_Z : 0;
+	return begin;
+}
+
+/* The means a view needs, made once the map is done, over the map itself: the Z x Z window starting at each pixel (what is off the
+ * map counts as 0), row after row (a window only reads pixels not yet written over), each row put in the order above. */
+static bool mmbn_means(MmbnMap* m) {
+	const int w = m->w, h = m->h, stride = w + 2 * MMBN_Z;
+	/* a row's channels packed 21 bits apart (a window's sums fit), then its sums over Z pixels: the last Z rows' */
+	uint64_t* line = calloc((size_t) (1 + MMBN_Z) * stride, sizeof(uint64_t));
+	if (!line) return false;
+	uint64_t* row[MMBN_Z];
+	for (int k = 0; k < MMBN_Z; ++k) row[k] = line + (size_t) (1 + k) * stride;
+	int first[MMBN_Z], begin[MMBN_Z];
+	for (int a = 0; a < MMBN_Z; ++a) begin[a] = mmbn_group(w, a, &first[a]);
+	const unsigned n = MMBN_Z * MMBN_Z;
+	for (int y = -MMBN_PAD; y < h; ++y) {
+		int r = y + MMBN_PAD; /* (this row joins the rows kept, the oldest leaves) */
+		memset(line, 0, (size_t) stride * sizeof(uint64_t));
+		for (int x = 0; r < h && x < w; ++x) {
+			uint32_t c = MMBN_PX(m, x, r);
+			line[x + MMBN_PAD] = (c & 0xFF) | (uint64_t) (c >> 8 & 0xFF) << 21 | (uint64_t) (c >> 16 & 0xFF) << 42;
+		}
+		uint64_t* sum = row[r % MMBN_Z];
+		for (int x = 0; x < w + MMBN_PAD; ++x) {
+			sum[x] = 0;
+			for (int k = 0; k < MMBN_Z; ++k) sum[x] += line[x + k];
+		}
+		uint32_t* dst = &MMBN_PX(m, -MMBN_PAD, y);
+		for (int x = -MMBN_PAD; x < w; ++x) {
+			uint64_t t = 0;
+			for (int k = 0; k < MMBN_Z; ++k) t += row[k][x + MMBN_PAD];
+			int a = (x + MMBN_Z) % MMBN_Z;
+			dst[begin[a] + (x - first[a]) / MMBN_Z] =
+			    0xFF000000 | (uint32_t) (t >> 42) / n << 16 | (uint32_t) (t >> 21 & 0x1FFFFF) / n << 8 | (uint32_t) (t & 0x1FFFFF) / n;
+		}
+	}
+	free(line);
+	return true;
+}
+
+/* The view for the windows starting at (left + Z x, top + Z y): runs of the rows' groups, black where a window is off the map. */
+static void mmbn_view(const MmbnMap* m, int left, int top, uint32_t* out) {
+	int first, begin = mmbn_group(m->w, left - MMBN_Z * mmbn_floor_z(left), &first);
+	/* the columns whose windows touch the map: starting from -MMBN_PAD up to its last pixel */
+	int x0 = -mmbn_floor_z(left + MMBN_PAD), x1 = mmbn_floor_z(m->w - 1 - left) + 1;
+	x0 = x0 < 0 ? 0 : x0 > GBA_W ? GBA_W : x0;
+	x1 = x1 < x0 ? x0 : x1 > GBA_W ? GBA_W : x1;
+	for (int oy = 0; oy < GBA_H; ++oy) {
+		uint32_t* dst = out + oy * GBA_W;
+		int py = top + oy * MMBN_Z;
+		if (py < -MMBN_PAD || py >= m->h) {
+			for (int ox = 0; ox < GBA_W; ++ox) dst[ox] = 0xFF000000;
+			continue;
+		}
+		for (int ox = 0; ox < x0; ++ox) dst[ox] = 0xFF000000;
+		if (x1 > x0) memcpy(dst + x0, &MMBN_PX(m, -MMBN_PAD, py) + begin + (left + MMBN_Z * x0 - first) / MMBN_Z, (size_t) (x1 - x0) * sizeof(uint32_t));
+		for (int ox = x1; ox < GBA_W; ++ox) dst[ox] = 0xFF000000;
+	}
+}
+
 static void* mmbn_worker(void* arg) {
 	const MmbnNet* N = mmbnN;
 	(void) arg;
@@ -5224,7 +5298,7 @@ static void* mmbn_worker(void* arg) {
 					bool need = false;
 					for (int y = ty - GBA_H / 2; y < ty + GBA_H / 2 && !need; y += 4)
 						for (int x = tx - GBA_W / 2; x < tx + GBA_W / 2 && !need; x += 4)
-							need = x >= X0 && y >= Y0 && x < X0 + W && y < Y0 + H && !m->px[(size_t) (y - Y0) * W + x - X0];
+							need = x >= X0 && y >= Y0 && x < X0 + W && y < Y0 + H && !MMBN_PX(m, x - X0, y - Y0);
 					if (!need) continue;
 					tx += 24, ty += 16;
 				}
@@ -5242,7 +5316,7 @@ static void* mmbn_worker(void* arg) {
 						if (qx < 0 || qx >= W) continue;
 						uint32_t c = emu_fb(e)[sy * GBA_W + sx] & 0xFFFFFF;
 						/* (transparent: black, but marked seen) */
-						m->px[(size_t) py * W + qx] = c == magenta ? 0xFE000000 : c | 0xFF000000;
+						MMBN_PX(m, qx, py) = c == magenta ? 0xFE000000 : c | 0xFF000000;
 					}
 				}
 			}
@@ -5252,7 +5326,7 @@ static void* mmbn_worker(void* arg) {
 		m->ex0 = W, m->ey0 = H, m->ex1 = m->ey1 = 0;
 		for (int y = 0; y < H; ++y)
 			for (int x = 0; x < W; ++x)
-				if (m->px[(size_t) y * W + x] >> 24 == 0xFF) {
+				if (MMBN_PX(m, x, y) >> 24 == 0xFF) {
 					if (x < m->ex0) m->ex0 = x;
 					if (x >= m->ex1) m->ex1 = x + 1;
 					if (y < m->ey0) m->ey0 = y;
@@ -5260,6 +5334,7 @@ static void* mmbn_worker(void* arg) {
 				}
 		if (m->ex1 <= m->ex0) m->ex0 = 0, m->ey0 = 0, m->ex1 = W, m->ey1 = H;
 		mmbn_head(e, area, pos, m, magenta);
+		if (!mmbn_means(m) && (why = "no memory for its view")) goto out;
 		m->done = true;
 		struct timespec t1;
 		clock_gettime(CLOCK_MONOTONIC, &t1);
@@ -5309,7 +5384,7 @@ static const uint32_t* mmbn_live_view(Emu* live, const char* rom) {
 		if (tw < 30 || th < 20) return NULL;
 		m->area = area;
 		m->w = tw * 8, m->h = th * 8, m->x0 = -tw * 4, m->y0 = -th * 4;
-		if (!(m->px = calloc((size_t) m->w * m->h, 4))) {
+		if (!(m->px = calloc((size_t) (m->w + MMBN_PAD) * (m->h + MMBN_PAD), 4))) {
 			memset(m, 0, sizeof(*m));
 			return NULL;
 		}
@@ -5344,7 +5419,7 @@ static const uint32_t* mmbn_live_view(Emu* live, const char* rom) {
 	 * centred on MegaMan (his screen position: x + y, (y - x) / 2 - z), but
 	 * kept within the area's edges; an area smaller than the screen in
 	 * its middle */
-	enum { Z = 3 };
+	enum { Z = MMBN_Z };
 	int camx = (int16_t) emu_read16(live, N->cam + 4), camy = (int16_t) emu_read16(live, N->cam + 6);
 	uint32_t pos = emu_read32(live, N->cam + 0x10);
 	if (pos >= 0x02000000 && pos < 0x02040000) {
@@ -5359,22 +5434,7 @@ static const uint32_t* mmbn_live_view(Emu* live, const char* rom) {
 	if (m->ey1 - m->ey0 <= GBA_H * Z) top = (m->ey0 + m->ey1) / 2 - GBA_H * Z / 2;
 	else if (top < m->ey0) top = m->ey0;
 	else if (top > m->ey1 - GBA_H * Z) top = m->ey1 - GBA_H * Z;
-	for (int oy = 0; oy < GBA_H; ++oy) {
-		int py = top + oy * Z;
-		for (int ox = 0; ox < GBA_W; ++ox) {
-			int qx = left + ox * Z;
-			unsigned r = 0, g = 0, b = 0;
-			for (int dy = 0; dy < Z; ++dy) {
-				if (py + dy < 0 || py + dy >= m->h) continue;
-				for (int dx = 0; dx < Z; ++dx) {
-					if (qx + dx < 0 || qx + dx >= m->w) continue;
-					uint32_t c = m->px[(size_t) (py + dy) * m->w + qx + dx];
-					r += c & 0xFF, g += (c >> 8) & 0xFF, b += (c >> 16) & 0xFF;
-				}
-			}
-			out[oy * GBA_W + ox] = 0xFF000000 | (b / (Z * Z)) << 16 | (g / (Z * Z)) << 8 | r / (Z * Z);
-		}
-	}
+	mmbn_view(m, left, top, out);
 	/* his head where he stands, at the game's size: centred on where his
 	 * sprite, at a third, would be */
 	if (m->headH) {
