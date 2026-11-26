@@ -384,6 +384,12 @@ frame in armGBA itself. What cut it, with the same pictures, RAM and sound
   is reclaimed), and the walks took 3.9 to 6.9 ms a frame there on a New 2DS XL. The
   check now reads the heap past malloc's break first and walks only when that could be
   under the line, so Final Fantasy VI never walks.
+- The second screen's check for a dark picture (each frame, for a capture after a fade)
+  read every seventh pixel of the picture on the game thread: on a dark one, all 5,486
+  of them, a cache miss each, about 1 ms a frame through Final Fantasy VI's fades into
+  and out of its first battle. armGBA's render workers now count the bright ones as
+  they widen each row, and the check uses that count when the picture is the one they
+  made.
 - `make PGO=use` builds armGBA's files from a profile (`3ds/emu/pgo/`, made
   with `PGO=gen` and `3ds/emu/pgo-train.py`; both builds need `BUILD=build/gen`,
   emptied first: GCC names a static function's profile by its object's path):
