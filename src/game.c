@@ -8152,12 +8152,13 @@ static void draw_toggle_btn(void) {
 
 static bool frame_is_dark(Emu* e) {
 	/* dark: under 1 bright pixel in 40 of the ones sampled; a lit picture says no after the first few hundred */
-	const int total = (GBA_W * GBA_H + 6) / 7, most = (total - 1) / 40;
+	const int total = (GBA_W * GBA_H + EMU_DARK_STEP - 1) / EMU_DARK_STEP, most = (total - 1) / 40;
+	/* (the 3DS's render workers count them as they make the picture: read here, each sample of a dark one costs a cache miss) */
+	const int counted = emu_bright_samples(e);
+	if (counted >= 0) return counted <= most;
 	int bright = 0;
-	for (int i = 0; i < GBA_W * GBA_H; i += 7) {
-		uint32_t c = emu_pixel_n(e, i);
-		int lum = ((c & 0xFF) + ((c >> 8) & 0xFF) * 2 + ((c >> 16) & 0xFF)) >> 2;
-		if (lum > 40 && ++bright > most) return false;
+	for (int i = 0; i < GBA_W * GBA_H; i += EMU_DARK_STEP) {
+		if (emu_bright(emu_pixel_n(e, i)) && ++bright > most) return false;
 	}
 	return true;
 }

@@ -81,6 +81,7 @@ typedef struct ArmCore {
 	bool wideLinear;   /* raw_picture: wideBuf is linear memory, written back by the worker, that the copy engine reads as it is */
 	unsigned widePitch; /* ... and the words a row of it has (256: one transfer tiles it; 240: two passes) */
 	uint32_t* twin[2]; /* gpu_twin: wideBuf's pictures again in the GPU's byte order (linear memory, HOST_TWIN_STRIDE words a row) */
+	int bright; /* emu_bright_samples: the bright samples of the frame taken, as the workers counted them; -1 if not, or given */
 } ArmCore;
 
 static ArmCore* AC(const Emu* e) {
@@ -863,6 +864,11 @@ static void close_core(ArmCore* c) {
 static uint32_t colour_8888(uint16_t v);
 static void widen_tables(void);
 static void widen_row(uint32_t* dst, const uint16_t* src);
+/* Each wide buffer's bright samples (emu_bright) row by row, counted by the worker that widens the row while its source
+ * is in that worker's cache; 0xFF: a row not widened yet. */
+static const uint32_t* brightBase[2];
+static uint8_t brightRows[2][GBA_H];
+
 int emuRenderWorkers = 1;
 bool emuHiddenCopy;
 
@@ -956,6 +962,7 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 	if (!c) return false;
 	e->core = (struct mCore*) c;
 	c->layers = 0x1F;
+	c->bright = -1;
 #ifdef __3DS__
 	/* (the game's own core is the one with sound: the large share of the
 	 * recompiler's memory, and the console's other cores to draw and mix on) */
@@ -1191,6 +1198,8 @@ bool emu_open(Emu* e, const char* romPath, const char* savePath, bool audio) {
 #ifdef __3DS__
 			if (!c->wideLinear) twin_open(c, emuRenderWorkers == 1);
 #endif
+			brightBase[0] = c->wideBuf[0], brightBase[1] = c->wideBuf[1];
+			memset(brightRows, 0xFF, sizeof(brightRows));
 			renderThreadSetWiden(gba, widen_row, c->wideBuf[0], c->wideBuf[1]);
 		} else {
 			wide_free(c);
@@ -1419,6 +1428,7 @@ static bool raw_open(ArmCore* c) {
 
 /* (the copy engine may still be reading a raw picture: the GPU is waited for before it goes) */
 static void wide_free(ArmCore* c) {
+	if (c->wideBuf[0] && brightBase[0] == c->wideBuf[0]) brightBase[0] = brightBase[1] = NULL;
 #ifdef __3DS__
 	if (c->wideLinear) {
 		host_picture_raw(NULL); /* (a later game's picture may sit at the freed picture's address) */
@@ -1445,9 +1455,37 @@ static void wide_free(ArmCore* c) {
 	c->wideBuf[0] = c->wideBuf[1] = NULL;
 }
 
+static void bright_count(const uint32_t* dst, const uint16_t* src) {
+	if (!brightBase[0]) return;
+	int const k = dst >= brightBase[1] && dst < brightBase[1] + GBA_W * GBA_H;
+	if (dst < brightBase[k] || dst >= brightBase[k] + GBA_W * GBA_H) return;
+	int const y = (int) ((dst - brightBase[k]) / GBA_W);
+	int n = 0;
+	for (int x = (EMU_DARK_STEP - y * GBA_W % EMU_DARK_STEP) % EMU_DARK_STEP; x < GBA_W; x += EMU_DARK_STEP) n += emu_bright(widen(src[x]));
+	brightRows[k][y] = (uint8_t) n;
+}
+
+static int bright_sum(int k) {
+	int n = 0;
+	for (int y = 0; y < GBA_H; ++y) {
+		if (brightRows[k][y] == 0xFF) return -1;
+		n += brightRows[k][y];
+	}
+	return n;
+}
+
+int emu_bright_samples(Emu* e) {
+	ArmCore* const c = AC(e);
+	if (!c) return -1;
+	int const n = e->fbPainted ? -1 : c->bright;
+	c->bright = -1;
+	return n;
+}
+
 /* One row, from a render worker (its source is word aligned: the log's frame). */
 static void widen_row(uint32_t* dst, const uint16_t* src) {
 	const uint32_t* words = __builtin_assume_aligned(src, 4);
+	bright_count(dst, src);
 #ifdef __3DS__
 	int y = 0;
 	uint32_t* twin = NULL;
@@ -1526,6 +1564,9 @@ static void take_picture(Emu* e) {
 	for (int i = 0; mark && i < GBA_W * GBA_H; ++i) {
 		if (mark[i] == MARK_555) e->fb[i] = (e->fb[i] & 0x00FFFFFFu) | 0xFC000000u;
 	}
+	/* (the marks are in the fourth bytes, which emu_bright doesn't read) */
+	c->bright = wide ? bright_sum(wide == c->wideBuf[1]) : -1;
+	e->fbPainted = false;
 }
 
 static void run_frame(Emu* e, uint32_t keys, bool draw) {
@@ -1551,6 +1592,7 @@ static void run_frame(Emu* e, uint32_t keys, bool draw) {
 		e->fbCompactOk = false;
 		e->fbGpu = NULL;
 	}
+	if (!draw) c->bright = -1;
 	++e->frames;
 	gbaSetKeys(gba, (uint16_t) keys);
 	gba->gpio.luminance = solar_reading();

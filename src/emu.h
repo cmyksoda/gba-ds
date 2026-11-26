@@ -62,6 +62,7 @@ typedef struct Emu {
 	uint32_t fbPitch;      /* the words a row of fb has (0: GBA_W; raw_picture's pictures have rows 256 apart); emu_fb() gives GBA_W rows whatever this is */
 	uint32_t* fbCompact;   /* fb in GBA_W rows, made by emu_fb() when fb has other rows (valid while fbCompactOk) */
 	bool fbCompactOk;
+	bool fbPainted; /* fb written by emu_fb_put, emu_fb_put_run or emu_fb_set since its frame was made (emu_bright_samples) */
 	unsigned fbCompactCopies; /* how many copies emu_fb() made (each costs the game thread a read of the whole picture) */
 #ifdef COLOR_16_BIT
 	/* libmgba with 16-bit pixels (RGB565): mGBA draws into fb16; fb is made from it by emu_fb() */
@@ -172,6 +173,7 @@ static inline uint32_t emu_pixel_n(Emu* e, int i) {
 #define EMU_TWIN_STRIDE 256
 static inline void emu_fb_put(Emu* e, int x, int y, uint32_t c) {
 	e->fb[y * emu_pitch(e) + x] = c;
+	e->fbPainted = true;
 	if (e->fbCompactOk) e->fbCompact[y * GBA_W + x] = c;
 	if (e->fbGpu) {
 		if (e->fbGpu != e->fb) ((uint32_t*) e->fbGpu)[y * EMU_TWIN_STRIDE + x] = __builtin_bswap32(c);
@@ -181,6 +183,7 @@ static inline void emu_fb_put(Emu* e, int x, int y, uint32_t c) {
 /* n pixels of one row from px. */
 static inline void emu_fb_put_run(Emu* e, int x, int y, const uint32_t* px, int n) {
 	memcpy(&e->fb[y * emu_pitch(e) + x], px, (size_t) n * sizeof(uint32_t));
+	e->fbPainted = true;
 	if (e->fbCompactOk) memcpy(&e->fbCompact[y * GBA_W + x], px, (size_t) n * sizeof(uint32_t));
 	if (e->fbGpu) {
 		if (e->fbGpu != e->fb) {
@@ -196,6 +199,21 @@ static inline void emu_fb_set(Emu* e, const uint32_t* px) {
 	else for (int y = 0; y < GBA_H; ++y) memcpy(&e->fb[y * pitch], &px[y * GBA_W], GBA_W * sizeof(uint32_t));
 	e->fbCompactOk = false;
 	e->fbGpu = NULL;
+	e->fbPainted = true;
+}
+#endif
+/* game.c's frame_is_dark samples every EMU_DARK_STEP-th pixel from the first and counts the bright ones. */
+#define EMU_DARK_STEP 7
+static inline bool emu_bright(uint32_t c) {
+	return (((c & 0xFF) + ((c >> 8) & 0xFF) * 2 + ((c >> 16) & 0xFF)) >> 2) > 40;
+}
+#ifdef GBADS_ARMGBA
+/* The bright samples of the frame just made, as the render workers counted them, or -1; given once a frame. */
+int emu_bright_samples(Emu* e);
+#else
+static inline int emu_bright_samples(Emu* e) {
+	(void) e;
+	return -1;
 }
 #endif
 
