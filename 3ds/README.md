@@ -378,6 +378,13 @@ frame in armGBA itself. What cut it, with the same pictures, RAM and sound
   job the `armgba_stats = N` lines (what compiled, why and when it flushed, the code
   and heap used) go to the job's results, not the log, which drops writes while the
   card is busy.
+- A reclaim was still a long frame: 13 to 25 ms in Final Fantasy VI on a New 2DS XL,
+  most of it a kernel call to flush each of the thousands of jumps it unlinks, reads
+  of blocks that weren't going away and a scan of the whole 768 KiB lookup. Patches
+  0021-0024 make it 6 to 11 ms with the same blocks taken out and the same code
+  compiled after: the flushes are one kernel call (`ctr/jitmem.c`, on hardware), the
+  lists are passed over without reading the blocks that stay, and the scan, which
+  never found anything, is gone.
 - Before every 16th compile the recompiler checks whether the heap is running low. That
   was newlib's `mallinfo`, which walks every free chunk: by Final Fantasy VI's first
   battle the lists held 13,000 to 17,000 chunks (block records freed as the code memory
