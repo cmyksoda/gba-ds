@@ -378,6 +378,12 @@ frame in armGBA itself. What cut it, with the same pictures, RAM and sound
   job the `armgba_stats = N` lines (what compiled, why and when it flushed, the code
   and heap used) go to the job's results, not the log, which drops writes while the
   card is busy.
+- Before every 16th compile the recompiler checks whether the heap is running low. That
+  was newlib's `mallinfo`, which walks every free chunk: by Final Fantasy VI's first
+  battle the lists held 13,000 to 17,000 chunks (block records freed as the code memory
+  is reclaimed), and the walks took 3.9 to 6.9 ms a frame there on a New 2DS XL. The
+  check now reads the heap past malloc's break first and walks only when that could be
+  under the line, so Final Fantasy VI never walks.
 - `make PGO=use` builds armGBA's files from a profile (`3ds/emu/pgo/`, made
   with `PGO=gen` and `3ds/emu/pgo-train.py`; both builds need `BUILD=build/gen`,
   emptied first: GCC names a static function's profile by its object's path):
