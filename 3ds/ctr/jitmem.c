@@ -143,7 +143,10 @@ bool jitHostMemoryLow(void) {
 	static __thread bool low;
 	static __thread size_t most;
 	if (low || (calls++ & 15) == 0) {
-		size_t const avail = host_heap_free();
+		// (mallinfo's walk, thousands of chunks after reclaims, only when the heap past the break could leave it low;
+		// most then keeps that floor, which settles a later low the same way as the walk's figure)
+		size_t const past = low ? 0 : host_heap_floor();
+		size_t const avail = past >= HEAP_LOW + (1 << 20) ? past : host_heap_free();
 		if (avail > most) {
 			most = avail;
 		}

@@ -14,6 +14,7 @@ bool isEmulator(void); /* Azahar and Citra */
 bool isNew3ds(void);
 
 size_t host_heap_free(void);
+size_t host_heap_floor(void);
 /* One line on where malloc's break sits and the live blocks just under it (the bench). */
 void host_heap_shape(char* out, size_t n);
 /* A ROM at the top of the heap's range, out of the way of the heap's own allocations (NULL: no room). */

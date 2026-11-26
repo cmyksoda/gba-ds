@@ -592,6 +592,14 @@ size_t host_heap_free(void) {
 	return __ctru_heap_size > used ? __ctru_heap_size - used : 0;
 }
 
+/* What host_heap_free can't come under, without mallinfo's walk of every free chunk: the heap past malloc's break. */
+size_t host_heap_floor(void) {
+	__malloc_lock(_REENT);
+	u32 const used = (u32) ((char*) sbrk(0) - fake_heap_start) + hostTopBytes;
+	__malloc_unlock(_REENT);
+	return __ctru_heap_size > used ? __ctru_heap_size - used : 0;
+}
+
 /* Walks malloc's chunks (newlib's: a size word at +4 with flags below 8, a chunk in use when the next one's PREV_INUSE bit
  * says so) to say where the heap's break sits and which live blocks hold it up. */
 void host_heap_shape(char* out, size_t n) {
