@@ -5335,7 +5335,7 @@ static void* mmbn_worker(void* arg) {
 		if (m->ex1 <= m->ex0) m->ex0 = 0, m->ey0 = 0, m->ex1 = W, m->ey1 = H;
 		mmbn_head(e, area, pos, m, magenta);
 		if (!mmbn_means(m) && (why = "no memory for its view")) goto out;
-		m->done = true;
+		__atomic_store_n(&m->done, true, __ATOMIC_RELEASE); /* (the view reads the means once it sees this) */
 		struct timespec t1;
 		clock_gettime(CLOCK_MONOTONIC, &t1);
 		fprintf(stderr, "%s: area %04X mapped (%dx%d, layers %X, %ld ms)\n", N->title, area, W, H, layers,
@@ -5343,7 +5343,8 @@ static void* mmbn_worker(void* arg) {
 	}
 out:
 	if (why) {
-		m->done = m->failed = true;
+		m->failed = true;
+		__atomic_store_n(&m->done, true, __ATOMIC_RELEASE);
 		/* (always logged: why the second screen keeps the logo on the net) */
 		fprintf(stderr, "%s: area %04X not mapped: %s\n", N->title, m->area, why);
 	}
@@ -5414,7 +5415,7 @@ static const uint32_t* mmbn_live_view(Emu* live, const char* rom) {
 		}
 		return NULL;
 	}
-	if (m->failed || !m->done) return NULL; /* (the logo meanwhile: it's quick) */
+	if (!__atomic_load_n(&m->done, __ATOMIC_ACQUIRE) || m->failed) return NULL; /* (the logo meanwhile: it's quick) */
 	/* a third of the size: each pixel the mean of 3x3 of the picture's,
 	 * centred on MegaMan (his screen position: x + y, (y - x) / 2 - z), but
 	 * kept within the area's edges; an area smaller than the screen in
