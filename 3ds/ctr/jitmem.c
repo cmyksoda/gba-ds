@@ -337,8 +337,24 @@ uint64_t jitFlushTicks;
 uint32_t jitFlushCalls;
 bool jitStatsOn;
 
+/* The threads whose code changes wait for one flush of both whole caches (jitHostFlushBatch), each told apart by its
+ * TLS base and with whether it made any: the game's and the hidden copy's machines can reclaim at the same time. */
+static struct {
+	void* thread;
+	bool pending;
+} batches[2];
+
 static void flush_code(void* start, void* end);
 void jitHostFlushCode(void* start, void* end) {
+	if (batches[0].thread || batches[1].thread) {
+		void* const self = getThreadLocalStorage();
+		for (int i = 0; i < 2; ++i) {
+			if (batches[i].thread == self) {
+				batches[i].pending = true;
+				return;
+			}
+		}
+	}
 	if (!jitStatsOn) {
 		flush_code(start, end);
 		return;
@@ -347,6 +363,37 @@ void jitHostFlushCode(void* start, void* end) {
 	flush_code(start, end);
 	jitFlushTicks += svcGetSystemTick() - began;
 	++jitFlushCalls;
+}
+
+/* On hardware only: Azahar has no svcCustomBackdoor, and a whole invalidate there drops all its own recompiled code. */
+void jitHostFlushBatch(bool on) {
+	if (isEmulator()) return;
+	void* const self = getThreadLocalStorage();
+	if (on) {
+		/* (with no slot free this thread flushes each change as it comes) */
+		take();
+		for (int i = 0; i < 2; ++i) {
+			if (!batches[i].thread) {
+				batches[i].pending = false;
+				batches[i].thread = self;
+				break;
+			}
+		}
+		LightLock_Unlock(&lock);
+		return;
+	}
+	int i = 0;
+	while (i < 2 && batches[i].thread != self) ++i;
+	if (i == 2) return;
+	bool const pending = batches[i].pending;
+	batches[i].thread = NULL;
+	if (!pending) return;
+	uint64_t const began = jitStatsOn ? svcGetSystemTick() : 0;
+	ctrFlushCachesKernel();
+	if (jitStatsOn) {
+		jitFlushTicks += svcGetSystemTick() - began;
+		++jitFlushCalls;
+	}
 }
 
 static void flush_code(void* start, void* end) {
