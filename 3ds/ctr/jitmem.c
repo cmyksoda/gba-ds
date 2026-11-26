@@ -385,8 +385,11 @@ void jitHostFlushBatch(bool on) {
 	int i = 0;
 	while (i < 2 && batches[i].thread != self) ++i;
 	if (i == 2) return;
+	/* (under the lock, so another thread can't claim the slot, and clear pending, before it is read) */
+	take();
 	bool const pending = batches[i].pending;
 	batches[i].thread = NULL;
+	LightLock_Unlock(&lock);
 	if (!pending) return;
 	uint64_t const began = jitStatsOn ? svcGetSystemTick() : 0;
 	ctrFlushCachesKernel();
