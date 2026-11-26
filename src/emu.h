@@ -62,7 +62,8 @@ typedef struct Emu {
 	uint32_t fbPitch;      /* the words a row of fb has (0: GBA_W; raw_picture's pictures have rows 256 apart); emu_fb() gives GBA_W rows whatever this is */
 	uint32_t* fbCompact;   /* fb in GBA_W rows, made by emu_fb() when fb has other rows (valid while fbCompactOk) */
 	bool fbCompactOk;
-	bool fbPainted; /* fb written by emu_fb_put, emu_fb_put_run or emu_fb_set since its frame was made (emu_bright_samples) */
+	bool fbPainted; /* fb written by emu_fb_put, emu_fb_put_run or emu_fb_set since its frame was made (emu_bright_samples);
+	                 * anything else that paints fb must set it too, or frame_is_dark gets the workers' count of the old picture */
 	unsigned fbCompactCopies; /* how many copies emu_fb() made (each costs the game thread a read of the whole picture) */
 #ifdef COLOR_16_BIT
 	/* libmgba with 16-bit pixels (RGB565): mGBA draws into fb16; fb is made from it by emu_fb() */

@@ -865,7 +865,7 @@ static uint32_t colour_8888(uint16_t v);
 static void widen_tables(void);
 static void widen_row(uint32_t* dst, const uint16_t* src);
 /* Each wide buffer's bright samples (emu_bright) row by row, counted by the worker that widens the row while its source
- * is in that worker's cache; 0xFF: a row not widened yet. */
+ * is in that worker's cache; 0xFF: a row not widened yet (set only at open: every frame widens all 160 rows, so none goes stale). */
 static const uint32_t* brightBase[2];
 static uint8_t brightRows[2][GBA_H];
 
