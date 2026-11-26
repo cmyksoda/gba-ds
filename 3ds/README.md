@@ -5,7 +5,8 @@ two screens: the game on the top screen, the second screen and the touch screen 
 It builds on ratherDashing's 3DS port ([ratherDashing/gba-ds](https://github.com/ratherDashing/gba-ds),
 branch `3ds`), whose 3DS layer it keeps.
 
-It's an alpha, tested in the Azahar emulator and not yet on a console with this core (see the end).
+It's an alpha, tested in the Azahar emulator and benchmarked on a New 2DS XL (81 games, 2026-11-25; see "What has and
+hasn't been tested").
 
 It is the same app: `src/` (the game list, the menus, the per-game profiles, map captures on a hidden
 copy of the game) builds for the 3DS with `#ifdef __3DS__` changes in six of its files, on the same libmgba as
@@ -155,12 +156,12 @@ the game list comes up, and this run's when the app closes. Build without `LOG_U
 The `.3dsx` started from the Homebrew Launcher gets the 64 MB mode: a heap of 41,568 KiB (2026-11-12). The bench's
 programs on a New 2DS XL had 87,480 KiB with 0.0.6-alpha. GBA DS 1.6's program is 12 MiB larger (pictures and buffers
 its profiles keep for the whole run, Harvest Moon's 4 MiB canvas among them, and the interface's fonts), so
-0.0.7-alpha's heap is about 75 MiB there, and so about 29 MiB in the 64 MB mode, after 12 MiB of linear memory for the
-GPU and the sound. The game's ROM, the recompiler's code (what is left after the ROM and 15 MiB kept for the rest, up
-to 16 MiB: about 13 MiB with Mario Kart; 22 MiB kept for a game with a hidden copy: about 8 MiB with Yoshi's Island,
-12 MiB with MOTHER 3; up to 24 MiB when the heap has 8 MiB to spare beyond that), the hidden copy and its code share
-it. When the heap runs low, each machine's recompiler empties its own code memory (`jitHostMemoryLow`, counted per
-thread).
+0.0.7-alpha's heap is about 73.6 MiB there (75,356 KiB in the bench's 81 launches, 2026-11-25), and so about 29 MiB in
+the 64 MB mode, after 12 MiB of linear memory for the GPU and the sound. The game's ROM, the recompiler's code (five
+sevenths of what is left after the ROM and 15 MiB kept for the rest, or 22 MiB for a game with a hidden copy, up to
+16 MiB; up to 24 MiB when the heap has 8 MiB to spare beyond that: in those 81 launches 21 games had 24 MiB, Mario Kart
+among them, 57 had 16 MiB and the three 32 MiB games 12 MiB), the hidden copy and its code share it. When the heap runs
+low, each machine's recompiler empties its own code memory (`jitHostMemoryLow`, counted per thread).
 
 The hidden copy's code memory, and that of the other copies a profile runs, is `armgba_copy_code_mib`: `auto` by
 default, which is 8 MiB (with 4 the hidden copy kept filling it and starting over), but 4 MiB while a game whose ROM
@@ -207,7 +208,12 @@ with 0.0.1-alpha; 0.0.2-alpha's fix (see "What isn't there") has been checked in
 Azahar, not yet on a console.
 
 0.0.7-alpha (2026-11-24: GBA DS 1.6.2-dev and armGBA-3DS 1.0, which is
-upstream armGBA 2.0's core) has not been on a console yet. On the desktop:
+upstream armGBA 2.0's core) has been benchmarked on a New 2DS XL (2026-11-25), beside
+ratherDashing's plain 0.0.7-alpha: 81 games, each in a fresh launch of the
+program, playing its bench route from the GBA's power-on with no save. On this
+branch all 81 start and play their routes, the three 32 MiB games among them
+(they don't start on the plain 0.0.7-alpha's heap), and all 81 again one after
+another in a single launch (180 minutes). On the desktop:
 all 57 play scripts ran to the end on libmgba and on armGBA drawn as the 3DS
 draws (`3ds/test/dualrun.py --runs mgba,armgba-3ds`), with the two emulators'
 screens as close as before the merge, shot for shot (the scripts swap the
@@ -233,14 +239,17 @@ apart). Two games' second screens were wrong on armGBA and are fixed (Harry
 Potter and the Prisoner of Azkaban's, Super Mario Advance's). In Azahar: the
 game list, Pokémon Pinball on its table, and the menus' options.
 
-Not tested on a console: most games' speed. Where a profile depends on exactly
-how mGBA times something, armGBA may differ: the two emulators drift a few
-frames apart within a minute of play (a game's timing, not its picture), so a
-second screen that changes on a particular frame may change a frame or two
-later. The 32 MiB games with a hidden copy (MOTHER 3, Kingdom Hearts: Chain of
-Memories, Yu-Gi-Oh! Ultimate Masters 2006) play their bench routes in Azahar with the
-console's heap, and one after another in one run (Kingdom Hearts and Ultimate Masters whole, then
-MOTHER 3; 2026-11-25); not yet on a console.
+Where a profile depends on exactly how mGBA times something, armGBA may
+differ: the two emulators drift a few frames apart within a minute of play (a
+game's timing, not its picture), so a second screen that changes on a
+particular frame may change a frame or two later. The 32 MiB games with a
+hidden copy (MOTHER 3, Kingdom Hearts: Chain of Memories, Yu-Gi-Oh! Ultimate
+Masters 2006) play their bench routes in Azahar with the console's heap, and
+one after another in one run (Kingdom Hearts and Ultimate Masters whole, then
+MOTHER 3; 2026-11-25); on a New 2DS XL too, with the bench programs' heap,
+each from a fresh launch and all three in the single launch of the 81 games
+(Kingdom Hearts and Ultimate Masters first, MOTHER 3 second to last;
+2026-11-25). Not in the 64 MB mode (see Memory).
 
 In the Azahar emulator with the 3DS app on the mGBA core (2126.2, a New 3DS whose CPU it runs at 268 MHz, a third of
 the console's 804), with the heap kept to the console's size:
@@ -391,6 +400,21 @@ Pictures go to the GPU's copy engine through two buffers in turn
 (`SDL_UpdateTexture`): with one, the game's picture was written over the
 second screen's while the copy was still reading it (a torn status screen on
 the console; Azahar's copies finish at once).
+
+## Speed (live maps)
+
+Baldur's Gate: Dark Alliance's second screen and Mega Man Battle Network's net
+are live maps: a copy of the game draws the whole area once, on a thread of its
+own, and every frame the second screen shows the part around the hero, each of
+its 240x160 pixels the mean of 4x4 of the map's (3x3 for MegaMan's). Those
+means were added up again every frame (614,400 pixels for Baldur's Gate, 345,600
+for Mega Man): on a New 2DS XL, 22 ms of Baldur's Gate's frame and 9 to 12 ms of
+Mega Man Battle Network 2's in the net. Now they are worked out once, when the
+area's map is made, mostly in the map's own memory, and a frame copies them: the
+same pictures, pixel for pixel. On the same console (2026-11-26) Baldur's Gate's
+second screen then took 5.2 ms a frame, with no 60-frame stretch of its route
+over 16.74 ms (211 before), and Mega Man Battle Network 2's 2.5 to 2.9 ms in the
+net (49 stretches over before, none after).
 
 ## armGBA
 
